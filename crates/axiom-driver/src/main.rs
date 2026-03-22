@@ -103,6 +103,29 @@ fn main() -> miette::Result<()> {
                         }
                     }
                 }
+                Some("llvm-ir") => {
+                    let result = axiom_parser::parse(&source);
+                    if result.has_errors() {
+                        eprintln!("--- Parse Errors ---");
+                        for err in &result.errors {
+                            eprintln!("  {err}");
+                        }
+                        return Err(miette::miette!("parsing failed with {} error(s)", result.errors.len()));
+                    }
+                    let hir_module = axiom_hir::lower(&result.module).map_err(|errors| {
+                        for err in &errors {
+                            eprintln!("  {err}");
+                        }
+                        miette::miette!("HIR lowering failed with {} error(s)", errors.len())
+                    })?;
+                    let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| {
+                        for err in &errors {
+                            eprintln!("  {err}");
+                        }
+                        miette::miette!("codegen failed with {} error(s)", errors.len())
+                    })?;
+                    println!("{llvm_ir}");
+                }
                 Some(level) => {
                     eprintln!("TODO: --emit={level} not yet implemented");
                 }

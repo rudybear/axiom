@@ -5,3 +5,9 @@ edition.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+axiom-hir = { path = "../axiom-hir" }
+
+[dev-dependencies]
+axiom-parser = { path = "../axiom-parser" }
+axiom-hir = { path = "../axiom-hir" }
+axiom-lexer = { path = "../axiom-lexer" }
