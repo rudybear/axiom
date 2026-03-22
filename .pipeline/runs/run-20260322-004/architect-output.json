@@ -1,0 +1,1060 @@
+{
+  "milestone": "M1.4-codegen",
+  "architect_agent": "claude-opus-4-6",
+  "timestamp": "2026-03-22T01:30:00Z",
+  "status": "designed",
+
+  "design_summary": "LLVM IR text generation from HIR, with zero native dependencies. Instead of using inkwell (which requires LLVM libraries installed), we generate LLVM IR as textual .ll format directly. The output can be compiled with `llc` and `clang` to produce executables. This approach gets us to working binaries faster, keeps the build dependency-free, and produces standard LLVM IR that can be verified with `llvm-as`. Migration to inkwell for optimization passes is deferred to Phase 2.",
+
+  "design_decision": {
+    "choice": "Option A — Direct LLVM IR text generation",
+    "rationale": [
+      "Zero native dependencies: no LLVM/MLIR libraries needed to build axiom-codegen",
+      "Simpler implementation: string-based IR generation is straightforward and debuggable",
+      "Full LLVM compatibility: textual IR is the canonical LLVM interchange format",
+      "Easy testing: output is plain text, trivially verified with string comparison or regex",
+      "Incremental path: can switch to inkwell in Phase 2 without changing the public API",
+      "Faster CI: no LLVM build step needed in CI pipeline"
+    ],
+    "tradeoffs": [
+      "No LLVM validation at generation time (must use llvm-as externally to verify)",
+      "No access to LLVM optimization passes (deferred to Phase 2)",
+      "Must manually track SSA register numbering",
+      "Must manually emit correct LLVM IR syntax (no type-safe builder API)"
+    ]
+  },
+
+  "architecture_overview": {
+    "data_flow": "HirModule → codegen() → String (LLVM IR text)",
+    "entry_point": "pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>>",
+    "approach": "alloca-based local variable strategy (not SSA phi nodes) for Phase 1 simplicity. LLVM's mem2reg pass will promote allocas to SSA registers when optimizing. This is the standard approach used by Clang and other frontends.",
+    "register_naming": "SSA registers use numbered temporaries (%0, %1, %2, ...) managed by a counter in CodegenContext. Named allocas use the variable name prefix (e.g., %a, %b, %temp)."
+  },
+
+  "files_to_create": [
+    {
+      "path": "crates/axiom-codegen/src/lib.rs",
+      "purpose": "Crate root — re-exports public API from submodules",
+      "detailed_spec": {
+        "overview": "Re-exports the public codegen function and error types. Declares submodules.",
+        "public_api": [
+          "pub mod error;",
+          "pub mod llvm;",
+          "pub use error::CodegenError;",
+          "pub use llvm::codegen;"
+        ],
+        "dependencies": [
+          "axiom-hir (for HirModule and all HIR types)"
+        ]
+      }
+    },
+    {
+      "path": "crates/axiom-codegen/src/error.rs",
+      "purpose": "Codegen error types with diagnostic integration",
+      "detailed_spec": {
+        "overview": "Defines CodegenError using thiserror. Each variant represents a category of code generation failure. Errors carry enough context for useful diagnostics.",
+        "types": [
+          {
+            "name": "CodegenError",
+            "definition": "pub enum CodegenError",
+            "doc": "Errors that can occur during LLVM IR code generation",
+            "variants": [
+              {
+                "name": "UnsupportedType",
+                "fields": { "ty": "String", "context": "String" },
+                "message": "unsupported type `{ty}` in {context}",
+                "doc": "A type was encountered that the codegen does not yet support (e.g., tensors, u128, bf16)"
+              },
+              {
+                "name": "UnsupportedExpression",
+                "fields": { "expr": "String", "context": "String" },
+                "message": "unsupported expression `{expr}` in {context}",
+                "doc": "An expression kind was encountered that codegen does not yet handle"
+              },
+              {
+                "name": "UnsupportedStatement",
+                "fields": { "stmt": "String", "context": "String" },
+                "message": "unsupported statement `{stmt}` in {context}",
+                "doc": "A statement kind was encountered that codegen does not yet handle"
+              },
+              {
+                "name": "UndefinedVariable",
+                "fields": { "name": "String" },
+                "message": "undefined variable `{name}`",
+                "doc": "A variable was referenced that has no alloca in the current scope"
+              },
+              {
+                "name": "UndefinedFunction",
+                "fields": { "name": "String" },
+                "message": "undefined function `{name}`",
+                "doc": "A function was called that has not been defined or declared"
+              },
+              {
+                "name": "TypeMismatch",
+                "fields": { "expected": "String", "found": "String", "context": "String" },
+                "message": "type mismatch: expected `{expected}`, found `{found}` in {context}",
+                "doc": "Types did not match where they were expected to (e.g., return type vs actual)"
+              },
+              {
+                "name": "InvalidMain",
+                "fields": { "reason": "String" },
+                "message": "invalid main function: {reason}",
+                "doc": "The main function has an invalid signature"
+              },
+              {
+                "name": "InternalError",
+                "fields": { "message": "String" },
+                "message": "internal codegen error: {message}",
+                "doc": "An internal invariant was violated — this is a compiler bug"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "path": "crates/axiom-codegen/src/llvm.rs",
+      "purpose": "LLVM IR text generator — the core of M1.4",
+      "detailed_spec": {
+        "overview": "Generates valid LLVM IR text from an HirModule. Uses alloca-based strategy for local variables. Manages SSA register numbering with a monotonic counter. Handles built-in functions (print, print_i64, widen, range) specially.",
+
+        "internal_types": [
+          {
+            "name": "CodegenContext",
+            "doc": "Mutable state for IR generation",
+            "fields": {
+              "output": "String — accumulated LLVM IR text",
+              "next_reg": "u32 — next SSA register number for unnamed temporaries",
+              "next_label": "u32 — next label number for basic blocks",
+              "variables": "HashMap<String, VarInfo> — maps variable names to their alloca info",
+              "functions": "HashMap<String, FuncInfo> — maps function names to their signatures",
+              "string_literals": "Vec<String> — collected string constants for global declarations",
+              "errors": "Vec<CodegenError> — collected errors"
+            }
+          },
+          {
+            "name": "VarInfo",
+            "doc": "Information about an alloca'd variable",
+            "fields": {
+              "alloca_name": "String — the LLVM name of the alloca (e.g., %a)",
+              "llvm_type": "String — the LLVM type (e.g., i64)"
+            }
+          },
+          {
+            "name": "FuncInfo",
+            "doc": "Information about a function's signature",
+            "fields": {
+              "return_type": "String — LLVM return type",
+              "param_types": "Vec<String> — LLVM parameter types"
+            }
+          },
+          {
+            "name": "LlvmValue",
+            "doc": "Result of emitting an expression — an SSA register name or immediate",
+            "fields": {
+              "reg": "String — the register name (e.g., %3) or literal (e.g., 42)",
+              "ty": "String — the LLVM type (e.g., i32, i64, float, double)"
+            }
+          }
+        ],
+
+        "public_functions": [
+          {
+            "signature": "pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>>",
+            "doc": "Generate LLVM IR text from an HIR module. Returns the complete .ll file content on success.",
+            "algorithm": [
+              "1. Create CodegenContext",
+              "2. First pass: register all function signatures in ctx.functions",
+              "3. Register built-in function signatures (printf, puts)",
+              "4. Emit module header: target triple, target datalayout",
+              "5. For each function in module.functions: call emit_function()",
+              "6. Emit string literal global constants",
+              "7. Emit external function declarations (printf, puts)",
+              "8. If errors is empty, return Ok(output), else Err(errors)"
+            ]
+          }
+        ],
+
+        "internal_functions": [
+          {
+            "name": "emit_function",
+            "signature": "fn emit_function(&mut self, func: &HirFunction)",
+            "algorithm": [
+              "1. Reset next_reg to 0, clear variables scope",
+              "2. Emit `define {ret_type} @{name}({params}) {`",
+              "3. Emit entry label",
+              "4. For each parameter: emit alloca, store param into alloca, register in variables",
+              "5. Emit block statements via emit_block()",
+              "6. Emit `}`"
+            ]
+          },
+          {
+            "name": "emit_block",
+            "signature": "fn emit_block(&mut self, block: &HirBlock)",
+            "algorithm": [
+              "For each statement in block.stmts: call emit_stmt()"
+            ]
+          },
+          {
+            "name": "emit_stmt",
+            "signature": "fn emit_stmt(&mut self, stmt: &HirStmt)",
+            "algorithm": [
+              "Match on stmt.kind:",
+              "- Let: emit alloca for variable type, emit expression, store result, register in variables",
+              "- Assign: look up target variable alloca, emit value expression, store",
+              "- Return: emit value expression, emit `ret {type} {value}`",
+              "- If: emit condition, emit `br i1 {cond}, label %then_N, label %else_N` (or %merge_N if no else), emit then block, emit br to merge, emit else block if present, emit merge label",
+              "- For: recognize range(start, end) pattern, emit alloca for loop var, store start, branch to cond block, emit comparison, branch to body or merge, emit body, increment, branch back to cond",
+              "- Expr: emit expression (for side effects like function calls)",
+              "- While: emit cond label, emit condition, br to body or merge, emit body, br to cond"
+            ]
+          },
+          {
+            "name": "emit_expr",
+            "signature": "fn emit_expr(&mut self, expr: &HirExpr) -> LlvmValue",
+            "algorithm": [
+              "Match on expr.kind:",
+              "- IntLiteral: return LlvmValue with literal string and i64 type (default) or contextual type",
+              "- FloatLiteral: return LlvmValue with literal string and double type",
+              "- BoolLiteral: return LlvmValue with 0 or 1 and i1 type",
+              "- StringLiteral: add to string_literals vec, return pointer to global constant",
+              "- Ident: look up in variables, emit load from alloca, return loaded register",
+              "- BinaryOp: emit lhs, emit rhs, emit appropriate instruction (see binary_op_table), return result register",
+              "- UnaryOp: Neg → sub 0, operand; Not → xor operand, 1 (for i1)",
+              "- Call: dispatch to built-in handlers or emit generic call instruction"
+            ]
+          },
+          {
+            "name": "emit_builtin_call",
+            "signature": "fn emit_builtin_call(&mut self, name: &str, args: &[HirExpr]) -> LlvmValue",
+            "doc": "Handle built-in function calls that need special codegen",
+            "builtins": {
+              "print(msg: str)": "Emit call to puts() with the string constant pointer",
+              "print_i64(n: i64)": "Emit call to printf() with format string \"%lld\\n\" and the i64 value",
+              "widen(n: i32)": "Emit sext i32 {n} to i64",
+              "range(start, end)": "NOT emitted as a call — recognized and lowered in emit_stmt For handler"
+            }
+          },
+          {
+            "name": "fresh_reg",
+            "signature": "fn fresh_reg(&mut self) -> String",
+            "doc": "Return next numbered register like %0, %1, %2 and increment counter"
+          },
+          {
+            "name": "fresh_label",
+            "signature": "fn fresh_label(&mut self, prefix: &str) -> String",
+            "doc": "Return next numbered label like then.0, else.0, merge.0 and increment counter"
+          },
+          {
+            "name": "hir_type_to_llvm",
+            "signature": "fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError>",
+            "doc": "Convert HIR type to LLVM IR type string",
+            "mapping": {
+              "PrimitiveType::I8": "i8",
+              "PrimitiveType::I16": "i16",
+              "PrimitiveType::I32": "i32",
+              "PrimitiveType::I64": "i64",
+              "PrimitiveType::I128": "i128",
+              "PrimitiveType::U8": "i8 (unsigned semantics tracked separately)",
+              "PrimitiveType::U16": "i16",
+              "PrimitiveType::U32": "i32",
+              "PrimitiveType::U64": "i64",
+              "PrimitiveType::U128": "i128",
+              "PrimitiveType::F32": "float",
+              "PrimitiveType::F64": "double",
+              "PrimitiveType::Bool": "i1",
+              "PrimitiveType::F16": "half (Phase 2)",
+              "PrimitiveType::Bf16": "bfloat (Phase 2)",
+              "HirType::Tensor/Array/Slice/Ptr/Tuple/Fn/UserDefined": "CodegenError::UnsupportedType"
+            }
+          }
+        ],
+
+        "binary_op_table": {
+          "description": "Mapping from (BinOp, type_category) to LLVM instruction. Integer vs float is determined by the LlvmValue.ty of operands.",
+          "integer_ops": {
+            "Add": "add",
+            "Sub": "sub",
+            "Mul": "mul",
+            "Div": "sdiv (signed) / udiv (unsigned)",
+            "Mod": "srem (signed) / urem (unsigned)",
+            "AddWrap": "add (wrapping is default in LLVM)",
+            "AddSat": "call @llvm.sadd.sat.iN (Phase 2, error for now)",
+            "SubWrap": "sub",
+            "SubSat": "call @llvm.ssub.sat.iN (Phase 2, error for now)",
+            "MulWrap": "mul",
+            "Eq": "icmp eq",
+            "NotEq": "icmp ne",
+            "Lt": "icmp slt (signed) / icmp ult (unsigned)",
+            "Gt": "icmp sgt (signed) / icmp ugt (unsigned)",
+            "LtEq": "icmp sle (signed) / icmp ule (unsigned)",
+            "GtEq": "icmp sge (signed) / icmp uge (unsigned)",
+            "And": "and",
+            "Or": "or"
+          },
+          "float_ops": {
+            "Add": "fadd",
+            "Sub": "fsub",
+            "Mul": "fmul",
+            "Div": "fdiv",
+            "Mod": "frem",
+            "Eq": "fcmp oeq",
+            "NotEq": "fcmp one",
+            "Lt": "fcmp olt",
+            "Gt": "fcmp ogt",
+            "LtEq": "fcmp ole",
+            "GtEq": "fcmp oge"
+          },
+          "notes": "Phase 1 treats all integer types as signed (uses sdiv, srem, icmp slt, etc.). Unsigned distinction will be tracked in Phase 2 when we add signedness to the type mapping."
+        },
+
+        "for_loop_lowering": {
+          "description": "The `for i: i32 in range(start, end)` pattern is recognized and lowered to a counted loop.",
+          "recognition": "The iterable expression must be a Call to an Ident named 'range' with 1 or 2 arguments. range(end) means range(0, end). range(start, end) means [start, end).",
+          "llvm_pattern": [
+            "; for i: i32 in range(start, end)",
+            "  %i = alloca i32",
+            "  store i32 {start}, ptr %i",
+            "  br label %for.cond.N",
+            "",
+            "for.cond.N:",
+            "  %i.val = load i32, ptr %i",
+            "  %cmp = icmp slt i32 %i.val, {end}",
+            "  br i1 %cmp, label %for.body.N, label %for.end.N",
+            "",
+            "for.body.N:",
+            "  ; ... body statements ...",
+            "  %i.next = add i32 %i.val, 1        ; or reload and add",
+            "  store i32 %i.next, ptr %i",
+            "  br label %for.cond.N",
+            "",
+            "for.end.N:"
+          ]
+        },
+
+        "if_else_lowering": {
+          "description": "If/else is lowered using conditional branches and labels. Uses alloca-based approach, no phi nodes needed.",
+          "llvm_pattern_with_else": [
+            "  %cond = ... ; emit condition expression",
+            "  br i1 %cond, label %then.N, label %else.N",
+            "",
+            "then.N:",
+            "  ; ... then block statements ...",
+            "  br label %merge.N",
+            "",
+            "else.N:",
+            "  ; ... else block statements ...",
+            "  br label %merge.N",
+            "",
+            "merge.N:"
+          ],
+          "llvm_pattern_without_else": [
+            "  %cond = ... ; emit condition expression",
+            "  br i1 %cond, label %then.N, label %merge.N",
+            "",
+            "then.N:",
+            "  ; ... then block statements ...",
+            "  br label %merge.N",
+            "",
+            "merge.N:"
+          ],
+          "return_in_branches": "If both branches have a return statement, the merge block may be unreachable. We still emit it with `unreachable` to maintain valid LLVM IR. Alternatively, we track whether a block has been terminated and skip the trailing br."
+        },
+
+        "return_handling": {
+          "description": "Return statements emit `ret {type} {value}`. After a ret, no further instructions should be emitted in the same basic block. The codegen must track whether the current block has been terminated.",
+          "early_return": "When `return` appears inside an if/else block, the ret terminates that block. The branch to merge is suppressed. The merge block is still emitted but may contain only `unreachable` or may be dead."
+        }
+      }
+    }
+  ],
+
+  "files_to_modify": [
+    {
+      "path": "crates/axiom-codegen/Cargo.toml",
+      "purpose": "Add axiom-hir dependency",
+      "changes": [
+        {
+          "description": "Add axiom-hir as a path dependency",
+          "new_content": "[dependencies]\nthiserror.workspace = true\naxiom-hir = { path = \"../axiom-hir\" }"
+        }
+      ]
+    },
+    {
+      "path": "crates/axiom-driver/Cargo.toml",
+      "purpose": "Add axiom-codegen dependency",
+      "changes": [
+        {
+          "description": "Add axiom-codegen as a path dependency (if not already present)",
+          "action": "Add `axiom-codegen = { path = \"../axiom-codegen\" }` to [dependencies]"
+        }
+      ]
+    },
+    {
+      "path": "crates/axiom-driver/src/main.rs",
+      "purpose": "Wire up --emit=llvm-ir and full compilation pipeline",
+      "changes": [
+        {
+          "description": "Add the llvm-ir emit path after the hir path",
+          "location": "In the match arm for Some(\"llvm-ir\") and None (full compile)",
+          "algorithm": [
+            "1. Parse source → AST",
+            "2. Lower AST → HIR",
+            "3. Call axiom_codegen::codegen(&hir_module)",
+            "4. For --emit=llvm-ir: print the LLVM IR string to stdout",
+            "5. For full compile (no --emit): write .ll to temp file, invoke clang/llc to compile to binary"
+          ],
+          "new_code_sketch": [
+            "Some(\"llvm-ir\") => {",
+            "    let result = axiom_parser::parse(&source);",
+            "    // ... error checking ...",
+            "    let hir_module = axiom_hir::lower(&result.module).map_err(|errs| ...)?;",
+            "    let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errs| ...)?;",
+            "    println!(\"{}\", llvm_ir);",
+            "}"
+          ]
+        }
+      ]
+    }
+  ],
+
+  "example_outputs": {
+    "hello.axm": {
+      "input": "@module hello;\n@intent(\"Print greeting to stdout\");\n\nfn main() -> i32 {\n    print(\"Hello from AXIOM!\");\n    return 0;\n}",
+      "expected_llvm_ir": [
+        "; ModuleID = 'hello'",
+        "source_filename = \"hello\"",
+        "target triple = \"x86_64-pc-windows-msvc\"",
+        "",
+        "@.str.0 = private unnamed_addr constant [18 x i8] c\"Hello from AXIOM!\\00\"",
+        "",
+        "define i32 @main() {",
+        "entry:",
+        "  %0 = call i32 @puts(ptr @.str.0)",
+        "  ret i32 0",
+        "}",
+        "",
+        "declare i32 @puts(ptr)"
+      ]
+    },
+    "fibonacci.axm": {
+      "input": "@module fibonacci;\n@intent(\"Compute Nth Fibonacci number iteratively\");\n\n@pure\n@complexity O(n)\nfn fib(n: i32) -> i64 {\n    if n <= 1 {\n        return widen(n);\n    }\n    let a: i64 = 0;\n    let b: i64 = 1;\n    for i: i32 in range(2, n + 1) {\n        let temp: i64 = b;\n        b = a + b;\n        a = temp;\n    }\n    return b;\n}\n\nfn main() -> i32 {\n    let result: i64 = fib(40);\n    print_i64(result);\n    return 0;\n}",
+      "expected_llvm_ir": [
+        "; ModuleID = 'fibonacci'",
+        "source_filename = \"fibonacci\"",
+        "target triple = \"x86_64-pc-windows-msvc\"",
+        "",
+        "@.fmt.i64 = private unnamed_addr constant [6 x i8] c\"%lld\\0A\\00\"",
+        "",
+        "define i64 @fib(i32 %n) {",
+        "entry:",
+        "  %n.addr = alloca i32",
+        "  store i32 %n, ptr %n.addr",
+        "",
+        "  ; if n <= 1",
+        "  %0 = load i32, ptr %n.addr",
+        "  %1 = icmp sle i32 %0, 1",
+        "  br i1 %1, label %then.0, label %merge.0",
+        "",
+        "then.0:",
+        "  ; return widen(n)",
+        "  %2 = load i32, ptr %n.addr",
+        "  %3 = sext i32 %2 to i64",
+        "  ret i64 %3",
+        "",
+        "merge.0:",
+        "  ; let a: i64 = 0",
+        "  %a = alloca i64",
+        "  store i64 0, ptr %a",
+        "",
+        "  ; let b: i64 = 1",
+        "  %b = alloca i64",
+        "  store i64 1, ptr %b",
+        "",
+        "  ; for i: i32 in range(2, n + 1)",
+        "  %i = alloca i32",
+        "  %4 = load i32, ptr %n.addr",
+        "  %5 = add i32 %4, 1",
+        "  store i32 2, ptr %i",
+        "  br label %for.cond.0",
+        "",
+        "for.cond.0:",
+        "  %6 = load i32, ptr %i",
+        "  %7 = icmp slt i32 %6, %5",
+        "  br i1 %7, label %for.body.0, label %for.end.0",
+        "",
+        "for.body.0:",
+        "  ; let temp: i64 = b",
+        "  %temp = alloca i64",
+        "  %8 = load i64, ptr %b",
+        "  store i64 %8, ptr %temp",
+        "",
+        "  ; b = a + b",
+        "  %9 = load i64, ptr %a",
+        "  %10 = load i64, ptr %b",
+        "  %11 = add i64 %9, %10",
+        "  store i64 %11, ptr %b",
+        "",
+        "  ; a = temp",
+        "  %12 = load i64, ptr %temp",
+        "  store i64 %12, ptr %a",
+        "",
+        "  ; increment loop variable",
+        "  %13 = load i32, ptr %i",
+        "  %14 = add i32 %13, 1",
+        "  store i32 %14, ptr %i",
+        "  br label %for.cond.0",
+        "",
+        "for.end.0:",
+        "  ; return b",
+        "  %15 = load i64, ptr %b",
+        "  ret i64 %15",
+        "}",
+        "",
+        "define i32 @main() {",
+        "entry:",
+        "  ; let result: i64 = fib(40)",
+        "  %result = alloca i64",
+        "  %0 = call i64 @fib(i32 40)",
+        "  store i64 %0, ptr %result",
+        "",
+        "  ; print_i64(result)",
+        "  %1 = load i64, ptr %result",
+        "  %2 = call i32 (ptr, ...) @printf(ptr @.fmt.i64, i64 %1)",
+        "",
+        "  ret i32 0",
+        "}",
+        "",
+        "declare i32 @printf(ptr, ...)",
+        "declare i32 @puts(ptr)"
+      ],
+      "notes": [
+        "Register numbers reset per function (each function has its own counter starting from %0)",
+        "Named allocas (%a, %b, %temp, %i, %result) use the variable name for readability",
+        "Named allocas do NOT consume a numbered register — the name IS the register",
+        "The for loop end bound (n+1) is computed once BEFORE the loop and stored in a register",
+        "widen(n) is lowered to sext (sign-extend) i32 to i64",
+        "print_i64(n) is lowered to printf(\"%lld\\n\", n)",
+        "Comments are included for readability but are optional",
+        "Annotations (@pure, @complexity, @intent, @module) are ignored during codegen in Phase 1",
+        "The `if n <= 1 { return widen(n); }` has no else, so we branch to then.0 or merge.0 directly",
+        "Since then.0 ends with ret, no `br label %merge.0` is needed after it"
+      ]
+    }
+  },
+
+  "llvm_ir_format_spec": {
+    "module_header": {
+      "template": [
+        "; ModuleID = '{module_name}'",
+        "source_filename = \"{module_name}\"",
+        "target triple = \"{target_triple}\""
+      ],
+      "target_triple_detection": "Use cfg!(target_os) and cfg!(target_arch) at compile time, or default to x86_64-pc-linux-gnu. On Windows, use x86_64-pc-windows-msvc.",
+      "note": "target datalayout is optional for Phase 1 — LLVM can infer it from target triple"
+    },
+
+    "function_definition": {
+      "template": "define {return_type} @{name}({params}) {\nentry:\n  {body}\n}",
+      "param_format": "{type} %{name}",
+      "multiple_params": "comma-separated: i32 %n, i64 %m"
+    },
+
+    "external_declarations": {
+      "printf": "declare i32 @printf(ptr, ...)",
+      "puts": "declare i32 @puts(ptr)",
+      "note": "Only emit declarations for external functions actually used"
+    },
+
+    "string_constants": {
+      "template": "@.str.{N} = private unnamed_addr constant [{len} x i8] c\"{escaped}\\00\"",
+      "escaping": "Newlines → \\0A, tabs → \\09, null → \\00, backslash → \\5C, quotes → \\22",
+      "len_includes_null": true,
+      "example": "@.str.0 = private unnamed_addr constant [18 x i8] c\"Hello from AXIOM!\\00\""
+    },
+
+    "format_strings": {
+      "i64_format": "@.fmt.i64 = private unnamed_addr constant [6 x i8] c\"%lld\\0A\\00\"",
+      "i32_format": "@.fmt.i32 = private unnamed_addr constant [4 x i8] c\"%d\\0A\\00\"",
+      "f64_format": "@.fmt.f64 = private unnamed_addr constant [4 x i8] c\"%f\\0A\\00\"",
+      "note": "Only emit format strings that are actually used"
+    },
+
+    "alloca_instruction": {
+      "template": "%{name} = alloca {type}",
+      "note": "All allocas should be in the entry block for mem2reg compatibility"
+    },
+
+    "store_instruction": {
+      "template": "store {type} {value}, ptr %{target}"
+    },
+
+    "load_instruction": {
+      "template": "%{reg} = load {type}, ptr %{source}"
+    },
+
+    "arithmetic_instructions": {
+      "integer": "%{reg} = {op} {type} {lhs}, {rhs}",
+      "float": "%{reg} = {op} {type} {lhs}, {rhs}",
+      "examples": [
+        "%3 = add i32 %1, %2",
+        "%5 = mul i64 %3, %4",
+        "%7 = sdiv i32 %5, %6",
+        "%9 = fadd double %7, %8"
+      ]
+    },
+
+    "comparison_instructions": {
+      "integer": "%{reg} = icmp {pred} {type} {lhs}, {rhs}",
+      "float": "%{reg} = fcmp {pred} {type} {lhs}, {rhs}",
+      "result_type": "i1",
+      "examples": [
+        "%2 = icmp sle i32 %0, 1",
+        "%5 = icmp slt i32 %3, %4",
+        "%8 = fcmp ogt double %6, %7"
+      ]
+    },
+
+    "branch_instructions": {
+      "conditional": "br i1 {cond}, label %{true_label}, label %{false_label}",
+      "unconditional": "br label %{target}",
+      "examples": [
+        "br i1 %1, label %then.0, label %merge.0",
+        "br label %for.cond.0"
+      ]
+    },
+
+    "call_instruction": {
+      "with_return": "%{reg} = call {ret_type} @{func_name}({arg_type} {arg_val}, ...)",
+      "void_call": "call void @{func_name}({arg_type} {arg_val}, ...)",
+      "variadic": "%{reg} = call {ret_type} (ptr, ...) @{func_name}(ptr {str}, {arg_type} {arg_val})",
+      "examples": [
+        "%0 = call i64 @fib(i32 40)",
+        "%1 = call i32 @puts(ptr @.str.0)",
+        "%2 = call i32 (ptr, ...) @printf(ptr @.fmt.i64, i64 %1)"
+      ]
+    },
+
+    "conversion_instructions": {
+      "sext": "%{reg} = sext {from_type} {value} to {to_type}",
+      "zext": "%{reg} = zext {from_type} {value} to {to_type}",
+      "trunc": "%{reg} = trunc {from_type} {value} to {to_type}",
+      "sitofp": "%{reg} = sitofp {from_type} {value} to {to_type}",
+      "fptosi": "%{reg} = fptosi {from_type} {value} to {to_type}",
+      "examples": [
+        "%3 = sext i32 %2 to i64",
+        "%5 = trunc i64 %4 to i32"
+      ],
+      "usage": {
+        "widen(n: i32) → i64": "sext i32 %n to i64 (sign-extend for signed types)",
+        "narrow(n: i64) → i32 (Phase 2)": "trunc i64 %n to i32",
+        "truncate(n: i64) → i32 (Phase 2)": "trunc i64 %n to i32"
+      }
+    },
+
+    "return_instruction": {
+      "template": "ret {type} {value}",
+      "examples": [
+        "ret i32 0",
+        "ret i64 %15"
+      ]
+    }
+  },
+
+  "scope_and_variable_management": {
+    "strategy": "Flat HashMap with variable shadowing by overwrite for Phase 1. Nested scopes (e.g., for-loop body introducing `temp`) simply add to the same map. Since AXIOM has explicit types and no closures in Phase 1, this is sufficient.",
+    "named_vs_numbered_registers": "Variable allocas use the variable name as the register name (%a, %b, %temp). Intermediate computation results use numbered registers (%0, %1, %2). Named registers and numbered registers occupy separate namespaces in LLVM IR.",
+    "param_handling": "Function parameters arrive as SSA values (%name). We immediately alloca+store them so they can be treated uniformly as variables. The alloca name uses the param name with a .addr suffix (e.g., %n.addr) to avoid collision with the parameter name.",
+    "loop_body_allocas": "In Phase 1, allocas inside loop bodies are emitted where they appear. This is technically suboptimal (alloca in a loop = stack growth), but LLVM's mem2reg and SROA passes handle this correctly. Phase 2 can hoist allocas to entry block."
+  },
+
+  "built_in_functions": {
+    "print": {
+      "axiom_signature": "fn print(msg: string) -> void",
+      "lowering": "Calls C puts() with a pointer to a null-terminated string constant",
+      "llvm_ir": "%0 = call i32 @puts(ptr @.str.N)",
+      "notes": "The string is stored as a global constant. puts() adds a newline automatically."
+    },
+    "print_i64": {
+      "axiom_signature": "fn print_i64(n: i64) -> void",
+      "lowering": "Calls C printf() with format string \"%lld\\n\"",
+      "llvm_ir": "%0 = call i32 (ptr, ...) @printf(ptr @.fmt.i64, i64 %1)",
+      "notes": "Format string uses %lld for 64-bit signed integer. \\0A is newline."
+    },
+    "widen": {
+      "axiom_signature": "fn widen(n: i32) -> i64",
+      "lowering": "Emits sext (sign-extend) instruction",
+      "llvm_ir": "%0 = sext i32 %n to i64",
+      "notes": "Phase 1 only supports i32→i64. Phase 2 will generalize to arbitrary widening."
+    },
+    "range": {
+      "axiom_signature": "fn range(start: i32, end: i32) -> iterator",
+      "lowering": "NOT emitted as a function call. Recognized syntactically in the for-loop lowering. The start and end expressions are extracted and used as loop bounds.",
+      "notes": "range(end) is sugar for range(0, end). Both forms must be recognized."
+    }
+  },
+
+  "testing_plan": {
+    "unit_tests": [
+      {
+        "name": "test_empty_module",
+        "description": "Empty module generates valid LLVM IR module with just header",
+        "input": "HirModule with no functions",
+        "expected": "Module header only, no defines"
+      },
+      {
+        "name": "test_main_return_zero",
+        "description": "Simplest possible function: main() returning 0",
+        "input": "fn main() -> i32 { return 0; }",
+        "expected_contains": ["define i32 @main()", "ret i32 0"]
+      },
+      {
+        "name": "test_numeric_types",
+        "description": "Type mapping for all supported numeric types",
+        "tests": [
+          "i8 → i8", "i16 → i16", "i32 → i32", "i64 → i64",
+          "f32 → float", "f64 → double", "bool → i1"
+        ]
+      },
+      {
+        "name": "test_arithmetic_ops",
+        "description": "All arithmetic operations generate correct LLVM instructions",
+        "tests": [
+          "i32 add → add i32",
+          "i32 sub → sub i32",
+          "i32 mul → mul i32",
+          "i32 div → sdiv i32",
+          "i32 mod → srem i32",
+          "f64 add → fadd double",
+          "f64 sub → fsub double",
+          "f64 mul → fmul double",
+          "f64 div → fdiv double"
+        ]
+      },
+      {
+        "name": "test_comparison_ops",
+        "description": "Comparison operations generate correct icmp/fcmp instructions",
+        "tests": [
+          "i32 == → icmp eq",
+          "i32 != → icmp ne",
+          "i32 < → icmp slt",
+          "i32 > → icmp sgt",
+          "i32 <= → icmp sle",
+          "i32 >= → icmp sge",
+          "f64 < → fcmp olt",
+          "f64 == → fcmp oeq"
+        ]
+      },
+      {
+        "name": "test_let_binding",
+        "description": "Let binding generates alloca + store",
+        "input": "let x: i32 = 42;",
+        "expected_contains": ["%x = alloca i32", "store i32 42, ptr %x"]
+      },
+      {
+        "name": "test_variable_read",
+        "description": "Reading a variable generates load from alloca",
+        "input": "let x: i32 = 42; return x;",
+        "expected_contains": ["load i32, ptr %x"]
+      },
+      {
+        "name": "test_assignment",
+        "description": "Assignment generates store to existing alloca",
+        "input": "let mut x: i32 = 0; x = 42;",
+        "expected_contains": ["store i32 42, ptr %x"]
+      },
+      {
+        "name": "test_if_else",
+        "description": "If/else generates branch + labels",
+        "input": "if x > 0 { return 1; } else { return -1; }",
+        "expected_contains": ["icmp sgt", "br i1", "then.", "else.", "merge."]
+      },
+      {
+        "name": "test_if_no_else",
+        "description": "If without else branches to then or merge",
+        "input": "if x > 0 { return 1; }",
+        "expected_contains": ["br i1", "then.", "merge."]
+      },
+      {
+        "name": "test_for_loop",
+        "description": "For loop with range generates counted loop",
+        "input": "for i: i32 in range(0, 10) { ... }",
+        "expected_contains": ["alloca i32", "icmp slt", "for.cond.", "for.body.", "for.end.", "add i32", "br label %for.cond."]
+      },
+      {
+        "name": "test_function_call",
+        "description": "Function calls generate call instruction with correct types",
+        "input": "let r: i64 = fib(40);",
+        "expected_contains": ["call i64 @fib(i32 40)"]
+      },
+      {
+        "name": "test_function_params",
+        "description": "Function parameters are alloca'd and stored",
+        "input": "fn add(a: i32, b: i32) -> i32 { return a + b; }",
+        "expected_contains": ["%a.addr = alloca i32", "store i32 %a, ptr %a.addr", "%b.addr = alloca i32", "store i32 %b, ptr %b.addr", "add i32"]
+      },
+      {
+        "name": "test_print_string",
+        "description": "print(str) generates puts call with global string constant",
+        "input": "print(\"hello\");",
+        "expected_contains": ["@.str.", "c\"hello\\00\"", "call i32 @puts"]
+      },
+      {
+        "name": "test_print_i64",
+        "description": "print_i64(n) generates printf call with format string",
+        "input": "print_i64(result);",
+        "expected_contains": ["@.fmt.i64", "call i32 (ptr, ...) @printf"]
+      },
+      {
+        "name": "test_widen",
+        "description": "widen(n) generates sext instruction",
+        "input": "widen(n) where n: i32",
+        "expected_contains": ["sext i32", "to i64"]
+      },
+      {
+        "name": "test_unary_neg",
+        "description": "Unary negation generates sub 0, x",
+        "input": "-x where x: i32",
+        "expected_contains": ["sub i32 0,"]
+      },
+      {
+        "name": "test_unary_not",
+        "description": "Unary not generates xor x, 1",
+        "input": "not x where x: bool",
+        "expected_contains": ["xor i1", "1"]
+      },
+      {
+        "name": "test_bool_literal",
+        "description": "Boolean literals map to i1 0 and i1 1",
+        "input": "let x: bool = true; let y: bool = false;",
+        "expected": "store i1 1 and store i1 0"
+      },
+      {
+        "name": "test_nested_expressions",
+        "description": "Complex nested expressions produce correct SSA chain",
+        "input": "a + b * c",
+        "expected": "mul before add, correct register threading"
+      },
+      {
+        "name": "test_multiple_functions",
+        "description": "Multiple functions each get their own define block",
+        "input": "fn fib(...) and fn main(...)",
+        "expected": "Two define blocks, correct cross-function call"
+      },
+      {
+        "name": "test_unsupported_type_error",
+        "description": "Using unsupported type produces CodegenError::UnsupportedType",
+        "input": "HirType::Tensor{...}",
+        "expected": "Err containing UnsupportedType"
+      }
+    ],
+
+    "integration_tests": [
+      {
+        "name": "test_fibonacci_codegen",
+        "description": "fibonacci.axm produces valid LLVM IR containing all expected constructs",
+        "test_file": "tests/samples/fibonacci.axm",
+        "validation": [
+          "Output contains 'define i64 @fib(i32'",
+          "Output contains 'define i32 @main()'",
+          "Output contains 'sext i32' (for widen)",
+          "Output contains 'icmp slt i32' (for range loop)",
+          "Output contains 'call i64 @fib'",
+          "Output contains 'call i32 (ptr, ...) @printf'",
+          "Output contains 'declare i32 @printf(ptr, ...)'",
+          "Output contains 'ret i32 0' (main return)",
+          "Output contains 'ret i64' (fib return)"
+        ]
+      },
+      {
+        "name": "test_hello_codegen",
+        "description": "hello.axm produces valid LLVM IR with puts call",
+        "test_file": "tests/samples/hello.axm",
+        "validation": [
+          "Output contains 'define i32 @main()'",
+          "Output contains 'Hello from AXIOM!'",
+          "Output contains 'call i32 @puts'",
+          "Output contains 'declare i32 @puts(ptr)'",
+          "Output contains 'ret i32 0'"
+        ]
+      }
+    ],
+
+    "end_to_end_tests": [
+      {
+        "name": "test_fibonacci_e2e",
+        "description": "Full pipeline: parse → HIR → LLVM IR → llc → link → execute",
+        "prerequisite": "clang and llc on PATH (test skipped if not available)",
+        "expected_output": "102334155\n",
+        "note": "fib(40) = 102334155"
+      },
+      {
+        "name": "test_hello_e2e",
+        "description": "Full pipeline: parse → HIR → LLVM IR → llc → link → execute",
+        "prerequisite": "clang and llc on PATH",
+        "expected_output": "Hello from AXIOM!\n"
+      }
+    ]
+  },
+
+  "edge_cases_and_gotchas": [
+    {
+      "issue": "SSA register numbering with named allocas",
+      "description": "In LLVM IR, named registers (%name) and unnamed registers (%0, %1, ...) are in SEPARATE namespaces. Named allocas do NOT consume a number from the unnamed counter. However, within a function, unnamed registers must be numbered sequentially starting from 0 (or from the next number after parameters).",
+      "solution": "Track named vs numbered separately. The next_reg counter only advances for unnamed temporaries."
+    },
+    {
+      "issue": "Function parameters consume register numbers",
+      "description": "In LLVM IR, function parameters are implicitly numbered starting from %0. If a function has 2 params, the first unnamed register must be %2.",
+      "solution": "When using named parameters (%n, %a, %b), this is not an issue — named params don't consume numbered registers. We use named parameters exclusively for function params."
+    },
+    {
+      "issue": "Unreachable code after return",
+      "description": "If a return statement is inside an if-then block, subsequent code in the function is still reachable via the else/merge path. But if both if and else branches return, the merge block is unreachable.",
+      "solution": "Track whether the current block has been terminated (ret or br). If terminated, skip emitting further instructions. Emit `unreachable` in dead merge blocks if needed."
+    },
+    {
+      "issue": "Alloca in loop body",
+      "description": "Phase 1 emits `alloca` inside loop bodies (e.g., `let temp: i64 = b;` inside for loop). Each loop iteration allocates new stack space. This is technically a stack leak.",
+      "solution": "Acceptable for Phase 1. LLVM's optimization passes handle this. Phase 2 should hoist all allocas to the function entry block."
+    },
+    {
+      "issue": "Integer literal type inference",
+      "description": "HIR IntLiteral has i128 value but no type annotation. When used in `let x: i32 = 42;`, the literal must be emitted as i32. When used in `let y: i64 = 0;`, as i64.",
+      "solution": "Use the type from the context (let binding type, function return type, other operand type in binary op). Default to i64 when no context is available."
+    },
+    {
+      "issue": "Float literal format",
+      "description": "LLVM IR requires float literals in specific format: decimal with at least one digit on each side of the decimal point, or hexadecimal. For example, 0.0 is valid, .0 is not.",
+      "solution": "Format float values using Rust's `{:.1}` or similar to ensure valid LLVM float literal syntax. Or use hex format for exact representation."
+    },
+    {
+      "issue": "Windows vs Unix target triple",
+      "description": "The target triple affects calling conventions, name mangling, and external function availability. puts/printf work on both platforms but the triple must match.",
+      "solution": "Auto-detect from the host platform at codegen time. Use x86_64-pc-windows-msvc on Windows, x86_64-unknown-linux-gnu on Linux, x86_64-apple-macosx on macOS."
+    },
+    {
+      "issue": "String constant length calculation",
+      "description": "LLVM string constants need the exact byte length including the null terminator. Escaped characters count as ONE byte.",
+      "solution": "Count the actual bytes of the UTF-8 encoded string, then add 1 for the null terminator."
+    },
+    {
+      "issue": "for-loop variable scope",
+      "description": "The loop variable `i` should be scoped to the loop body. If there's a variable `i` in the outer scope, the loop variable should shadow it within the loop, but the outer `i` should be restored after the loop.",
+      "solution": "Phase 1: simple HashMap overwrite. If shadowing is needed, save and restore the old variable info. Phase 2: proper scoped symbol table."
+    },
+    {
+      "issue": "for-loop end bound re-evaluation",
+      "description": "In `for i in range(2, n+1)`, the end bound `n+1` must be evaluated ONCE before the loop starts, not on every iteration.",
+      "solution": "Emit the end bound expression before the loop, store result in a temporary, and use that temporary in the loop condition."
+    }
+  ],
+
+  "implementation_order": [
+    {
+      "step": 1,
+      "description": "Create error.rs with CodegenError enum",
+      "estimated_loc": 50,
+      "rationale": "Foundation for error handling throughout codegen"
+    },
+    {
+      "step": 2,
+      "description": "Create llvm.rs with CodegenContext, hir_type_to_llvm, fresh_reg, fresh_label, module header generation",
+      "estimated_loc": 120,
+      "rationale": "Core infrastructure before emitting any real code"
+    },
+    {
+      "step": 3,
+      "description": "Implement emit_function with parameter handling and emit_block",
+      "estimated_loc": 80,
+      "rationale": "Function structure is needed before statements"
+    },
+    {
+      "step": 4,
+      "description": "Implement emit_expr for IntLiteral, FloatLiteral, BoolLiteral, Ident, BinaryOp, UnaryOp",
+      "estimated_loc": 150,
+      "rationale": "Expressions are needed by all statement types"
+    },
+    {
+      "step": 5,
+      "description": "Implement emit_stmt for Let, Assign, Return, Expr",
+      "estimated_loc": 80,
+      "rationale": "Basic statements enable the simplest programs"
+    },
+    {
+      "step": 6,
+      "description": "Implement emit_stmt for If/else with branch/label management",
+      "estimated_loc": 60,
+      "rationale": "Control flow needed for fibonacci"
+    },
+    {
+      "step": 7,
+      "description": "Implement for-loop lowering with range() recognition",
+      "estimated_loc": 80,
+      "rationale": "Loops needed for fibonacci"
+    },
+    {
+      "step": 8,
+      "description": "Implement built-in functions: print, print_i64, widen",
+      "estimated_loc": 60,
+      "rationale": "I/O and type conversion needed for sample programs"
+    },
+    {
+      "step": 9,
+      "description": "Implement string constant emission and external declarations",
+      "estimated_loc": 50,
+      "rationale": "Required by print and printf calls"
+    },
+    {
+      "step": 10,
+      "description": "Update lib.rs with re-exports",
+      "estimated_loc": 10,
+      "rationale": "Wire up the public API"
+    },
+    {
+      "step": 11,
+      "description": "Update Cargo.toml with axiom-hir dependency",
+      "estimated_loc": 3,
+      "rationale": "Build configuration"
+    },
+    {
+      "step": 12,
+      "description": "Wire up --emit=llvm-ir in axiom-driver main.rs",
+      "estimated_loc": 25,
+      "rationale": "CLI integration for testing and AC-1.4.2/AC-1.4.3"
+    },
+    {
+      "step": 13,
+      "description": "Write unit tests for all codegen functions",
+      "estimated_loc": 400,
+      "rationale": "Required by AC-1.4.1, AC-1.4.5, AC-1.4.6, AC-1.4.7"
+    },
+    {
+      "step": 14,
+      "description": "Write integration tests for fibonacci.axm and hello.axm",
+      "estimated_loc": 100,
+      "rationale": "Required by AC-1.4.2, AC-1.4.3"
+    }
+  ],
+
+  "estimated_total_loc": 1268,
+  "estimated_effort_hours": 6,
+
+  "acceptance_criteria_mapping": {
+    "AC-1.4.1": "Steps 1-14: all unit tests pass",
+    "AC-1.4.2": "Step 12+14: fibonacci.axm → --emit=llvm-ir produces output containing 'define'",
+    "AC-1.4.3": "Step 12+14: hello.axm → --emit=llvm-ir produces output containing 'define'",
+    "AC-1.4.4": "Steps 1-9: generated IR is syntactically valid (verified by llvm-as if available)",
+    "AC-1.4.5": "Step 4+13: test_numeric_types passes",
+    "AC-1.4.6": "Step 6+13: test_if_else passes",
+    "AC-1.4.7": "Step 7+13: test_for_loop passes",
+    "AC-1.4.8": "All steps: no clippy warnings"
+  },
+
+  "phase_2_migration_notes": {
+    "inkwell_migration": "The public API `codegen(module: &HirModule) -> Result<String, Vec<CodegenError>>` is designed so that the implementation can switch from text generation to inkwell without changing callers. With inkwell, we would return the LLVM IR string via `module.print_to_string()`. The internal implementation changes entirely, but the API stays the same.",
+    "optimization_passes": "Once using inkwell, we can run LLVM optimization passes: mem2reg (promote allocas to SSA), simplifycfg (clean up branches), instcombine (algebraic simplifications), gvn, licm, etc.",
+    "alloca_hoisting": "Phase 2 should hoist all allocas to the function entry block for better optimization.",
+    "signedness_tracking": "Phase 2 should track signed vs unsigned integer types to use correct LLVM instructions (sdiv vs udiv, icmp slt vs icmp ult)."
+  }
+}

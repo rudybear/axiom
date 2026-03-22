@@ -86,6 +86,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "axiom-codegen"
 version = "0.1.0"
 dependencies = [
+ "axiom-hir",
+ "axiom-lexer",
+ "axiom-parser",
  "thiserror",
 ]
 
@@ -93,6 +96,7 @@ dependencies = [
 name = "axiom-driver"
 version = "0.1.0"
 dependencies = [
+ "axiom-codegen",
  "axiom-hir",
  "axiom-lexer",
  "axiom-parser",
