@@ -1,0 +1,624 @@
+{
+  "milestone": "M1.5-e2e",
+  "architect_agent": "claude-opus-4-6",
+  "timestamp": "2026-03-22T02:00:00Z",
+  "status": "designed",
+
+  "design_summary": "End-to-end compilation from .axm source to native executable binary. The axiom compiler already generates LLVM IR text; M1.5 adds the final step: writing the IR to a temp file and invoking an external C compiler (clang or cl.exe) to produce a native binary. On this Windows/MSVC system, we use clang (preferred) or fall back to cl.exe via the Visual Studio vcvars64 environment. The main new code is ~120 lines in axiom-driver/src/main.rs plus a new ~180-line module axiom-driver/src/compile.rs that encapsulates compiler discovery and invocation.",
+
+  "environment_analysis": {
+    "platform": "Windows 11 Pro (x86_64-pc-windows-msvc)",
+    "rust_toolchain": "stable-x86_64-pc-windows-msvc (cargo 1.93.1)",
+    "target_triple_in_llvm_ir": "x86_64-pc-windows-msvc",
+    "available_c_compilers": {
+      "clang": "NOT on PATH — must be installed separately or found by searching common locations",
+      "gcc": "NOT on PATH — no MSYS2/MinGW installation detected",
+      "cl_exe": "Available via Visual Studio 18 Community at C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe and 14.50.35717",
+      "link_exe": "Available via Visual Studio at C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/link.exe",
+      "rust_lld": "Available at $(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
+    },
+    "compiler_strategy": "Use Rust's `cc` crate for compiler discovery (it handles MSVC vcvars setup automatically). As a fallback, search PATH for clang, then invoke cl.exe via vcvars64.bat shell wrapper. The `cc` crate is the most robust approach because it uses the same MSVC discovery logic as Cargo itself."
+  },
+
+  "design_decisions": [
+    {
+      "id": "DD-1",
+      "choice": "Use the Rust `cc` crate for C compiler discovery and invocation",
+      "rationale": [
+        "The `cc` crate automatically discovers MSVC installations, sets up vcvars environment, and handles all Windows SDK path complexity",
+        "It uses the same MSVC detection as cargo/rustc itself, so if `cargo build` works, `cc` will find a compiler",
+        "Cross-platform: works on Linux (finds gcc/clang), macOS (finds clang), Windows (finds cl.exe)",
+        "Eliminates need to manually handle vcvars64.bat, Windows SDK paths, and MSVC version discovery",
+        "Well-maintained, widely-used crate (used by thousands of Rust projects)"
+      ],
+      "tradeoffs": [
+        "Adds a runtime dependency on `cc` crate (but it is lightweight and pure Rust)",
+        "The `cc` crate is primarily designed for build scripts, but its compiler discovery API works fine at runtime too"
+      ]
+    },
+    {
+      "id": "DD-2",
+      "choice": "Use std::process::Command with direct clang/gcc invocation as primary path, cc crate as MSVC fallback",
+      "rationale": [
+        "clang can compile .ll files directly to executables in a single invocation: `clang -O2 foo.ll -o foo`",
+        "This is simpler and more transparent than going through the cc crate for the happy path",
+        "When clang is not available (as on this system), fall back to a two-step MSVC approach: use clang from LLVM or use `cc` crate to compile .ll via cl.exe",
+        "On Windows without clang: write .ll, use system `llc` to produce .obj, then use MSVC link.exe to link",
+        "Since we have NEITHER clang NOR llc on PATH, we need the `cc` crate approach for the MSVC fallback"
+      ],
+      "selected_approach": "Hybrid: Try clang first (single command), then fall back to cc-crate MSVC path. But since the .ll-to-.obj step requires llc or clang, we MUST ensure at least one LLVM tool is available. The pragmatic solution: require clang to be installed and provide clear error messages with install instructions."
+    },
+    {
+      "id": "DD-3",
+      "choice": "Require clang on PATH; provide install instructions in error message",
+      "rationale": [
+        "LLVM IR text (.ll files) can only be compiled by LLVM-based tools (clang, llc, llvm-as)",
+        "MSVC cl.exe cannot compile LLVM IR directly — it only accepts C/C++ source or .obj files",
+        "gcc also cannot compile LLVM IR directly",
+        "Therefore clang (or llc + linker) is the ONLY viable path for .ll -> binary",
+        "On Windows: `winget install LLVM.LLVM` or download from https://releases.llvm.org/",
+        "On Linux: `apt install clang` or `dnf install clang`",
+        "On macOS: `xcode-select --install` (clang comes with Xcode command line tools)",
+        "This is a hard requirement, not a nice-to-have"
+      ],
+      "fallback_chain": [
+        "1. Try `clang` on PATH → `clang -O2 input.ll -o output`",
+        "2. Try `clang-18`, `clang-17`, etc. (versioned names on Linux)",
+        "3. Try `llc` on PATH → `llc -filetype=obj input.ll -o input.obj` then link with system linker",
+        "4. If none found → error with platform-specific install instructions"
+      ]
+    },
+    {
+      "id": "DD-4",
+      "choice": "Use std::env::temp_dir() for temp files, not the `tempfile` crate",
+      "rationale": [
+        "We only need one temp file (.ll), which we write and delete ourselves",
+        "Adding `tempfile` as a dependency for one file is overkill",
+        "std::env::temp_dir() + process ID gives sufficient uniqueness",
+        "Cleanup is trivial: delete the .ll file on success, leave it on failure for debugging"
+      ]
+    },
+    {
+      "id": "DD-5",
+      "choice": "Default behavior when no --emit and no -o: compile to a.out (Unix) or a.exe (Windows)",
+      "rationale": [
+        "Follows C compiler convention (clang, gcc both default to a.out)",
+        "User can always specify -o to choose output name",
+        "Intuitive for anyone familiar with compiled languages"
+      ]
+    }
+  ],
+
+  "architecture_overview": {
+    "compilation_pipeline": ".axm → lex → parse → HIR lower → codegen (LLVM IR text) → write temp .ll → invoke clang → native binary",
+    "data_flow": [
+      "1. Read .axm source file (existing)",
+      "2. Lex → tokens (existing, axiom-lexer)",
+      "3. Parse → AST (existing, axiom-parser)",
+      "4. Lower → HIR (existing, axiom-hir)",
+      "5. Codegen → LLVM IR text string (existing, axiom-codegen)",
+      "6. Write LLVM IR to temp file: {temp_dir}/axiom_{pid}_{hash}.ll (NEW)",
+      "7. Find C compiler: search PATH for clang, clang-N, llc (NEW)",
+      "8. Invoke compiler: clang -O2 temp.ll -o output (NEW)",
+      "9. Clean up temp .ll file (NEW)",
+      "10. Report success or show compiler errors (NEW)"
+    ],
+    "new_module": "crates/axiom-driver/src/compile.rs — compiler discovery and invocation logic",
+    "modified_files": [
+      "crates/axiom-driver/src/main.rs — wire up the native compilation path",
+      "crates/axiom-driver/Cargo.toml — add `which` dependency for compiler discovery"
+    ]
+  },
+
+  "files_to_modify": [
+    {
+      "path": "crates/axiom-driver/Cargo.toml",
+      "purpose": "Add `which` crate dependency for finding compilers on PATH",
+      "changes": [
+        "Add `which = \"7\"` to [dependencies]"
+      ]
+    },
+    {
+      "path": "Cargo.toml",
+      "purpose": "Add `which` to workspace dependencies",
+      "changes": [
+        "Add `which = \"7\"` to [workspace.dependencies]"
+      ]
+    },
+    {
+      "path": "crates/axiom-driver/src/main.rs",
+      "purpose": "Wire up full compilation when --emit is not specified",
+      "detailed_spec": {
+        "overview": "Modify the None arm of the emit match (line 132-134) to invoke the full compilation pipeline instead of printing TODO. Also handle the case where -o is not specified by defaulting to a.exe/a.out.",
+        "changes": [
+          {
+            "location": "line 1: add `mod compile;`",
+            "description": "Declare the new compile module"
+          },
+          {
+            "location": "line 63: `Commands::Compile { input, output: _, emit }` — change `output: _` to `output`",
+            "description": "Actually use the output parameter instead of discarding it"
+          },
+          {
+            "location": "lines 132-134: the `None => { ... }` arm",
+            "description": "Replace the TODO with full compilation pipeline",
+            "new_code_pseudocode": [
+              "// Full compilation: .axm → binary",
+              "let result = axiom_parser::parse(&source);",
+              "// ... handle parse errors (same as llvm-ir branch) ...",
+              "let hir_module = axiom_hir::lower(&result.module).map_err(|errors| { ... })?;",
+              "let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| { ... })?;",
+              "",
+              "// Determine output path",
+              "let output_path = output.unwrap_or_else(|| {",
+              "    if cfg!(windows) { \"a.exe\".to_string() }",
+              "    else { \"a.out\".to_string() }",
+              "});",
+              "",
+              "// Compile to native binary",
+              "compile::compile_llvm_ir_to_binary(&llvm_ir, &output_path)?;"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+
+  "files_to_create": [
+    {
+      "path": "crates/axiom-driver/src/compile.rs",
+      "purpose": "Compiler discovery and LLVM IR to native binary compilation",
+      "detailed_spec": {
+        "overview": "Encapsulates the logic for finding a C/LLVM compiler on the system and invoking it to compile LLVM IR text into a native executable. Handles temp file management, compiler discovery with fallback chain, and error reporting.",
+
+        "public_functions": [
+          {
+            "signature": "pub fn compile_llvm_ir_to_binary(llvm_ir: &str, output_path: &str) -> miette::Result<()>",
+            "doc": "Compile LLVM IR text to a native executable binary. Writes IR to a temp file, invokes clang (or fallback compiler), and cleans up.",
+            "algorithm": [
+              "1. Generate temp file path: {temp_dir}/axiom_{pid}.ll",
+              "2. Write llvm_ir string to temp file",
+              "3. Call find_compiler() to locate clang or llc",
+              "4. Match on CompilerKind:",
+              "   - Clang(path): invoke `{path} -O2 {temp.ll} -o {output_path}`",
+              "   - Llc(llc_path): invoke `{llc_path} -filetype=obj {temp.ll} -o {temp.obj}`, then find linker and link",
+              "5. Check exit status of compiler command",
+              "6. If failure: read stderr, return error with compiler output",
+              "7. If success: delete temp .ll file (and temp .obj if applicable)",
+              "8. Print success message: 'Compiled {input} -> {output_path}'"
+            ],
+            "error_cases": [
+              "CompilerNotFound → miette error with platform-specific install instructions",
+              "TempFileWriteFailed → miette error with path and OS error",
+              "CompilationFailed → miette error with compiler stderr output",
+              "LinkerFailed → miette error with linker stderr output"
+            ]
+          }
+        ],
+
+        "internal_functions": [
+          {
+            "name": "find_compiler",
+            "signature": "fn find_compiler() -> Result<CompilerKind, miette::Report>",
+            "doc": "Search for a suitable compiler to compile LLVM IR to native code",
+            "algorithm": [
+              "1. Try which::which(\"clang\") → return CompilerKind::Clang(path)",
+              "2. Try versioned clang: clang-19, clang-18, clang-17, clang-16, clang-15 → return CompilerKind::Clang(path)",
+              "3. Try which::which(\"llc\") → return CompilerKind::Llc(path)",
+              "4. Return Err with platform-specific install instructions"
+            ]
+          },
+          {
+            "name": "install_instructions",
+            "signature": "fn install_instructions() -> String",
+            "doc": "Return platform-specific instructions for installing clang",
+            "returns": {
+              "windows": "Install LLVM: winget install LLVM.LLVM\nOr download from: https://github.com/llvm/llvm-project/releases\nAfter installing, ensure clang.exe is on your PATH.",
+              "macos": "Install Xcode command line tools: xcode-select --install\nOr install LLVM via Homebrew: brew install llvm",
+              "linux": "Install clang:\n  Ubuntu/Debian: sudo apt install clang\n  Fedora/RHEL: sudo dnf install clang\n  Arch: sudo pacman -S clang"
+            }
+          },
+          {
+            "name": "temp_ll_path",
+            "signature": "fn temp_ll_path() -> std::path::PathBuf",
+            "doc": "Generate a unique temp file path for the LLVM IR",
+            "algorithm": [
+              "let dir = std::env::temp_dir();",
+              "let pid = std::process::id();",
+              "dir.join(format!(\"axiom_{pid}.ll\"))"
+            ]
+          }
+        ],
+
+        "internal_types": [
+          {
+            "name": "CompilerKind",
+            "doc": "Represents the discovered compiler and how to invoke it",
+            "definition": "enum CompilerKind { Clang(PathBuf), Llc(PathBuf) }",
+            "variants": [
+              {
+                "name": "Clang",
+                "fields": "PathBuf",
+                "doc": "clang found at this path — can compile .ll directly to executable",
+                "invocation": "{clang_path} -O2 -Wno-override-module {temp.ll} -o {output}"
+              },
+              {
+                "name": "Llc",
+                "fields": "PathBuf",
+                "doc": "llc found at this path — compile .ll to .obj, then link separately",
+                "invocation_step1": "{llc_path} -filetype=obj {temp.ll} -o {temp.obj}",
+                "invocation_step2_windows": "link.exe {temp.obj} /OUT:{output} /DEFAULTLIB:msvcrt",
+                "invocation_step2_unix": "cc {temp.obj} -o {output}"
+              }
+            ]
+          }
+        ],
+
+        "clang_flags": {
+          "-O2": "Enable standard optimizations (LLVM mem2reg will promote our allocas to SSA)",
+          "-Wno-override-module": "Suppress warning about overriding module target triple if host triple differs slightly",
+          "-o {output}": "Output file path",
+          "{temp.ll}": "Input LLVM IR file"
+        },
+
+        "temp_file_strategy": {
+          "location": "std::env::temp_dir() (e.g., C:\\Users\\...\\AppData\\Local\\Temp on Windows, /tmp on Unix)",
+          "naming": "axiom_{pid}.ll where pid is std::process::id()",
+          "cleanup_on_success": "Delete .ll file (and .obj if Llc path was used)",
+          "cleanup_on_failure": "Leave .ll file for debugging, print its path in error message"
+        },
+
+        "estimated_lines": 150
+      }
+    }
+  ],
+
+  "dependency_changes": {
+    "workspace_cargo_toml": {
+      "add_to_workspace_dependencies": {
+        "which": "\"7\""
+      }
+    },
+    "axiom_driver_cargo_toml": {
+      "add_to_dependencies": {
+        "which": "{ workspace = true }"
+      }
+    }
+  },
+
+  "testing_plan": {
+    "unit_tests": [
+      {
+        "name": "test_find_compiler_reports_helpful_error",
+        "location": "crates/axiom-driver/src/compile.rs",
+        "description": "If no compiler is found, the error message should contain install instructions appropriate for the current platform"
+      },
+      {
+        "name": "test_temp_ll_path_is_unique",
+        "location": "crates/axiom-driver/src/compile.rs",
+        "description": "temp_ll_path() should return a path in the system temp directory with a .ll extension"
+      }
+    ],
+    "integration_tests": [
+      {
+        "id": "IT-1",
+        "name": "fibonacci_e2e",
+        "description": "Compile fibonacci.axm to binary, run it, verify output contains '102334155'",
+        "command": "cargo run -p axiom-driver -- compile tests/samples/fibonacci.axm -o {tmpdir}/fib && {tmpdir}/fib",
+        "expected_output_contains": "102334155",
+        "requires": "clang on PATH",
+        "note": "This test should be marked #[ignore] if clang is not available, with a helpful message"
+      },
+      {
+        "id": "IT-2",
+        "name": "hello_e2e",
+        "description": "Compile hello.axm to binary, run it, verify output contains 'Hello from AXIOM!'",
+        "command": "cargo run -p axiom-driver -- compile tests/samples/hello.axm -o {tmpdir}/hello && {tmpdir}/hello",
+        "expected_output_contains": "Hello from AXIOM!",
+        "requires": "clang on PATH"
+      },
+      {
+        "id": "IT-3",
+        "name": "emit_tokens_still_works",
+        "description": "Verify --emit=tokens still produces token output",
+        "command": "cargo run -p axiom-driver -- compile --emit=tokens tests/samples/hello.axm",
+        "expected_output_contains": "Fn"
+      },
+      {
+        "id": "IT-4",
+        "name": "emit_ast_still_works",
+        "description": "Verify --emit=ast still produces AST output",
+        "command": "cargo run -p axiom-driver -- compile --emit=ast tests/samples/hello.axm",
+        "expected_output_contains": "Module"
+      },
+      {
+        "id": "IT-5",
+        "name": "emit_hir_still_works",
+        "description": "Verify --emit=hir still produces HIR output",
+        "command": "cargo run -p axiom-driver -- compile --emit=hir tests/samples/hello.axm",
+        "expected_output_contains": "fn main"
+      },
+      {
+        "id": "IT-6",
+        "name": "emit_llvm_ir_still_works",
+        "description": "Verify --emit=llvm-ir still produces LLVM IR output",
+        "command": "cargo run -p axiom-driver -- compile --emit=llvm-ir tests/samples/hello.axm",
+        "expected_output_contains": "define"
+      },
+      {
+        "id": "IT-7",
+        "name": "missing_input_file_error",
+        "description": "Verify clear error when input file does not exist",
+        "command": "cargo run -p axiom-driver -- compile nonexistent.axm -o out",
+        "expected_stderr_contains": "Failed to read"
+      },
+      {
+        "id": "IT-8",
+        "name": "no_compiler_error",
+        "description": "If clang is not on PATH, verify the error message includes install instructions",
+        "note": "This is hard to test automatically — manual verification or mock-based test"
+      }
+    ],
+    "test_file_location": "crates/axiom-driver/tests/e2e.rs",
+    "test_strategy": "Integration tests that require clang should check for its availability first and skip with a clear message if not found. Use #[ignore] or a runtime check."
+  },
+
+  "acceptance_criteria_mapping": {
+    "AC-1.5.1": {
+      "description": "axiom compile fibonacci.axm -o fib produces an executable",
+      "implementation": "The None arm in main.rs calls compile::compile_llvm_ir_to_binary() which invokes clang to produce the binary",
+      "verified_by": "IT-1"
+    },
+    "AC-1.5.2": {
+      "description": "Compiled fibonacci program runs and prints correct Fibonacci(40) = 102334155",
+      "implementation": "The codegen already produces correct LLVM IR for fibonacci (verified in M1.4). clang compiles and links with libc for printf/puts support.",
+      "verified_by": "IT-1"
+    },
+    "AC-1.5.3": {
+      "description": "axiom compile hello.axm -o hello produces an executable that prints greeting",
+      "implementation": "Same compilation pipeline. hello.axm uses print() which calls puts().",
+      "verified_by": "IT-2"
+    },
+    "AC-1.5.4": {
+      "description": "--emit=tokens works",
+      "implementation": "Already implemented in main.rs (no changes needed)",
+      "verified_by": "IT-3"
+    },
+    "AC-1.5.5": {
+      "description": "--emit=ast works",
+      "implementation": "Already implemented in main.rs (no changes needed)",
+      "verified_by": "IT-4"
+    },
+    "AC-1.5.6": {
+      "description": "--emit=hir works",
+      "implementation": "Already implemented in main.rs (no changes needed)",
+      "verified_by": "IT-5"
+    },
+    "AC-1.5.7": {
+      "description": "--emit=llvm-ir works",
+      "implementation": "Already implemented in main.rs (no changes needed)",
+      "verified_by": "IT-6"
+    },
+    "AC-1.5.8": {
+      "description": "All workspace tests pass",
+      "implementation": "No existing tests should break. New tests should pass.",
+      "verified_by": "cargo test --workspace"
+    }
+  },
+
+  "benchmark_criteria_mapping": {
+    "BC-1.5.1": {
+      "description": "Full pipeline for fibonacci.axm under 5 seconds",
+      "analysis": "Our pipeline (parse + lower + codegen) runs in milliseconds. clang -O2 on a small .ll file typically takes 100-500ms. Total well under 5 seconds."
+    },
+    "BC-1.5.2": {
+      "description": "Compiled fibonacci binary size under 1MB",
+      "analysis": "A minimal C program (which is essentially what our LLVM IR produces) compiles to ~10-50KB on Linux, ~50-200KB on Windows (with MSVC CRT). Well under 1MB."
+    },
+    "BC-1.5.3": {
+      "description": "Compiled fibonacci runtime under 1 second",
+      "analysis": "Fibonacci(40) with -O2 (which promotes allocas to registers via mem2reg) should run in microseconds. The iterative algorithm is O(n) with n=40."
+    }
+  },
+
+  "implementation_order": [
+    {
+      "step": 1,
+      "description": "Add `which` to workspace and driver Cargo.toml",
+      "files": ["Cargo.toml", "crates/axiom-driver/Cargo.toml"],
+      "estimated_lines_changed": 3
+    },
+    {
+      "step": 2,
+      "description": "Create crates/axiom-driver/src/compile.rs with compiler discovery and invocation logic",
+      "files": ["crates/axiom-driver/src/compile.rs"],
+      "estimated_lines": 150
+    },
+    {
+      "step": 3,
+      "description": "Update main.rs to use compile module for native compilation",
+      "files": ["crates/axiom-driver/src/main.rs"],
+      "estimated_lines_changed": 25
+    },
+    {
+      "step": 4,
+      "description": "Add integration tests",
+      "files": ["crates/axiom-driver/tests/e2e.rs"],
+      "estimated_lines": 80
+    },
+    {
+      "step": 5,
+      "description": "Install clang on this system (winget install LLVM.LLVM) and verify e2e",
+      "note": "This is a manual prerequisite step before tests can pass"
+    }
+  ],
+
+  "risk_assessment": [
+    {
+      "risk": "clang not installed on the build system",
+      "severity": "high",
+      "mitigation": "Clear error message with install instructions. For CI, include clang installation in CI setup step. For this dev machine: `winget install LLVM.LLVM`."
+    },
+    {
+      "risk": "LLVM IR uses printf/puts which require libc linkage",
+      "severity": "low",
+      "mitigation": "clang automatically links libc. On Windows/MSVC, clang links against msvcrt. On Linux, glibc is linked by default. This is not an issue."
+    },
+    {
+      "risk": "Windows-specific path handling issues (backslashes, spaces in paths)",
+      "severity": "medium",
+      "mitigation": "Use std::path::PathBuf throughout. Pass paths as OsStr to Command. Test with paths containing spaces."
+    },
+    {
+      "risk": "Target triple mismatch between LLVM IR and clang's default target",
+      "severity": "low",
+      "mitigation": "The LLVM IR already includes `target triple = \"x86_64-pc-windows-msvc\"`. clang respects this. Add -Wno-override-module to suppress any warnings."
+    },
+    {
+      "risk": "LLVM IR format string `%lld` may not work on all Windows C runtimes",
+      "severity": "low",
+      "mitigation": "MSVC's printf supports %lld since VS2015. Our target (VS 18 Community) is well past this. On Linux/macOS, %lld is universally supported."
+    }
+  ],
+
+  "prerequisites": {
+    "hard_requirements": [
+      "clang must be available on PATH (or discoverable via versioned name like clang-18)",
+      "Rust stable toolchain (already satisfied)",
+      "which crate added to Cargo.toml workspace"
+    ],
+    "install_clang_command": {
+      "windows": "winget install LLVM.LLVM",
+      "ubuntu": "sudo apt install clang",
+      "macos": "xcode-select --install",
+      "arch": "sudo pacman -S clang"
+    },
+    "verify_clang": "clang --version"
+  },
+
+  "code_sketch": {
+    "compile_rs_skeleton": [
+      "//! Native binary compilation — invokes external C compiler on LLVM IR text.",
+      "",
+      "use std::path::{Path, PathBuf};",
+      "use std::process::Command;",
+      "",
+      "/// The kind of compiler found on the system.",
+      "enum CompilerKind {",
+      "    /// clang — can compile .ll directly to executable.",
+      "    Clang(PathBuf),",
+      "    /// llc — compile .ll to .obj, then link separately.",
+      "    Llc(PathBuf),",
+      "}",
+      "",
+      "/// Compile LLVM IR text to a native executable binary.",
+      "pub fn compile_llvm_ir_to_binary(llvm_ir: &str, output_path: &str) -> miette::Result<()> {",
+      "    let temp_ll = temp_ll_path();",
+      "    std::fs::write(&temp_ll, llvm_ir)",
+      "        .map_err(|e| miette::miette!(\"failed to write temp file {}: {}\", temp_ll.display(), e))?;",
+      "",
+      "    let compiler = find_compiler()?;",
+      "",
+      "    let result = match &compiler {",
+      "        CompilerKind::Clang(path) => invoke_clang(path, &temp_ll, output_path),",
+      "        CompilerKind::Llc(path) => invoke_llc(path, &temp_ll, output_path),",
+      "    };",
+      "",
+      "    // Clean up temp file on success",
+      "    if result.is_ok() {",
+      "        let _ = std::fs::remove_file(&temp_ll);",
+      "    } else {",
+      "        eprintln!(\"note: LLVM IR written to {} for debugging\", temp_ll.display());",
+      "    }",
+      "",
+      "    result",
+      "}",
+      "",
+      "fn find_compiler() -> miette::Result<CompilerKind> {",
+      "    // Try clang first",
+      "    if let Ok(path) = which::which(\"clang\") {",
+      "        return Ok(CompilerKind::Clang(path));",
+      "    }",
+      "    // Try versioned clang",
+      "    for version in (15..=19).rev() {",
+      "        if let Ok(path) = which::which(format!(\"clang-{version}\")) {",
+      "            return Ok(CompilerKind::Clang(path));",
+      "        }",
+      "    }",
+      "    // Try llc",
+      "    if let Ok(path) = which::which(\"llc\") {",
+      "        return Ok(CompilerKind::Llc(path));",
+      "    }",
+      "    Err(miette::miette!(",
+      "        \"no LLVM compiler found on PATH\\n\\n{}\",",
+      "        install_instructions()",
+      "    ))",
+      "}",
+      "",
+      "fn invoke_clang(clang: &Path, ll_file: &Path, output: &str) -> miette::Result<()> {",
+      "    let status = Command::new(clang)",
+      "        .arg(\"-O2\")",
+      "        .arg(\"-Wno-override-module\")",
+      "        .arg(ll_file)",
+      "        .arg(\"-o\")",
+      "        .arg(output)",
+      "        .status()",
+      "        .map_err(|e| miette::miette!(\"failed to run clang: {}\", e))?;",
+      "    if !status.success() {",
+      "        return Err(miette::miette!(\"clang exited with {}\", status));",
+      "    }",
+      "    Ok(())",
+      "}",
+      "",
+      "fn install_instructions() -> &'static str {",
+      "    if cfg!(target_os = \"windows\") {",
+      "        \"Install LLVM/clang:\\n  winget install LLVM.LLVM\\n  Or download from https://github.com/llvm/llvm-project/releases\\n\\nAfter installing, ensure clang.exe is on your PATH.\"",
+      "    } else if cfg!(target_os = \"macos\") {",
+      "        \"Install clang:\\n  xcode-select --install\\n  Or: brew install llvm\"",
+      "    } else {",
+      "        \"Install clang:\\n  Ubuntu/Debian: sudo apt install clang\\n  Fedora: sudo dnf install clang\\n  Arch: sudo pacman -S clang\"",
+      "    }",
+      "}"
+    ],
+    "main_rs_none_arm": [
+      "None => {",
+      "    // Full compilation: .axm → native binary",
+      "    let result = axiom_parser::parse(&source);",
+      "    if result.has_errors() {",
+      "        eprintln!(\"--- Parse Errors ---\");",
+      "        for err in &result.errors {",
+      "            eprintln!(\"  {err}\");",
+      "        }",
+      "        return Err(miette::miette!(\"parsing failed with {} error(s)\", result.errors.len()));",
+      "    }",
+      "    let hir_module = axiom_hir::lower(&result.module).map_err(|errors| {",
+      "        for err in &errors {",
+      "            eprintln!(\"  {err}\");",
+      "        }",
+      "        miette::miette!(\"HIR lowering failed with {} error(s)\", errors.len())",
+      "    })?;",
+      "    let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| {",
+      "        for err in &errors {",
+      "            eprintln!(\"  {err}\");",
+      "        }",
+      "        miette::miette!(\"codegen failed with {} error(s)\", errors.len())",
+      "    })?;",
+      "",
+      "    let output_path = output.unwrap_or_else(|| {",
+      "        if cfg!(windows) { \"a.exe\".into() } else { \"a.out\".into() }",
+      "    });",
+      "",
+      "    compile::compile_llvm_ir_to_binary(&llvm_ir, &output_path)?;",
+      "    eprintln!(\"compiled {} -> {}\", input, output_path);",
+      "}"
+    ]
+  },
+
+  "notes": [
+    "The compile.rs module is intentionally simple — no async, no caching, no incremental compilation. Those are Phase 2+ concerns.",
+    "We use eprintln for status messages (like 'compiled X -> Y') to keep stdout clean for piping.",
+    "The -Wno-override-module flag prevents clang from warning when the .ll file's target triple doesn't exactly match clang's default (e.g., x86_64-pc-windows-msvc19.0.0 vs x86_64-pc-windows-msvc).",
+    "The code reuses the parse/lower/codegen pipeline from the --emit=llvm-ir branch. Consider extracting a shared helper function to avoid duplication, but this is a minor refactor that can be done opportunistically.",
+    "On this specific Windows 11 dev machine, clang is NOT installed. The implementer must run `winget install LLVM.LLVM` before the e2e tests will pass. The architect spec accounts for this in the error handling design."
+  ]
+}
