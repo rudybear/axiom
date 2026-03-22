@@ -4,4 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+axiom-lexer = { path = "../axiom-lexer" }
+axiom-parser = { path = "../axiom-parser" }
 thiserror.workspace = true
+miette.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
