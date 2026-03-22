@@ -8,14 +8,22 @@ pub struct Span {
 }
 
 impl Span {
+    /// Create a new span from start (inclusive) to end (exclusive) byte offsets.
     pub fn new(start: u32, end: u32) -> Self {
         Self { start, end }
     }
 
+    /// Returns the length of the span in bytes.
     pub fn len(&self) -> u32 {
         self.end - self.start
     }
 
+    /// Returns true if the span covers zero bytes.
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    /// Merge two spans into the smallest span that covers both.
     pub fn merge(self, other: Span) -> Span {
         Span {
             start: self.start.min(other.start),
@@ -32,16 +40,127 @@ pub struct Token {
 }
 
 impl Token {
+    /// Create a new token with the given kind and span.
     pub fn new(kind: TokenKind, span: Span) -> Self {
         Self { kind, span }
+    }
+}
+
+/// The base (radix) of an integer literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntBase {
+    /// Decimal (base 10), e.g. `42`
+    Decimal,
+    /// Hexadecimal (base 16), e.g. `0xFF`
+    Hex,
+    /// Binary (base 2), e.g. `0b1010`
+    Binary,
+    /// Octal (base 8), e.g. `0o77`
+    Octal,
+}
+
+/// Width suffix for integer literals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntSuffix {
+    /// `i8`
+    I8,
+    /// `i16`
+    I16,
+    /// `i32`
+    I32,
+    /// `i64`
+    I64,
+    /// `i128`
+    I128,
+    /// `u8`
+    U8,
+    /// `u16`
+    U16,
+    /// `u32`
+    U32,
+    /// `u64`
+    U64,
+    /// `u128`
+    U128,
+}
+
+/// Width suffix for float literals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatSuffix {
+    /// `f16`
+    F16,
+    /// `bf16`
+    Bf16,
+    /// `f32`
+    F32,
+    /// `f64`
+    F64,
+}
+
+/// Lookup table that maps byte offsets to line/column positions.
+///
+/// Constructed from a source string and used to translate byte offsets
+/// (from `Span`) into human-readable line and column numbers on demand.
+/// This avoids per-token overhead while still providing line/col when
+/// needed for error messages.
+pub struct LineIndex {
+    /// Byte offsets of the start of each line (0-indexed).
+    line_starts: Vec<u32>,
+}
+
+impl LineIndex {
+    /// Build a line index from source text.
+    ///
+    /// # Examples
+    /// ```
+    /// use axiom_lexer::LineIndex;
+    /// let idx = LineIndex::new("hello\nworld\n");
+    /// assert_eq!(idx.line_col(0), (0, 0));
+    /// assert_eq!(idx.line_col(6), (1, 0));
+    /// ```
+    pub fn new(source: &str) -> Self {
+        let mut line_starts = vec![0u32];
+        for (i, b) in source.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push((i + 1) as u32);
+            }
+        }
+        Self { line_starts }
+    }
+
+    /// Convert a byte offset to a 0-based (line, column) pair.
+    ///
+    /// If the offset is past the end of the source, returns the last
+    /// valid position.
+    pub fn line_col(&self, offset: u32) -> (u32, u32) {
+        let line = match self.line_starts.binary_search(&offset) {
+            Ok(exact) => exact,
+            Err(insertion) => insertion.saturating_sub(1),
+        };
+        let col = offset.saturating_sub(self.line_starts[line]);
+        (line as u32, col)
+    }
+
+    /// Returns the total number of lines in the source.
+    pub fn line_count(&self) -> u32 {
+        self.line_starts.len() as u32
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // ── Literals ────────────────────────────────────────
-    IntLiteral(i128),
-    FloatLiteral(f64),
+    /// Integer literal with value, optional width suffix, and base.
+    IntLiteral {
+        value: i128,
+        suffix: Option<IntSuffix>,
+        base: IntBase,
+    },
+    /// Float literal with value and optional width suffix.
+    FloatLiteral {
+        value: f64,
+        suffix: Option<FloatSuffix>,
+    },
     StringLiteral(String),
     BoolLiteral(bool),
 
@@ -98,6 +217,7 @@ pub enum TokenKind {
     MinusWrap,      // -%
     MinusSat,       // -|
     StarWrap,       // *%
+    Caret,          // ^
     Eq,             // ==
     NotEq,          // !=
     Lt,             // <
@@ -176,6 +296,23 @@ impl TokenKind {
             "narrow" => Some(TokenKind::Narrow),
             "truncate" => Some(TokenKind::Truncate),
             _ => None,
+        }
+    }
+
+    /// Helper to create a decimal integer literal with no suffix.
+    pub fn int(value: i128) -> Self {
+        TokenKind::IntLiteral {
+            value,
+            suffix: None,
+            base: IntBase::Decimal,
+        }
+    }
+
+    /// Helper to create a float literal with no suffix.
+    pub fn float(value: f64) -> Self {
+        TokenKind::FloatLiteral {
+            value,
+            suffix: None,
         }
     }
 }

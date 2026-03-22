@@ -1,0 +1,158 @@
+{
+  "agent": "architect",
+  "milestone_id": "M1.1-lexer",
+  "status": "complete",
+  "analysis": {
+    "existing_coverage": "The lexer has a solid foundation. It correctly tokenizes: all 17 keywords (fn, let, mut, return, if, else, for, while, in, struct, type, module, import, pub, unsafe, and, or, not), all 18 type keywords (i8-i128, u8-u128, f16, bf16, f32, f64, bool, tensor, array, slice, ptr), 3 conversion keywords (widen, narrow, truncate), boolean literals (true/false), basic integer literals (decimal), basic float literals (decimal with dot), string literals with escape sequences (\\n, \\t, \\r, \\\\, \\\"), annotations (@name), optimization holes (?name), all 17 operators (+, -, *, /, %, +%, +|, -%, -|, *%, ==, !=, <, >, <=, >=, =), 4 punctuation operators (->, =>, ., .., :, ::, |), all 6 delimiters, comma, semicolon, Eof, and Error tokens. Line comments (//), block comments (/* */), and nested block comments are all handled. Error recovery works: unknown characters produce Error tokens and lexing continues. Span tracking provides (start, end) byte offsets on every token. The driver CLI supports a 'lex' subcommand for debugging. All 17 existing unit tests pass. The lexer correctly tokenizes hello.axm and fibonacci.axm without errors.",
+    "gaps": [
+      "GAP-1: Missing caret operator (^). The matmul_naive.axm sample uses @complexity O(n^3) which produces an Error token for '^'. Need to add a Caret token type.",
+      "GAP-2: No hex literal support (0xFF, 0xff). The spec mentions explicit types for all data; low-level code needs hex literals for alignment values, bit masks, etc.",
+      "GAP-3: No binary literal support (0b1010). Needed for bit manipulation patterns common in optimization code.",
+      "GAP-4: No octal literal support (0o777). Lower priority but completes the set of integer literal bases.",
+      "GAP-5: No width suffixes on integer literals (42i32, 100u64). The CLAUDE.md milestone checklist explicitly requires 'numbers (int/float with width suffixes)'. Currently IntLiteral(i128) stores only the value; suffix information is lost.",
+      "GAP-6: No width suffixes on float literals (3.14f32, 1.0f64). Same as GAP-5 for floats.",
+      "GAP-7: No scientific notation for float literals (1.0e10, 3.14e-2, 2.5E+3). Important for expressing very large/small values in numeric code.",
+      "GAP-8: No underscore separators in numeric literals (1_000_000, 0xFF_FF). Improves readability of large constants.",
+      "GAP-9: Span struct lacks line and column tracking. CLAUDE.md M1.1 spec says 'every token carries (start_offset, end_offset, line, col)'. Currently only byte offsets are tracked.",
+      "GAP-10: Clippy warning — Span has len() but no is_empty(). AC-1.1.8 requires zero clippy warnings with -D warnings.",
+      "GAP-11: Missing string escape sequences. No support for \\0 (null), \\xNN (hex byte), \\u{NNNN} (unicode). The spec says strings are UTF-8.",
+      "GAP-12: Missing tests for edge cases: unterminated block comments, annotation at EOF, optimization hole at EOF, empty source with only whitespace, numbers followed by identifiers (e.g. 42foo), dot-dot-dot (... should be DotDot + Dot), multi-line strings, integer overflow.",
+      "GAP-13: No Ampersand (&) token for potential reference types or bitwise operations. Low priority — may not be in initial spec.",
+      "GAP-14: Number literal starting with dot (e.g., .5) is not recognized as a float — it becomes a Dot token followed by IntLiteral(5). This is acceptable per spec (explicit types mean 0.5 is preferred) but should be documented."
+    ]
+  },
+  "files_to_modify": [
+    {
+      "path": "crates/axiom-lexer/src/token.rs",
+      "changes": "1. Add Caret token variant to TokenKind operators section. 2. Change IntLiteral to store optional width suffix: IntLiteral { value: i128, suffix: Option<IntSuffix> } where IntSuffix is an enum (I8, I16, I32, I64, I128, U8, U16, U32, U64, U128). 3. Change FloatLiteral to store optional width suffix: FloatLiteral { value: f64, suffix: Option<FloatSuffix> } where FloatSuffix is an enum (F16, Bf16, F32, F64). 4. Add is_empty() method to Span to fix the clippy warning. 5. Add line and column fields to Span struct (or add a separate LineCol struct that can be computed from byte offsets via a line-index lookup). Decision recommendation: keep Span lightweight with just byte offsets, but add a LineIndex utility type that can map byte offsets to line/col on demand. This avoids per-token overhead while still providing line/col when needed for error messages. 6. Add IntBase enum (Decimal, Hex, Binary, Octal) and store it alongside IntLiteral value so the original representation is available."
+    },
+    {
+      "path": "crates/axiom-lexer/src/lexer.rs",
+      "changes": "1. Add caret (^) handling in the match arm for single-char operators. 2. Extend lex_number() to handle: (a) hex prefix 0x/0X, (b) binary prefix 0b/0B, (c) octal prefix 0o/0O, (d) underscore digit separators (skip underscores during parsing), (e) scientific notation (e/E followed by optional +/- and digits), (f) width suffixes (after digits, check for i8/i16/i32/i64/i128/u8/u16/u32/u64/u128/f16/bf16/f32/f64 suffix). 3. Extend lex_string() to handle \\0, \\xNN, and \\u{NNNN} escape sequences. 4. Handle unterminated block comments — when depth > 0 at EOF, produce an Error token. Currently the lexer silently ends. 5. Add comprehensive tests: test_hex_literal, test_binary_literal, test_octal_literal, test_underscore_in_numbers, test_scientific_notation, test_int_suffix, test_float_suffix, test_caret_operator, test_string_escape_null, test_string_escape_hex, test_string_escape_unicode, test_unterminated_block_comment, test_sample_fibonacci_no_errors, test_sample_hello_no_errors, test_sample_matmul_no_errors, test_span_accuracy."
+    },
+    {
+      "path": "crates/axiom-lexer/src/lib.rs",
+      "changes": "Re-export any new public types added to token.rs (e.g., IntSuffix, FloatSuffix, IntBase, LineIndex if added)."
+    }
+  ],
+  "files_to_create": [],
+  "acceptance_tests": [
+    {
+      "id": "AT-1",
+      "description": "Caret operator tokenizes correctly",
+      "test_name": "test_caret_operator",
+      "expected_behavior": "Input 'n^3' produces [Ident(\"n\"), Caret, IntLiteral(3), Eof]"
+    },
+    {
+      "id": "AT-2",
+      "description": "Hex integer literals tokenize correctly",
+      "test_name": "test_hex_literal",
+      "expected_behavior": "Input '0xFF 0x1A2B' produces [IntLiteral(255, Hex), IntLiteral(6699, Hex), Eof]"
+    },
+    {
+      "id": "AT-3",
+      "description": "Binary integer literals tokenize correctly",
+      "test_name": "test_binary_literal",
+      "expected_behavior": "Input '0b1010 0b11111111' produces [IntLiteral(10, Binary), IntLiteral(255, Binary), Eof]"
+    },
+    {
+      "id": "AT-4",
+      "description": "Octal integer literals tokenize correctly",
+      "test_name": "test_octal_literal",
+      "expected_behavior": "Input '0o777 0o12' produces [IntLiteral(511, Octal), IntLiteral(10, Octal), Eof]"
+    },
+    {
+      "id": "AT-5",
+      "description": "Integer width suffixes are parsed and preserved",
+      "test_name": "test_int_suffix",
+      "expected_behavior": "Input '42i32 100u64 0i8' produces IntLiteral tokens with correct suffix values"
+    },
+    {
+      "id": "AT-6",
+      "description": "Float width suffixes are parsed and preserved",
+      "test_name": "test_float_suffix",
+      "expected_behavior": "Input '3.14f32 1.0f64' produces FloatLiteral tokens with correct suffix values"
+    },
+    {
+      "id": "AT-7",
+      "description": "Scientific notation floats tokenize correctly",
+      "test_name": "test_scientific_notation",
+      "expected_behavior": "Input '1e10 3.14e-2 2.5E+3' produces FloatLiteral tokens with correct values"
+    },
+    {
+      "id": "AT-8",
+      "description": "Underscore separators in numbers are handled",
+      "test_name": "test_underscore_in_numbers",
+      "expected_behavior": "Input '1_000_000 0xFF_FF 0b1010_0101' produces correct IntLiteral values"
+    },
+    {
+      "id": "AT-9",
+      "description": "matmul_naive.axm tokenizes with zero errors",
+      "test_name": "test_sample_matmul_no_errors",
+      "expected_behavior": "Lexer produces zero error tokens when tokenizing matmul_naive.axm (the ^ in O(n^3) should now produce a Caret token)"
+    },
+    {
+      "id": "AT-10",
+      "description": "fibonacci.axm tokenizes with zero errors",
+      "test_name": "test_sample_fibonacci_no_errors",
+      "expected_behavior": "Lexer produces zero error tokens when tokenizing fibonacci.axm"
+    },
+    {
+      "id": "AT-11",
+      "description": "hello.axm tokenizes with zero errors",
+      "test_name": "test_sample_hello_no_errors",
+      "expected_behavior": "Lexer produces zero error tokens when tokenizing hello.axm"
+    },
+    {
+      "id": "AT-12",
+      "description": "Clippy produces zero warnings",
+      "test_name": "clippy_check",
+      "expected_behavior": "cargo clippy -p axiom-lexer -- -D warnings exits with code 0"
+    },
+    {
+      "id": "AT-13",
+      "description": "Unterminated block comment produces Error token",
+      "test_name": "test_unterminated_block_comment",
+      "expected_behavior": "Input 'fn /* unterminated' produces [Fn, Error(\"unterminated block comment\"), Eof] and lexing completes"
+    },
+    {
+      "id": "AT-14",
+      "description": "String escape sequences work for null, hex, unicode",
+      "test_name": "test_string_escape_sequences",
+      "expected_behavior": "Input with \\0, \\x41, \\u{1F600} produces correct string values"
+    },
+    {
+      "id": "AT-15",
+      "description": "Integer overflow produces an Error token",
+      "test_name": "test_integer_overflow",
+      "expected_behavior": "A number exceeding i128::MAX range produces an Error token but lexing continues"
+    }
+  ],
+  "technical_spec": "# M1.1 Lexer Completion — Technical Specification\n\n## Overview\n\nThe AXIOM lexer is approximately 80% complete. The core architecture (hand-written, byte-oriented, error-recovering) is sound. This spec covers the remaining 20%: missing token types, number literal enhancements, and additional edge case handling.\n\n## 1. New Token: Caret (`^`)\n\n**Priority: CRITICAL** — blocks matmul_naive.axm from lexing cleanly.\n\nAdd `Caret` variant to `TokenKind`. Handle `b'^'` in the main match arm of `next_token()`. This is a single-character token with no multi-character variants.\n\n## 2. Number Literal Enhancements\n\n### 2a. Integer Base Prefixes\n\nSupport three additional integer bases:\n- `0x` / `0X` — hexadecimal (digits: 0-9, a-f, A-F)\n- `0b` / `0B` — binary (digits: 0, 1)\n- `0o` / `0O` — octal (digits: 0-7)\n\nImplementation: In `lex_number()`, after consuming the first `0`, check the next byte. If it's `x`/`X`, `b`/`B`, or `o`/`O`, switch to the appropriate digit set. Invalid digits for the base (e.g., `0b2`) should produce an Error token.\n\n### 2b. Underscore Separators\n\nAllow `_` between digits in any numeric literal. Rules:\n- Underscores cannot appear at the start or end of a number: `_42` is an identifier, `42_` is an error.\n- Underscores cannot be adjacent: `42__0` is an error.\n- Underscores can appear between digits: `1_000_000`, `0xFF_FF`, `0b1010_0101`.\n\nImplementation: When consuming digits, skip `_` characters but validate the rules above. Strip underscores before parsing the numeric value.\n\n### 2c. Scientific Notation\n\nSupport `e`/`E` exponent notation for floats:\n- `1e10` → 1.0e10\n- `3.14e-2` → 0.0314\n- `2.5E+3` → 2500.0\n- `1e10` (no decimal point) should still be treated as a float since scientific notation implies floating-point.\n\nImplementation: After consuming digits (and optional `.` + digits), check for `e`/`E`. If present, consume optional `+`/`-` sign, then require at least one digit. Mark as float.\n\n### 2d. Width Suffixes\n\nSupport type suffixes on number literals:\n- Integer suffixes: `i8`, `i16`, `i32`, `i64`, `i128`, `u8`, `u16`, `u32`, `u64`, `u128`\n- Float suffixes: `f16`, `bf16`, `f32`, `f64`\n\nExamples: `42i32`, `0xFFu8`, `3.14f32`, `1.0e10f64`\n\n**Token type changes:**\n\nDefine new enums:\n```rust\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum IntSuffix {\n    I8, I16, I32, I64, I128,\n    U8, U16, U32, U64, U128,\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum FloatSuffix {\n    F16, Bf16, F32, F64,\n}\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum IntBase {\n    Decimal,\n    Hex,\n    Binary,\n    Octal,\n}\n```\n\nModify `TokenKind` variants:\n```rust\nIntLiteral { value: i128, suffix: Option<IntSuffix>, base: IntBase },\nFloatLiteral { value: f64, suffix: Option<FloatSuffix> },\n```\n\n**IMPORTANT:** This changes the shape of IntLiteral and FloatLiteral from tuple variants to struct variants. All existing tests and pattern matches across the codebase must be updated. The driver's main.rs does not destructure these variants so it should still work via Debug printing.\n\nImplementation: After consuming all digits (and optional decimal/exponent parts), check if the remaining input starts with a known suffix. Consume it and store in the token. Be careful not to confuse a suffix with an identifier that happens to follow a number — `42i` should be IntLiteral(42) followed by Ident(\"i\"), but `42i32` should be IntLiteral(42, Some(I32), Decimal). The suffix must be an exact match to one of the known suffix strings.\n\n## 3. String Escape Sequence Enhancements\n\nAdd support for:\n- `\\0` — null byte (0x00)\n- `\\xNN` — hex byte escape (exactly 2 hex digits)\n- `\\u{NNNN}` — unicode escape (1-6 hex digits, must be valid Unicode scalar value)\n\nInvalid hex digits or out-of-range unicode values should produce Error tokens for the string.\n\n## 4. Span Improvements\n\n### 4a. Fix Clippy Warning\n\nAdd `is_empty()` method to `Span`:\n```rust\npub fn is_empty(&self) -> bool {\n    self.start == self.end\n}\n```\n\n### 4b. Line/Column Support\n\nThe CLAUDE.md spec says tokens should carry `(start_offset, end_offset, line, col)`. Two approaches:\n\n**Option A (recommended):** Keep `Span` as byte offsets only. Add a `LineIndex` utility that builds a line-start-offsets table from the source string. Provide `line_col(offset: u32) -> (u32, u32)` method. This is zero-cost for lexing and only pays the lookup cost when needed (error reporting). This pattern is used by rust-analyzer and similar tools.\n\n**Option B:** Add `line` and `col` fields to `Span` or `Token`. This increases per-token memory and requires the lexer to track line/col during scanning. Simpler but wastes memory.\n\n**Decision: Option A.** Add a `LineIndex` struct to `token.rs` (or a new `line_index.rs` module). The lexer does not need to change; `LineIndex` is constructed separately from the source string.\n\n```rust\npub struct LineIndex {\n    line_starts: Vec<u32>,\n}\n\nimpl LineIndex {\n    pub fn new(source: &str) -> Self { ... }\n    pub fn line_col(&self, offset: u32) -> (u32, u32) { ... }  // 0-based line and col\n}\n```\n\n## 5. Error Recovery Improvements\n\n### 5a. Unterminated Block Comments\n\nCurrently, if a block comment is never closed (`/* ...` without `*/`), the lexer silently consumes to EOF and then returns Eof. It should produce an Error token:\n```\nError(\"unterminated block comment\")\n```\n\nImplementation: In `skip_whitespace_and_comments()`, after the block-comment loop, if `depth > 0`, record an error. However, since this function doesn't return tokens, it needs to either: (a) push an Error token into `self.errors` and set a flag, or (b) be refactored to return an optional error. Option (a) is simpler and consistent with current patterns.\n\n## 6. Test Coverage\n\nThe following test functions must be added (all in `lexer.rs` `#[cfg(test)]` module):\n\n| Test Name | What It Tests |\n|-----------|---------------|\n| test_caret_operator | `^` produces Caret token |\n| test_hex_literal | `0xFF` `0x1A` produce correct IntLiteral values |\n| test_binary_literal | `0b1010` produces IntLiteral(10) |\n| test_octal_literal | `0o777` produces IntLiteral(511) |\n| test_underscore_in_numbers | `1_000` produces IntLiteral(1000) |\n| test_scientific_notation | `1e10` `3.14e-2` produce correct FloatLiteral values |\n| test_int_suffix | `42i32` `0xFFu8` produce IntLiteral with correct suffix |\n| test_float_suffix | `3.14f32` `1.0f64` produce FloatLiteral with correct suffix |\n| test_string_escape_null | `\"\\0\"` produces StringLiteral containing null |\n| test_string_escape_hex | `\"\\x41\"` produces StringLiteral(\"A\") |\n| test_string_escape_unicode | `\"\\u{41}\"` produces StringLiteral(\"A\") |\n| test_unterminated_block_comment | `/* no close` produces error |\n| test_sample_fibonacci_no_errors | Lex fibonacci.axm, assert 0 errors |\n| test_sample_hello_no_errors | Lex hello.axm, assert 0 errors |\n| test_sample_matmul_no_errors | Lex matmul_naive.axm, assert 0 errors |\n| test_span_accuracy | Verify specific tokens have correct start/end offsets |\n| test_all_type_keywords | All 18 type keywords produce correct TokenKind |\n| test_all_keywords | All 17 keywords produce correct TokenKind |\n| test_invalid_hex_digit | `0xGG` produces Error token |\n| test_invalid_binary_digit | `0b23` produces Error token |\n| test_consecutive_underscores | `1__0` produces Error token |\n| test_trailing_underscore | `42_` produces Error token |\n| test_number_followed_by_ident | `42foo` produces IntLiteral(42) then Ident(\"foo\") — actually this depends on suffix parsing; `42foo` should be an error since `foo` is not a valid suffix but starts with identifier chars after digits |\n\n## 7. Implementation Order\n\n1. **Fix clippy** — add `is_empty()` to Span (< 1 minute)\n2. **Add Caret token** — unblocks matmul_naive.axm (< 5 minutes)\n3. **Add LineIndex** — provides line/col lookup (< 15 minutes)\n4. **Extend lex_number()** — hex/binary/octal/underscore/scientific/suffix (largest change, ~1 hour)\n5. **Extend lex_string()** — additional escape sequences (< 15 minutes)\n6. **Fix unterminated block comment handling** (< 10 minutes)\n7. **Add all new tests** (< 30 minutes)\n8. **Update existing tests** for changed IntLiteral/FloatLiteral shapes (< 15 minutes)\n9. **Final verification** — cargo test, cargo clippy, lex all sample files (< 5 minutes)\n\n## 8. Risk Assessment\n\n**Medium risk:** Changing `IntLiteral(i128)` to `IntLiteral { value, suffix, base }` is a breaking change for any downstream code that pattern-matches on `TokenKind`. Currently only `axiom-driver/src/main.rs` uses the lexer, and it prints via `Debug` rather than destructuring, so impact should be minimal. But any parser code in progress would need updating.\n\n**Low risk:** All other changes are additive — new match arms, new methods, new tests.\n\n**Mitigation:** Run `cargo test --workspace` after changes to catch any breakage across crates.",
+  "edge_cases": [
+    "Number literal `0` alone — must be IntLiteral(0), not trigger a base prefix check (0 followed by non-x/b/o)",
+    "Number literal `0.5` — must be FloatLiteral(0.5), not IntLiteral(0) + Dot + IntLiteral(5). Currently handled correctly.",
+    "Number literal `0..5` — must be IntLiteral(0) + DotDot + IntLiteral(5). Currently handled correctly via the dotdot guard.",
+    "Number `0x` with no digits after prefix — should produce Error token",
+    "Number `0b` with no digits after prefix — should produce Error token",
+    "Number `0o` with no digits after prefix — should produce Error token",
+    "Scientific notation `1e` with no exponent digits — should produce Error token",
+    "Scientific notation `1e+` with sign but no digits — should produce Error token",
+    "Suffix `42i3` (partial suffix 'i3' is not a valid type) — should be IntLiteral(42) + Ident(\"i3\"), or an error. Recommendation: treat as IntLiteral(42) followed by Ident(\"i3\") since the suffix must be an exact match.",
+    "Suffix ambiguity: `42i32` vs `42 i32` — the first is a suffixed literal, the second is IntLiteral + keyword I32. No ambiguity because no whitespace in the first case.",
+    "Float with int suffix: `3.14i32` — should produce Error token (cannot use int suffix on float)",
+    "Int with float suffix: `42f32` — should produce FloatLiteral(42.0, Some(F32)) since the suffix implies float interpretation. This matches Rust's behavior.",
+    "Hex float: `0xFF.5` — decision needed. Recommendation: do not support hex floats; treat as IntLiteral(255) + Dot + IntLiteral(5). Hex floats are extremely rare.",
+    "Annotation `@` at EOF — correctly produces Error token already",
+    "Optimization hole `?` at EOF — correctly produces Error token already",
+    "Unterminated string at EOF — correctly produces Error token already",
+    "Very large integer exceeding i128::MAX — parse error already handled, produces Error token",
+    "UTF-8 multibyte characters in identifiers — spec says identifiers are ASCII only. Non-ASCII in identifier position should produce Error tokens. Currently handled since the lexer works on bytes and only accepts ASCII alphabetic + underscore.",
+    "UTF-8 multibyte characters in strings — currently handled byte-by-byte with `as char` cast. This is subtly wrong for multi-byte UTF-8; each byte would be pushed separately. Should consume full UTF-8 codepoints. However since source is valid UTF-8 and we index by bytes, the string content will be correct if we just copy bytes as-is.",
+    "Empty block comment `/**/` — currently handled correctly",
+    "Block comment with asterisks `/** */` — currently handled correctly",
+    "Nested annotation `@layout(row_major)` — lexer correctly produces Annotation + LParen + Ident + RParen (parser handles the structure)",
+    "Underscore-only identifier `_` — currently produces Ident(\"_\"), which is correct for a wildcard/discard pattern",
+    "Number at end of file `42` (no trailing whitespace or newline) — currently handled correctly"
+  ]
+}
