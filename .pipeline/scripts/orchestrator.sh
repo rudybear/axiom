@@ -76,10 +76,12 @@ check_dependencies() {
 check_tools() {
     echo "=== Checking required tools ==="
     local required
-    required=$(jq -r '.required_tools[]' "$CONFIG_FILE")
+    required=$(jq -r '.required_tools[]' "$CONFIG_FILE" | tr -d '\r')
     local missing=0
     for tool in $required; do
-        if command -v "$tool" > /dev/null 2>&1; then
+        # Use --version probe — works reliably on Windows/MSYS2 where
+        # which/command -v may not resolve .exe files
+        if "$tool" --version > /dev/null 2>&1 || "$tool" --help > /dev/null 2>&1; then
             echo "  ✓ $tool"
         else
             echo "  ✗ $tool (MISSING)"
@@ -88,9 +90,9 @@ check_tools() {
     done
 
     local optional
-    optional=$(jq -r '.optional_tools[]' "$CONFIG_FILE")
+    optional=$(jq -r '.optional_tools[]' "$CONFIG_FILE" | tr -d '\r')
     for tool in $optional; do
-        if command -v "$tool" > /dev/null 2>&1; then
+        if "$tool" --version > /dev/null 2>&1 || "$tool" --help > /dev/null 2>&1; then
             echo "  ✓ $tool (optional)"
         else
             echo "  - $tool (optional, not found)"
