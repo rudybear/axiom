@@ -1,5 +1,7 @@
 //! AXIOM compiler CLI driver.
 
+mod compile;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -60,7 +62,7 @@ fn main() -> miette::Result<()> {
             Ok(())
         }
 
-        Commands::Compile { input, output: _, emit } => {
+        Commands::Compile { input, output, emit } => {
             let source = std::fs::read_to_string(&input)
                 .map_err(|e| miette::miette!("Failed to read {}: {}", input, e))?;
 
@@ -130,7 +132,49 @@ fn main() -> miette::Result<()> {
                     eprintln!("TODO: --emit={level} not yet implemented");
                 }
                 None => {
-                    eprintln!("TODO: full compilation not yet implemented");
+                    // Full compilation: .axm -> native binary
+                    let result = axiom_parser::parse(&source);
+                    if result.has_errors() {
+                        eprintln!("--- Parse Errors ---");
+                        for err in &result.errors {
+                            eprintln!("  {err}");
+                        }
+                        return Err(miette::miette!(
+                            "parsing failed with {} error(s)",
+                            result.errors.len()
+                        ));
+                    }
+                    let hir_module =
+                        axiom_hir::lower(&result.module).map_err(|errors| {
+                            for err in &errors {
+                                eprintln!("  {err}");
+                            }
+                            miette::miette!(
+                                "HIR lowering failed with {} error(s)",
+                                errors.len()
+                            )
+                        })?;
+                    let llvm_ir =
+                        axiom_codegen::codegen(&hir_module).map_err(|errors| {
+                            for err in &errors {
+                                eprintln!("  {err}");
+                            }
+                            miette::miette!(
+                                "codegen failed with {} error(s)",
+                                errors.len()
+                            )
+                        })?;
+
+                    let output_path = output.unwrap_or_else(|| {
+                        if cfg!(windows) {
+                            "a.exe".into()
+                        } else {
+                            "a.out".into()
+                        }
+                    });
+
+                    compile::compile_to_binary(&llvm_ir, &output_path)?;
+                    eprintln!("compiled {} -> {}", input, output_path);
                 }
             }
 
