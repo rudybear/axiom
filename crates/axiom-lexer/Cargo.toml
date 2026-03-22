@@ -1,0 +1,12 @@
+[package]
+name = "axiom-lexer"
+version.workspace = true
+edition.workspace = true
+description = "Lexer/tokenizer for the AXIOM language"
+
+[dependencies]
+thiserror.workspace = true
+miette.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

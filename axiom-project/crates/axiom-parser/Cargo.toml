@@ -1,0 +1,13 @@
+[package]
+name = "axiom-parser"
+version.workspace = true
+edition.workspace = true
+description = "Parser for the AXIOM language — produces typed AST"
+
+[dependencies]
+axiom-lexer = { path = "../axiom-lexer" }
+thiserror.workspace = true
+miette.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

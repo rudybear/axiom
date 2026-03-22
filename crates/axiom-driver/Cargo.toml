@@ -1,0 +1,16 @@
+[package]
+name = "axiom-driver"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "axiom"
+path = "src/main.rs"
+
+[dependencies]
+axiom-lexer = { path = "../axiom-lexer" }
+axiom-parser = { path = "../axiom-parser" }
+clap.workspace = true
+miette = { workspace = true, features = ["fancy"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

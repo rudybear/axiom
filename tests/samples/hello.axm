@@ -1,0 +1,7 @@
+@module hello;
+@intent("Print greeting to stdout");
+
+fn main() -> i32 {
+    print("Hello from AXIOM!");
+    return 0;
+}

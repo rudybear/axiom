@@ -1,0 +1,35 @@
+@module matmul;
+@intent("Dense matrix multiplication — naive baseline for optimization");
+@constraint { correctness: "IEEE 754 compliant" };
+@target { cpu.simd };
+
+@pure
+@complexity O(n^3)
+@vectorizable(i, j, k)
+fn matmul(
+    a: tensor[f32, M, K] @layout(row_major) @align(64),
+    b: tensor[f32, K, N] @layout(col_major) @align(64),
+) -> tensor[f32, M, N] @layout(row_major) {
+
+    @strategy {
+        tiling:   { M: ?tile_m, N: ?tile_n, K: ?tile_k }
+        order:    ?loop_order
+        parallel: ?parallel_dims
+        unroll:   ?unroll_factor
+        prefetch: ?prefetch_distance
+    }
+
+    let result: tensor[f32, M, N] = tensor.zeros[f32, M, N];
+
+    for i: i32 in range(M) {
+        for j: i32 in range(N) {
+            let acc: f32 = 0.0;
+            for k: i32 in range(K) {
+                acc = acc + a[i, k] * b[k, j];
+            }
+            result[i, j] = acc;
+        }
+    }
+
+    return result;
+}
