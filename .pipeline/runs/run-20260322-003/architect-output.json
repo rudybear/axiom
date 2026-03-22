@@ -1,0 +1,1060 @@
+{
+  "milestone": "M1.3-hir",
+  "architect_agent": "claude-opus-4-6",
+  "timestamp": "2026-03-22T00:30:00Z",
+  "status": "designed",
+
+  "design_summary": "HIR (High-Level IR) with AST→HIR lowering, annotation validation, and basic type validation. The HIR mirrors the AST structure but adds unique node IDs, validates annotation placement, and checks that type references refer to known primitives or user-defined structs. This is Phase 1 — no full type checking, no name resolution beyond basic validation, no control-flow analysis.",
+
+  "files_to_create": [
+    {
+      "path": "crates/axiom-hir/src/hir.rs",
+      "purpose": "HIR node type definitions — the core IR data structures",
+      "detailed_spec": {
+        "overview": "Defines the HIR node types that mirror the AST but with unique IDs on every node, validated annotations, and validated type references. Uses newtype ID wrappers for type-safe cross-references.",
+        "types": [
+          {
+            "name": "NodeId",
+            "definition": "pub struct NodeId(pub u32);",
+            "doc": "Unique identifier for every HIR node. Monotonically increasing, assigned during lowering.",
+            "derives": ["Debug", "Clone", "Copy", "PartialEq", "Eq", "Hash"]
+          },
+          {
+            "name": "FuncId",
+            "definition": "pub struct FuncId(pub u32);",
+            "doc": "Index of a function within HirModule.functions",
+            "derives": ["Debug", "Clone", "Copy", "PartialEq", "Eq", "Hash"]
+          },
+          {
+            "name": "ExprId",
+            "definition": "pub struct ExprId(pub u32);",
+            "doc": "Index into the expression arena within a function body",
+            "derives": ["Debug", "Clone", "Copy", "PartialEq", "Eq", "Hash"]
+          },
+          {
+            "name": "StmtId",
+            "definition": "pub struct StmtId(pub u32);",
+            "doc": "Index into the statement arena within a function body",
+            "derives": ["Debug", "Clone", "Copy", "PartialEq", "Eq", "Hash"]
+          },
+          {
+            "name": "NodeIdGen",
+            "definition": "pub struct NodeIdGen { next: u32 }",
+            "doc": "Monotonic ID generator for HIR lowering. Methods: new() -> Self, next(&mut self) -> NodeId",
+            "derives": ["Debug"]
+          },
+          {
+            "name": "HirModule",
+            "definition": {
+              "fields": {
+                "name": "Option<String>",
+                "annotations": "Vec<HirAnnotation>",
+                "functions": "Vec<HirFunction>",
+                "structs": "Vec<HirStruct>",
+                "type_aliases": "Vec<HirTypeAlias>",
+                "imports": "Vec<HirImport>"
+              }
+            },
+            "doc": "Top-level HIR module, the result of lowering an ast::Module."
+          },
+          {
+            "name": "HirFunction",
+            "definition": {
+              "fields": {
+                "id": "NodeId",
+                "name": "String",
+                "name_span": "Span",
+                "annotations": "Vec<HirAnnotation>",
+                "params": "Vec<HirParam>",
+                "return_type": "HirType",
+                "body": "HirBlock",
+                "span": "Span"
+              }
+            },
+            "doc": "A function with validated annotations. @pure, @const, @inline, @complexity, @intent, @vectorizable, @parallel, @strategy, @constraint are valid on functions. @layout and @align are rejected on functions."
+          },
+          {
+            "name": "HirParam",
+            "definition": {
+              "fields": {
+                "id": "NodeId",
+                "name": "String",
+                "name_span": "Span",
+                "ty": "HirType",
+                "annotations": "Vec<HirAnnotation>"
+              }
+            },
+            "doc": "Function parameter with validated annotations. @layout and @align are valid on params. @pure is rejected on params."
+          },
+          {
+            "name": "HirStruct",
+            "definition": {
+              "fields": {
+                "id": "NodeId",
+                "name": "String",
+                "name_span": "Span",
+                "annotations": "Vec<HirAnnotation>",
+                "fields": "Vec<HirStructField>",
+                "span": "Span"
+              }
+            },
+            "doc": "Struct definition with validated annotations."
+          },
+          {
+            "name": "HirStructField",
+            "definition": {
+              "fields": {
+                "id": "NodeId",
+                "name": "String",
+                "name_span": "Span",
+                "ty": "HirType",
+                "annotations": "Vec<HirAnnotation>"
+              }
+            },
+            "doc": "Struct field with validated annotations. @layout and @align are valid on fields."
+          },
+          {
+            "name": "HirTypeAlias",
+            "definition": {
+              "fields": {
+                "id": "NodeId",
+                "name": "String",
+                "name_span": "Span",
+                "ty": "HirType",
+                "span": "Span"
+              }
+            },
+            "doc": "Type alias: type Name = SomeType;"
+          },
+          {
+            "name": "HirImport",
+            "definition": {
+              "fields": {
+                "id": "NodeId",
+                "path": "Vec<String>",
+                "alias": "Option<String>",
+                "span": "Span"
+              }
+            },
+            "doc": "Import declaration."
+          },
+          {
+            "name": "HirBlock",
+            "definition": {
+              "fields": {
+                "id": "NodeId",
+                "annotations": "Vec<HirAnnotation>",
+                "stmts": "Vec<HirStmt>",
+                "span": "Span"
+              }
+            },
+            "doc": "Block of statements. Blocks inside function bodies can carry @strategy annotations."
+          },
+          {
+            "name": "HirStmt",
+            "definition": {
+              "fields": {
+                "id": "NodeId",
+                "kind": "HirStmtKind",
+                "span": "Span"
+              }
+            },
+            "doc": "Statement with unique ID and span."
+          },
+          {
+            "name": "HirStmtKind",
+            "definition": "pub enum HirStmtKind",
+            "variants": [
+              {
+                "name": "Let",
+                "fields": {
+                  "name": "String",
+                  "name_span": "Span",
+                  "ty": "HirType",
+                  "value": "HirExpr",
+                  "mutable": "bool"
+                }
+              },
+              {
+                "name": "Assign",
+                "fields": {
+                  "target": "HirExpr",
+                  "value": "HirExpr"
+                }
+              },
+              {
+                "name": "Return",
+                "fields": {
+                  "value": "HirExpr"
+                }
+              },
+              {
+                "name": "If",
+                "fields": {
+                  "condition": "HirExpr",
+                  "then_block": "HirBlock",
+                  "else_block": "Option<HirBlock>"
+                }
+              },
+              {
+                "name": "For",
+                "fields": {
+                  "var": "String",
+                  "var_span": "Span",
+                  "var_type": "HirType",
+                  "iterable": "HirExpr",
+                  "body": "HirBlock"
+                }
+              },
+              {
+                "name": "While",
+                "fields": {
+                  "condition": "HirExpr",
+                  "body": "HirBlock"
+                }
+              },
+              {
+                "name": "Expr",
+                "fields": {
+                  "expr": "HirExpr"
+                }
+              }
+            ]
+          },
+          {
+            "name": "HirExpr",
+            "definition": {
+              "fields": {
+                "id": "NodeId",
+                "kind": "HirExprKind",
+                "span": "Span"
+              }
+            },
+            "doc": "Expression with unique ID and span. Span is inherited from the AST — for AST nodes that carry spans directly, we propagate them; for nodes without explicit spans, we compute them from child spans."
+          },
+          {
+            "name": "HirExprKind",
+            "definition": "pub enum HirExprKind",
+            "variants": [
+              {"name": "IntLiteral", "fields": {"value": "i128"}},
+              {"name": "FloatLiteral", "fields": {"value": "f64"}},
+              {"name": "StringLiteral", "fields": {"value": "String"}},
+              {"name": "BoolLiteral", "fields": {"value": "bool"}},
+              {"name": "Ident", "fields": {"name": "String"}},
+              {"name": "OptHole", "fields": {"name": "String"}},
+              {
+                "name": "BinaryOp",
+                "fields": {
+                  "op": "BinOp",
+                  "lhs": "Box<HirExpr>",
+                  "rhs": "Box<HirExpr>"
+                },
+                "note": "BinOp is re-exported from ast — identical enum, no desugaring needed at this level"
+              },
+              {
+                "name": "UnaryOp",
+                "fields": {
+                  "op": "UnaryOp",
+                  "operand": "Box<HirExpr>"
+                }
+              },
+              {
+                "name": "Call",
+                "fields": {
+                  "func": "Box<HirExpr>",
+                  "args": "Vec<HirExpr>"
+                }
+              },
+              {
+                "name": "Index",
+                "fields": {
+                  "expr": "Box<HirExpr>",
+                  "indices": "Vec<HirExpr>"
+                }
+              },
+              {
+                "name": "FieldAccess",
+                "fields": {
+                  "expr": "Box<HirExpr>",
+                  "field": "String"
+                }
+              },
+              {
+                "name": "MethodCall",
+                "fields": {
+                  "expr": "Box<HirExpr>",
+                  "method": "String",
+                  "args": "Vec<HirExpr>"
+                }
+              }
+            ]
+          },
+          {
+            "name": "HirType",
+            "definition": "pub enum HirType",
+            "doc": "Validated type reference. During lowering, Named types are checked against the set of known primitives and user-defined struct names. Unknown types produce a LowerError but lowering continues (error recovery).",
+            "variants": [
+              {"name": "Primitive", "fields": {"kind": "PrimitiveType"}, "doc": "Resolved primitive type (i32, f64, bool, etc.)"},
+              {"name": "UserDefined", "fields": {"name": "String"}, "doc": "Resolved reference to a user-defined struct or type alias"},
+              {"name": "Tensor", "fields": {"element": "Box<HirType>", "dims": "Vec<HirDimExpr>"}},
+              {"name": "Array", "fields": {"element": "Box<HirType>", "length": "Box<HirExpr>"}},
+              {"name": "Slice", "fields": {"element": "Box<HirType>"}},
+              {"name": "Ptr", "fields": {"element": "Box<HirType>"}},
+              {"name": "Tuple", "fields": {"elements": "Vec<HirType>"}},
+              {"name": "Fn", "fields": {"params": "Vec<HirType>", "ret": "Box<HirType>"}},
+              {"name": "Unknown", "fields": {"name": "String"}, "doc": "Placeholder for types that failed validation — allows lowering to continue despite errors"}
+            ]
+          },
+          {
+            "name": "PrimitiveType",
+            "definition": "pub enum PrimitiveType",
+            "variants": ["I8", "I16", "I32", "I64", "I128", "U8", "U16", "U32", "U64", "U128", "F16", "Bf16", "F32", "F64", "Bool"],
+            "doc": "All primitive types from the AXIOM spec. Resolved from string names during lowering."
+          },
+          {
+            "name": "HirDimExpr",
+            "definition": "pub enum HirDimExpr",
+            "variants": [
+              {"name": "Const", "fields": {"value": "i64"}},
+              {"name": "Named", "fields": {"name": "String"}},
+              {"name": "Dynamic"}
+            ],
+            "doc": "Tensor dimension expression, mirrors ast::DimExpr."
+          },
+          {
+            "name": "HirAnnotation",
+            "definition": {
+              "fields": {
+                "kind": "HirAnnotationKind",
+                "span": "Span"
+              }
+            },
+            "doc": "Annotation that has passed target validation."
+          },
+          {
+            "name": "HirAnnotationKind",
+            "definition": "pub enum HirAnnotationKind",
+            "variants": [
+              "Pure",
+              "Const",
+              {"name": "Inline", "fields": {"hint": "InlineHint"}},
+              {"name": "Complexity", "fields": {"expr": "String"}},
+              {"name": "Intent", "fields": {"description": "String"}},
+              {"name": "Module", "fields": {"name": "String"}},
+              {"name": "Constraint", "fields": {"entries": "Vec<(String, AnnotationValue)>"}},
+              {"name": "Target", "fields": {"targets": "Vec<String>"}},
+              {"name": "Strategy", "fields": {"block": "StrategyBlock"}},
+              {"name": "Transfer", "fields": {"block": "TransferBlock"}},
+              {"name": "Vectorizable", "fields": {"dims": "Vec<String>"}},
+              {"name": "Parallel", "fields": {"dims": "Vec<String>"}},
+              {"name": "Layout", "fields": {"kind": "LayoutKind"}},
+              {"name": "Align", "fields": {"bytes": "u64"}},
+              {"name": "OptimizationLog", "fields": {"entries": "Vec<OptLogEntry>"}},
+              {"name": "Custom", "fields": {"name": "String", "args": "Vec<AnnotationValue>"}}
+            ],
+            "note": "InlineHint, LayoutKind, AnnotationValue, StrategyBlock, TransferBlock, OptLogEntry are re-exported from axiom_parser::ast. No need to duplicate these simple enums."
+          }
+        ],
+        "re_exports_from_ast": [
+          "BinOp", "UnaryOp", "InlineHint", "LayoutKind", "AnnotationValue",
+          "StrategyBlock", "StrategyValue", "TransferBlock", "OptLogEntry"
+        ]
+      }
+    },
+    {
+      "path": "crates/axiom-hir/src/lower.rs",
+      "purpose": "AST→HIR lowering with annotation validation and type validation",
+      "detailed_spec": {
+        "overview": "Walks the AST, produces HIR nodes, validates annotation placement and type references. Collects all errors rather than stopping at the first one. Returns Ok(HirModule) on success, Err(Vec<LowerError>) on failure.",
+        "public_api": [
+          {
+            "signature": "pub fn lower(module: &ast::Module) -> Result<HirModule, Vec<LowerError>>",
+            "doc": "Lower an AST module to HIR. Validates annotation targets and type references. Returns all collected errors on failure."
+          }
+        ],
+        "internal_structure": {
+          "struct": "LoweringContext",
+          "fields": {
+            "id_gen": "NodeIdGen — generates unique IDs",
+            "errors": "Vec<LowerError> — collected errors",
+            "known_types": "HashSet<String> — set of valid type names (primitives + user-defined structs + type aliases)"
+          },
+          "methods": [
+            "fn new() -> Self — initializes with all primitive type names in known_types",
+            "fn collect_user_defined_types(&mut self, module: &ast::Module) — first pass: register all struct names and type aliases",
+            "fn lower_module(&mut self, module: &ast::Module) -> HirModule",
+            "fn lower_function(&mut self, func: &ast::Function) -> HirFunction",
+            "fn lower_param(&mut self, param: &ast::Param) -> HirParam",
+            "fn lower_block(&mut self, block: &ast::Block) -> HirBlock",
+            "fn lower_stmt(&mut self, stmt: &ast::Spanned<ast::Stmt>) -> HirStmt",
+            "fn lower_expr(&mut self, expr: &ast::Expr, span: Span) -> HirExpr — span passed down since ast::Expr does not carry its own span",
+            "fn lower_type(&mut self, ty: &ast::TypeExpr, span: Span) -> HirType — validates named types against known_types",
+            "fn lower_annotation(&mut self, ann: &ast::Spanned<ast::Annotation>) -> HirAnnotation",
+            "fn validate_annotations(&mut self, annotations: &[HirAnnotation], target: AnnotationTarget, target_span: Span) — checks each annotation is valid for its target",
+            "fn resolve_primitive_type(name: &str) -> Option<PrimitiveType> — maps string to PrimitiveType enum"
+          ]
+        },
+        "annotation_validation_rules": {
+          "overview": "Each annotation is only valid on certain targets. Invalid placement produces a LowerError::InvalidAnnotationTarget.",
+          "rules": [
+            {"annotation": "@pure", "valid_on": ["Function"], "invalid_on": ["Param", "StructField", "Block", "Module", "Struct"]},
+            {"annotation": "@const", "valid_on": ["Function"], "invalid_on": ["Param", "StructField", "Block", "Module", "Struct"]},
+            {"annotation": "@inline", "valid_on": ["Function"], "invalid_on": ["Param", "StructField", "Block", "Module", "Struct"]},
+            {"annotation": "@complexity", "valid_on": ["Function"], "invalid_on": ["Param", "StructField", "Block", "Module", "Struct"]},
+            {"annotation": "@intent", "valid_on": ["Function", "Module"], "invalid_on": ["Param", "StructField", "Block", "Struct"]},
+            {"annotation": "@module", "valid_on": ["Module"], "invalid_on": ["Function", "Param", "StructField", "Block", "Struct"]},
+            {"annotation": "@constraint", "valid_on": ["Function", "Module"], "invalid_on": ["Param", "StructField", "Block", "Struct"]},
+            {"annotation": "@target", "valid_on": ["Function", "Module"], "invalid_on": ["Param", "StructField", "Block", "Struct"]},
+            {"annotation": "@strategy", "valid_on": ["Function", "Block"], "invalid_on": ["Param", "StructField", "Module", "Struct"]},
+            {"annotation": "@transfer", "valid_on": ["Function", "Module"], "invalid_on": ["Param", "StructField", "Block", "Struct"]},
+            {"annotation": "@vectorizable", "valid_on": ["Function"], "invalid_on": ["Param", "StructField", "Block", "Module", "Struct"]},
+            {"annotation": "@parallel", "valid_on": ["Function"], "invalid_on": ["Param", "StructField", "Block", "Module", "Struct"]},
+            {"annotation": "@layout", "valid_on": ["Param", "StructField"], "invalid_on": ["Function", "Block", "Module", "Struct"]},
+            {"annotation": "@align", "valid_on": ["Param", "StructField"], "invalid_on": ["Function", "Block", "Module", "Struct"]},
+            {"annotation": "@optimization_log", "valid_on": ["Function"], "invalid_on": ["Param", "StructField", "Block", "Module", "Struct"]},
+            {"annotation": "@custom", "valid_on": ["Function", "Module", "Param", "StructField", "Block", "Struct"], "note": "Custom annotations allowed everywhere — they are for extensibility"}
+          ]
+        },
+        "type_validation_rules": {
+          "overview": "Named types must refer to a known primitive or a user-defined struct/type alias. Unknown types produce LowerError::UnknownType but lowering continues using HirType::Unknown.",
+          "primitive_names": ["i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f16", "bf16", "f32", "f64", "bool"],
+          "algorithm": [
+            "1. First pass: scan all items to collect struct names and type alias names into known_types",
+            "2. Second pass: lower all items, resolving TypeExpr::Named against known_types",
+            "3. For Named types: if in primitives → HirType::Primitive, if in user_defined → HirType::UserDefined, else → HirType::Unknown + emit LowerError::UnknownType"
+          ]
+        },
+        "lowering_details": {
+          "expr_span_handling": "The AST Expr enum does not carry spans directly. When lowering a Spanned<Stmt>, the stmt's span can serve as the expression span for top-level expressions in that statement. For nested expressions (BinaryOp children, Call args, etc.), we must synthesize a Span::DUMMY (0..0) since the AST doesn't track them. This is acceptable for Phase 1; Phase 2 can add span tracking to AST expressions.",
+          "desugaring": "Phase 1 performs no desugaring — the HIR is structurally 1:1 with the AST. Future phases may desugar for/while into lower-level loop constructs.",
+          "two_pass_approach": "The lowerer must do two passes: (1) collect all user-defined type names, (2) lower everything. This ensures forward references work (a function can reference a struct defined later in the file)."
+        }
+      }
+    },
+    {
+      "path": "crates/axiom-hir/src/error.rs",
+      "purpose": "Error types for HIR lowering",
+      "detailed_spec": {
+        "overview": "Defines LowerError enum with miette diagnostics for annotation validation failures, unknown type references, and duplicate definitions.",
+        "types": [
+          {
+            "name": "LowerError",
+            "definition": "pub enum LowerError",
+            "derives": ["Debug", "Clone", "Error", "Diagnostic"],
+            "variants": [
+              {
+                "name": "InvalidAnnotationTarget",
+                "fields": {
+                  "annotation": "String — name of the annotation (e.g., \"pure\")",
+                  "target": "String — what it was placed on (e.g., \"let binding\")",
+                  "valid_targets": "String — comma-separated list of valid targets",
+                  "span": "SourceSpan"
+                },
+                "message": "@{annotation} is not valid on {target}; valid on: {valid_targets}",
+                "diagnostic_code": "axiom::hir::invalid_annotation_target"
+              },
+              {
+                "name": "UnknownType",
+                "fields": {
+                  "name": "String — the unresolved type name",
+                  "span": "SourceSpan"
+                },
+                "message": "unknown type `{name}`",
+                "diagnostic_code": "axiom::hir::unknown_type",
+                "help": "known primitive types: i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f16, bf16, f32, f64, bool"
+              },
+              {
+                "name": "DuplicateDefinition",
+                "fields": {
+                  "name": "String — the duplicated name",
+                  "kind": "String — 'function', 'struct', or 'type alias'",
+                  "first_span": "SourceSpan",
+                  "second_span": "SourceSpan"
+                },
+                "message": "duplicate {kind} definition `{name}`",
+                "diagnostic_code": "axiom::hir::duplicate_definition"
+              },
+              {
+                "name": "DuplicateModuleAnnotation",
+                "fields": {
+                  "span": "SourceSpan"
+                },
+                "message": "multiple @module annotations found; only one is allowed",
+                "diagnostic_code": "axiom::hir::duplicate_module"
+              }
+            ]
+          },
+          {
+            "name": "AnnotationTarget",
+            "definition": "pub enum AnnotationTarget",
+            "variants": ["Module", "Function", "Param", "StructDef", "StructField", "Block"],
+            "doc": "Identifies what kind of item an annotation is attached to, for validation purposes."
+          }
+        ]
+      }
+    },
+    {
+      "path": "crates/axiom-hir/src/display.rs",
+      "purpose": "HIR pretty-printer for --emit=hir output",
+      "detailed_spec": {
+        "overview": "Implements Display for HirModule and all HIR node types. The output looks like AXIOM source code but with HIR-level detail: node IDs in comments, resolved types, validated annotations. Used by the CLI driver for --emit=hir.",
+        "public_api": [
+          {
+            "signature": "impl fmt::Display for HirModule",
+            "doc": "Pretty-prints the entire HIR module."
+          },
+          {
+            "signature": "pub fn display_hir(module: &HirModule) -> String",
+            "doc": "Convenience function that calls Display and returns the string."
+          }
+        ],
+        "output_format": {
+          "description": "The pretty-printer outputs AXIOM-like syntax annotated with node IDs. Indentation is 4 spaces. Annotations are printed on their own lines before the item they annotate.",
+          "example_output_for_fibonacci": [
+            "// HIR Module: fibonacci",
+            "@module(fibonacci);",
+            "@intent(\"Compute Nth Fibonacci number iteratively\");",
+            "",
+            "@pure  // [node:2]",
+            "@complexity(O(n))  // [node:3]",
+            "fn fib(n: i32) -> i64 {  // [node:1]",
+            "    if n <= 1 {  // [node:5]",
+            "        return widen(n);  // [node:6]",
+            "    }",
+            "    let a: i64 = 0;  // [node:8]",
+            "    let b: i64 = 1;  // [node:9]",
+            "    for i: i32 in range(2, n + 1) {  // [node:10]",
+            "        let temp: i64 = b;  // [node:11]",
+            "        b = a + b;  // [node:12]",
+            "        a = temp;  // [node:13]",
+            "    }",
+            "    return b;  // [node:14]",
+            "}",
+            "",
+            "fn main() -> i32 {  // [node:15]",
+            "    let result: i64 = fib(40);  // [node:16]",
+            "    print_i64(result);  // [node:17]",
+            "    return 0;  // [node:18]",
+            "}"
+          ]
+        },
+        "formatting_rules": [
+          "Module-level annotations printed first, each on their own line",
+          "Functions separated by blank lines",
+          "Annotations on items printed directly before the item, indented to match",
+          "Node IDs shown as // [node:N] comments at end of line for functions, annotations, and statements",
+          "Types printed in AXIOM syntax: i32, f64, tensor[f32, M, N], etc.",
+          "PrimitiveType variants map back to lowercase strings: I32 → 'i32', F64 → 'f64', Bf16 → 'bf16'",
+          "BinOp Display: Add→'+', Sub→'-', Mul→'*', Div→'/', Mod→'%', Eq→'==', NotEq→'!=', Lt→'<', Gt→'>', LtEq→'<=', GtEq→'>=', And→'and', Or→'or', etc.",
+          "UnaryOp Display: Neg→'-', Not→'not '",
+          "Indentation: 4 spaces per nesting level",
+          "Blocks: opening brace on same line, closing brace on own line at parent indent"
+        ]
+      }
+    }
+  ],
+
+  "files_to_modify": [
+    {
+      "path": "crates/axiom-hir/src/lib.rs",
+      "current_content": "//! axiom-hir — TODO: implement in Phase 1/2",
+      "new_content_spec": {
+        "overview": "Replace the stub with module declarations and re-exports",
+        "content": [
+          "//! axiom-hir — High-level IR preserving semantic annotations.",
+          "//!",
+          "//! The HIR is produced by lowering the AST. It validates annotation placement,",
+          "//! checks type references against known primitives and user-defined types,",
+          "//! and assigns unique node IDs for later compiler phases to reference.",
+          "//!",
+          "//! # Usage",
+          "//! ```ignore",
+          "//! let ast_module = axiom_parser::parse(source).module;",
+          "//! let hir_module = axiom_hir::lower(&ast_module)?;",
+          "//! println!(\"{}\", hir_module);",
+          "//! ```",
+          "",
+          "pub mod hir;",
+          "pub mod lower;",
+          "pub mod error;",
+          "pub mod display;",
+          "",
+          "pub use hir::*;",
+          "pub use lower::lower;",
+          "pub use error::{LowerError, AnnotationTarget};"
+        ]
+      }
+    },
+    {
+      "path": "crates/axiom-hir/Cargo.toml",
+      "changes": [
+        {
+          "description": "Add axiom-parser and axiom-lexer as dependencies (needed for ast types and Span)",
+          "new_content": [
+            "[package]",
+            "name = \"axiom-hir\"",
+            "version.workspace = true",
+            "edition.workspace = true",
+            "",
+            "[dependencies]",
+            "axiom-lexer = { path = \"../axiom-lexer\" }",
+            "axiom-parser = { path = \"../axiom-parser\" }",
+            "thiserror.workspace = true",
+            "miette.workspace = true",
+            "",
+            "[dev-dependencies]",
+            "insta.workspace = true"
+          ]
+        }
+      ]
+    },
+    {
+      "path": "crates/axiom-driver/Cargo.toml",
+      "changes": [
+        {
+          "description": "Add axiom-hir dependency",
+          "add_dependency": "axiom-hir = { path = \"../axiom-hir\" }"
+        }
+      ]
+    },
+    {
+      "path": "crates/axiom-driver/src/main.rs",
+      "changes": [
+        {
+          "description": "Wire up --emit=hir to use axiom_hir::lower and display",
+          "location": "Replace the Some(level) catch-all arm for 'hir' with actual HIR lowering",
+          "new_logic": [
+            "Some(\"hir\") => {",
+            "    let result = axiom_parser::parse(&source);",
+            "    if result.has_errors() {",
+            "        eprintln!(\"--- Parse Errors ---\");",
+            "        for err in &result.errors {",
+            "            eprintln!(\"  {err}\");",
+            "        }",
+            "        return Err(miette::miette!(\"parsing failed with {} error(s)\", result.errors.len()));",
+            "    }",
+            "    match axiom_hir::lower(&result.module) {",
+            "        Ok(hir_module) => {",
+            "            println!(\"{}\", hir_module);",
+            "        }",
+            "        Err(errors) => {",
+            "            eprintln!(\"--- HIR Lowering Errors ---\");",
+            "            for err in &errors {",
+            "                eprintln!(\"  {err}\");",
+            "            }",
+            "            return Err(miette::miette!(\"HIR lowering failed with {} error(s)\", errors.len()));",
+            "        }",
+            "    }",
+            "}"
+          ]
+        }
+      ]
+    }
+  ],
+
+  "public_api_signatures": [
+    {
+      "crate": "axiom-hir",
+      "module": "lib",
+      "exports": [
+        "pub fn lower(module: &axiom_parser::ast::Module) -> Result<HirModule, Vec<LowerError>>",
+        "pub struct HirModule",
+        "pub struct HirFunction",
+        "pub struct HirParam",
+        "pub struct HirStruct",
+        "pub struct HirStructField",
+        "pub struct HirTypeAlias",
+        "pub struct HirImport",
+        "pub struct HirBlock",
+        "pub struct HirStmt",
+        "pub struct HirExpr",
+        "pub struct HirAnnotation",
+        "pub enum HirStmtKind",
+        "pub enum HirExprKind",
+        "pub enum HirType",
+        "pub enum HirAnnotationKind",
+        "pub enum PrimitiveType",
+        "pub enum HirDimExpr",
+        "pub struct NodeId(pub u32)",
+        "pub struct FuncId(pub u32)",
+        "pub struct ExprId(pub u32)",
+        "pub struct StmtId(pub u32)",
+        "pub enum LowerError",
+        "pub enum AnnotationTarget",
+        "impl fmt::Display for HirModule",
+        "pub fn display_hir(module: &HirModule) -> String"
+      ]
+    }
+  ],
+
+  "technical_spec": {
+    "architecture_decisions": [
+      {
+        "decision": "Tree-based HIR, not arena-based",
+        "rationale": "Phase 1 simplicity. The HIR uses owned Box<HirExpr> rather than arena indices. Arena allocation can be added in Phase 2 if lowering performance matters. For fibonacci.axm with ~20 nodes, tree-based is simpler and fast enough.",
+        "alternative_considered": "Arena-based with ExprId indices into Vec<HirExpr>",
+        "why_not": "Adds complexity (index management, borrow checker dance) without Phase 1 benefit"
+      },
+      {
+        "decision": "Re-export AST enums (BinOp, UnaryOp, etc.) rather than duplicating",
+        "rationale": "BinOp, UnaryOp, InlineHint, LayoutKind, AnnotationValue, StrategyBlock, StrategyValue, TransferBlock, OptLogEntry are identical between AST and HIR. No desugaring changes them. Re-exporting avoids duplication and ensures consistency.",
+        "alternative_considered": "Copy all types into HIR",
+        "why_not": "Maintenance burden, no semantic difference"
+      },
+      {
+        "decision": "Two-pass lowering (collect types, then lower)",
+        "rationale": "AXIOM allows forward references — a function can use a struct type defined later in the file. The first pass scans all items to build the set of known type names. The second pass does the actual lowering with complete type knowledge."
+      },
+      {
+        "decision": "HirType::Unknown for error recovery",
+        "rationale": "When a type name is not recognized, we emit an error but continue lowering using HirType::Unknown. This allows us to collect all errors in a single pass rather than stopping at the first unknown type."
+      },
+      {
+        "decision": "Span::DUMMY for expressions without source spans",
+        "rationale": "The AST Expr enum does not carry spans. The Spanned<Stmt> wrapper provides a span for the whole statement, but sub-expressions lack precise spans. For Phase 1, we use a dummy span (0..0) for expressions. Phase 2 should add Span to ast::Expr."
+      },
+      {
+        "decision": "NodeId on structs, not arena-indexed",
+        "rationale": "FuncId, ExprId, StmtId newtypes are defined for future arena use but Phase 1 only uses NodeId directly on each struct. The arena IDs are reserved for Phase 2."
+      }
+    ],
+    "dependency_graph": {
+      "axiom-hir": {
+        "depends_on": ["axiom-lexer (for Span type)", "axiom-parser (for AST types)"],
+        "depended_on_by": ["axiom-driver", "axiom-mir (future)"]
+      }
+    },
+    "span_handling": {
+      "strategy": "Use axiom_lexer::Span throughout HIR. For nodes that have AST spans (via Spanned<T>), propagate the span. For ast::Expr (which has no span), use Span::new(0, 0) as a sentinel. The display.rs module does not depend on span accuracy for correct output.",
+      "span_dummy_constant": "Define pub const SPAN_DUMMY: Span = Span { start: 0, end: 0 }; in hir.rs"
+    },
+    "performance_notes": "The lowering pass is O(n) in the number of AST nodes. For the benchmark criterion BC-1.3.1 (fibonacci.axm under 5ms), this is trivially satisfied — fibonacci.axm has ~25 AST nodes. No special optimization needed."
+  },
+
+  "acceptance_tests": {
+    "overview": "Tests are organized by acceptance criteria ID from M1.3-hir.json. All tests live in axiom-hir crate as unit tests (#[cfg(test)] modules).",
+    "test_suites": [
+      {
+        "criteria_id": "AC-1.3.1",
+        "test_name": "all unit tests pass",
+        "description": "Meta-criterion: cargo test -p axiom-hir succeeds",
+        "implementation": "Covered by all tests below"
+      },
+      {
+        "criteria_id": "AC-1.3.2",
+        "test_file": "lower.rs or hir.rs",
+        "test_functions": [
+          {
+            "name": "test_hir_coverage",
+            "description": "Verifies that all AST construct types can be lowered to HIR",
+            "approach": "Build an AST module containing every variant (function, struct, type alias, import, let, assign, return, if/else, for, while, expr statement, binary op, unary op, call, index, field access, method call, int/float/string/bool literals, ident, opt hole) and lower it. Assert no errors and all HIR node types are present.",
+            "assertions": [
+              "Result is Ok",
+              "HirModule has functions, structs, type_aliases, imports",
+              "Function body contains Let, Assign, Return, If, For, While, Expr stmts",
+              "Expressions include all HirExprKind variants"
+            ]
+          }
+        ]
+      },
+      {
+        "criteria_id": "AC-1.3.3",
+        "test_file": "lower.rs",
+        "test_functions": [
+          {
+            "name": "test_lower_fibonacci",
+            "description": "Parse fibonacci.axm source, lower to HIR, verify structure",
+            "approach": "Use axiom_parser::parse on the fibonacci source, then lower. Assert no errors. Check that the module has 2 functions (fib, main), fib has @pure and @complexity annotations, fib takes one i32 param and returns i64.",
+            "assertions": [
+              "Result is Ok",
+              "module.name == Some(\"fibonacci\")",
+              "module.functions.len() == 2",
+              "functions[0].name == \"fib\"",
+              "functions[0].annotations contains Pure and Complexity",
+              "functions[0].params[0].ty == HirType::Primitive(PrimitiveType::I32)",
+              "functions[0].return_type == HirType::Primitive(PrimitiveType::I64)",
+              "functions[1].name == \"main\"",
+              "functions[1].return_type == HirType::Primitive(PrimitiveType::I32)"
+            ]
+          }
+        ]
+      },
+      {
+        "criteria_id": "AC-1.3.4",
+        "test_file": "lower.rs",
+        "test_functions": [
+          {
+            "name": "test_annotation_preservation",
+            "description": "Verify that semantic annotations survive lowering intact",
+            "approach": "Build AST with @pure, @intent, @complexity, @inline, @constraint, @strategy on a function. Lower. Assert all annotations are present in the HIR function's annotations vec with correct data.",
+            "assertions": [
+              "HirAnnotationKind::Pure is present",
+              "HirAnnotationKind::Intent with correct string is present",
+              "HirAnnotationKind::Complexity with correct expr is present",
+              "HirAnnotationKind::Inline with correct hint is present",
+              "All annotation spans are preserved"
+            ]
+          }
+        ]
+      },
+      {
+        "criteria_id": "AC-1.3.5",
+        "test_file": "lower.rs",
+        "test_functions": [
+          {
+            "name": "test_annotation_validation",
+            "description": "Verify that invalid annotation targets are rejected",
+            "test_cases": [
+              {
+                "input": "@pure on a let binding (via block annotation on non-function)",
+                "expected_error": "InvalidAnnotationTarget { annotation: \"pure\", target: contains \"param\" or similar }"
+              },
+              {
+                "input": "@layout(row_major) on a function",
+                "expected_error": "InvalidAnnotationTarget for layout on function"
+              },
+              {
+                "input": "@module on a function (not module-level)",
+                "expected_error": "InvalidAnnotationTarget for module on function"
+              },
+              {
+                "input": "@pure on a struct",
+                "expected_error": "InvalidAnnotationTarget for pure on struct"
+              },
+              {
+                "input": "@align(64) on a function",
+                "expected_error": "InvalidAnnotationTarget for align on function"
+              }
+            ]
+          },
+          {
+            "name": "test_annotation_validation_valid_targets",
+            "description": "Verify that valid annotation targets are accepted",
+            "test_cases": [
+              "@pure on function → accepted",
+              "@layout(row_major) on param → accepted",
+              "@align(64) on struct field → accepted",
+              "@intent on module → accepted",
+              "@strategy on block → accepted",
+              "@intent on function → accepted"
+            ]
+          }
+        ]
+      },
+      {
+        "criteria_id": "AC-1.3.6",
+        "test_file": "lower.rs",
+        "test_functions": [
+          {
+            "name": "test_type_validation",
+            "description": "Verify type validation catches unknown types and resolves known ones",
+            "test_cases": [
+              {
+                "input": "param of type i32",
+                "expected": "HirType::Primitive(PrimitiveType::I32)"
+              },
+              {
+                "input": "param of type f64",
+                "expected": "HirType::Primitive(PrimitiveType::F64)"
+              },
+              {
+                "input": "param of type bool",
+                "expected": "HirType::Primitive(PrimitiveType::Bool)"
+              },
+              {
+                "input": "param of type MyStruct (where MyStruct is defined as a struct)",
+                "expected": "HirType::UserDefined(\"MyStruct\")"
+              },
+              {
+                "input": "param of type Nonexistent",
+                "expected_error": "UnknownType { name: \"Nonexistent\" }"
+              },
+              {
+                "input": "param of type tensor[f32, 3, 3]",
+                "expected": "HirType::Tensor with element Primitive(F32)"
+              }
+            ]
+          },
+          {
+            "name": "test_type_validation_forward_reference",
+            "description": "A function using a struct type that is defined later in the file should resolve correctly",
+            "assertions": ["No errors when struct is defined after function that uses it"]
+          }
+        ]
+      },
+      {
+        "criteria_id": "AC-1.3.7",
+        "test_file": "display.rs",
+        "test_functions": [
+          {
+            "name": "test_display_hello",
+            "description": "Pretty-print hello.axm HIR, verify output contains 'fn main'",
+            "assertions": [
+              "Output contains 'fn main'",
+              "Output contains '@module(hello)' or '@module hello'",
+              "Output contains '@intent'",
+              "Output contains 'return 0'"
+            ]
+          },
+          {
+            "name": "test_display_fibonacci",
+            "description": "Pretty-print fibonacci.axm HIR, verify output",
+            "assertions": [
+              "Output contains 'fn fib'",
+              "Output contains 'fn main'",
+              "Output contains '@pure'",
+              "Output contains '@complexity'",
+              "Output contains 'i32'",
+              "Output contains 'i64'"
+            ]
+          }
+        ]
+      },
+      {
+        "criteria_id": "AC-1.3.8",
+        "description": "No clippy warnings",
+        "implementation": "Run cargo clippy -p axiom-hir -- -D warnings. Ensure code follows Rust idioms: no unnecessary clones, proper use of &self vs self, etc."
+      }
+    ]
+  },
+
+  "edge_cases": [
+    {
+      "case": "Empty module",
+      "input": "No items, no annotations, no module name",
+      "expected": "Valid HirModule with empty vecs and name=None"
+    },
+    {
+      "case": "Module with only annotations, no items",
+      "input": "@module test; @intent(\"nothing\");",
+      "expected": "Valid HirModule with annotations but empty functions/structs"
+    },
+    {
+      "case": "Duplicate function names",
+      "input": "Two functions named 'foo'",
+      "expected": "LowerError::DuplicateDefinition emitted, both functions still lowered"
+    },
+    {
+      "case": "Duplicate struct names",
+      "input": "Two structs named 'Point'",
+      "expected": "LowerError::DuplicateDefinition emitted"
+    },
+    {
+      "case": "Multiple @module annotations",
+      "input": "@module a; @module b;",
+      "expected": "LowerError::DuplicateModuleAnnotation emitted, first name used"
+    },
+    {
+      "case": "Self-referential struct (struct containing its own type)",
+      "input": "struct Node { child: Node; }",
+      "expected": "Accepted at HIR level — type validation only checks existence, not layout feasibility. Phase 2 can reject recursive types without indirection."
+    },
+    {
+      "case": "Type alias to unknown type",
+      "input": "type Alias = Unknown;",
+      "expected": "LowerError::UnknownType for 'Unknown', alias lowered with HirType::Unknown"
+    },
+    {
+      "case": "Deeply nested expressions",
+      "input": "a + b * c - d / e + f",
+      "expected": "Correctly lowered nested BinaryOp tree. No stack overflow for reasonable depths."
+    },
+    {
+      "case": "Function with no body statements",
+      "input": "fn empty() -> i32 { }",
+      "expected": "Valid HirFunction with empty body block. (Missing return is a semantic error for Phase 2, not HIR lowering.)"
+    },
+    {
+      "case": "Annotation on import",
+      "input": "Import declarations don't carry annotations in the AST",
+      "expected": "Lowered without annotations, no validation issue"
+    },
+    {
+      "case": "All primitive types used",
+      "input": "Function using every primitive type as params",
+      "expected": "All 15 primitive types resolve to correct PrimitiveType variants"
+    },
+    {
+      "case": "Optimization hole in expression",
+      "input": "let x: i32 = ?hole_name;",
+      "expected": "Lowered as HirExprKind::OptHole(\"hole_name\"), no validation error at HIR level"
+    },
+    {
+      "case": "Strategy block in function body",
+      "input": "@strategy { tiling: { M: ?tile_m } } inside a block",
+      "expected": "Valid — @strategy is allowed on blocks"
+    },
+    {
+      "case": "Method call chain",
+      "input": "a.foo().bar(x)",
+      "expected": "Nested MethodCall HIR nodes, correctly structured"
+    },
+    {
+      "case": "Tensor type with dynamic dims",
+      "input": "tensor[f32, ?, 3]",
+      "expected": "HirType::Tensor with dims [Dynamic, Const(3)]"
+    },
+    {
+      "case": "Empty function params",
+      "input": "fn f() -> i32 { return 0; }",
+      "expected": "HirFunction with empty params vec"
+    },
+    {
+      "case": "Mutable let binding",
+      "input": "let mut x: i32 = 0;",
+      "expected": "HirStmtKind::Let with mutable=true"
+    }
+  ],
+
+  "implementation_order": [
+    {
+      "step": 1,
+      "file": "crates/axiom-hir/src/hir.rs",
+      "description": "Define all HIR node types, PrimitiveType, NodeId, SPAN_DUMMY. This is the foundation everything else depends on."
+    },
+    {
+      "step": 2,
+      "file": "crates/axiom-hir/src/error.rs",
+      "description": "Define LowerError and AnnotationTarget enums with thiserror/miette derives."
+    },
+    {
+      "step": 3,
+      "file": "crates/axiom-hir/Cargo.toml",
+      "description": "Add dependencies on axiom-lexer, axiom-parser, miette."
+    },
+    {
+      "step": 4,
+      "file": "crates/axiom-hir/src/lower.rs",
+      "description": "Implement LoweringContext and the full lowering pass with annotation validation and type validation. Include all unit tests."
+    },
+    {
+      "step": 5,
+      "file": "crates/axiom-hir/src/display.rs",
+      "description": "Implement Display for HirModule and all HIR types. Include display tests."
+    },
+    {
+      "step": 6,
+      "file": "crates/axiom-hir/src/lib.rs",
+      "description": "Replace stub with module declarations and re-exports."
+    },
+    {
+      "step": 7,
+      "file": "crates/axiom-driver/Cargo.toml",
+      "description": "Add axiom-hir dependency."
+    },
+    {
+      "step": 8,
+      "file": "crates/axiom-driver/src/main.rs",
+      "description": "Wire up --emit=hir arm in the match statement."
+    }
+  ],
+
+  "validation_checklist": [
+    "cargo build -p axiom-hir compiles without errors",
+    "cargo test -p axiom-hir passes all tests",
+    "cargo clippy -p axiom-hir -- -D warnings produces no warnings",
+    "cargo run -p axiom-driver -- compile --emit=hir tests/samples/fibonacci.axm prints HIR containing 'fn fib'",
+    "cargo run -p axiom-driver -- compile --emit=hir tests/samples/hello.axm prints HIR containing 'fn main'",
+    "All acceptance criteria from M1.3-hir.json are satisfied"
+  ]
+}
