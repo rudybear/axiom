@@ -75,6 +75,7 @@ pub enum DimExpr {
 /// Block of statements
 #[derive(Debug, Clone)]
 pub struct Block {
+    pub annotations: Vec<Spanned<Annotation>>,
     pub stmts: Vec<Spanned<Stmt>>,
 }
 

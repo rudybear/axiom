@@ -71,6 +71,16 @@ fn main() -> miette::Result<()> {
                         println!("{:?}", tok);
                     }
                 }
+                Some("ast") => {
+                    let result = axiom_parser::parse(&source);
+                    if result.has_errors() {
+                        eprintln!("--- Parse Errors ---");
+                        for err in &result.errors {
+                            eprintln!("  {err}");
+                        }
+                    }
+                    println!("{:#?}", result.module);
+                }
                 Some(level) => {
                     eprintln!("TODO: --emit={level} not yet implemented");
                 }

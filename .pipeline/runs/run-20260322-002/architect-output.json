@@ -1,0 +1,442 @@
+{
+  "milestone": "M1.2-parser",
+  "architect_agent": "claude-opus-4-6",
+  "timestamp": "2026-03-22T00:02:00Z",
+
+  "files_to_create": [
+    {
+      "path": "crates/axiom-parser/src/parser.rs",
+      "description": "Recursive descent parser with Pratt expression parsing. Contains Parser struct, all parse_* functions, precedence table, and error recovery logic.",
+      "estimated_lines": 1200
+    },
+    {
+      "path": "crates/axiom-parser/src/error.rs",
+      "description": "Parse error types using thiserror + miette. Rich diagnostics with source spans, expected/found tokens, and recovery information.",
+      "estimated_lines": 120
+    }
+  ],
+
+  "files_to_modify": [
+    {
+      "path": "crates/axiom-parser/src/lib.rs",
+      "description": "Add `pub mod parser;` and `pub mod error;` declarations. Re-export the public parse API: `parse()` function and `ParseResult` type.",
+      "changes": [
+        "Add `pub mod parser;`",
+        "Add `pub mod error;`",
+        "Add `pub use parser::parse;`",
+        "Add `pub use error::{ParseError, ParseResult};`"
+      ]
+    },
+    {
+      "path": "crates/axiom-parser/Cargo.toml",
+      "description": "No changes needed — axiom-lexer, thiserror, and miette are already declared as dependencies. insta is already a dev-dependency.",
+      "changes": []
+    },
+    {
+      "path": "crates/axiom-driver/src/main.rs",
+      "description": "Wire `--emit=ast` to call `axiom_parser::parse()` and pretty-print the result.",
+      "changes": [
+        "Add `use axiom_parser;`",
+        "In the `Some(\"ast\")` match arm: lex source, call `axiom_parser::parse()`, print AST debug output",
+        "Print parse errors to stderr using miette formatting"
+      ]
+    }
+  ],
+
+  "public_api_signatures": {
+    "axiom_parser::parse": {
+      "signature": "pub fn parse(source: &str) -> ParseResult",
+      "description": "Main entry point. Lexes and parses an AXIOM source string into a Module AST. Returns all parse errors collected during recovery.",
+      "return_type": "ParseResult"
+    },
+    "axiom_parser::parser::Parser": {
+      "signature": "pub struct Parser<'src> { /* private fields */ }",
+      "description": "The recursive descent parser. Consumes a token stream and produces AST nodes. Not exposed directly — users call `parse()` instead.",
+      "methods": [
+        {
+          "signature": "fn new(source: &'src str, tokens: Vec<Token>) -> Self",
+          "visibility": "pub(crate)",
+          "description": "Create parser from source text and pre-lexed token stream."
+        },
+        {
+          "signature": "fn parse_module(&mut self) -> Module",
+          "visibility": "pub(crate)",
+          "description": "Parse a complete module. Entry point for the recursive descent."
+        }
+      ]
+    },
+    "axiom_parser::error::ParseError": {
+      "signature": "#[derive(Debug, Clone, thiserror::Error, miette::Diagnostic)] pub enum ParseError { ... }",
+      "description": "All possible parse errors, each with span information for miette rendering.",
+      "variants": [
+        "UnexpectedToken { expected: String, found: String, span: SourceSpan }",
+        "UnexpectedEof { expected: String, span: SourceSpan }",
+        "InvalidAnnotation { name: String, reason: String, span: SourceSpan }",
+        "InvalidTypeExpression { detail: String, span: SourceSpan }",
+        "MissingSemicolon { span: SourceSpan }",
+        "MissingClosingDelimiter { delimiter: char, open_span: SourceSpan, span: SourceSpan }",
+        "InvalidExpression { detail: String, span: SourceSpan }",
+        "LexerError { message: String, span: SourceSpan }"
+      ]
+    },
+    "axiom_parser::error::ParseResult": {
+      "signature": "pub struct ParseResult { pub module: Module, pub errors: Vec<ParseError> }",
+      "description": "Result of parsing. Always returns a Module (possibly partial due to error recovery) and all collected errors. A parse is considered successful when errors is empty."
+    }
+  },
+
+  "technical_spec": "# M1.2 Parser Technical Specification\n\n## 1. Architecture Overview\n\nThe parser is a hand-written recursive descent parser with Pratt parsing for expressions. It consumes a `Vec<Token>` produced by `axiom_lexer::Lexer` and produces a typed `Module` AST defined in `ast.rs`.\n\n### Design Principles\n- **Error recovery**: On parse error, skip to next synchronization point and continue parsing. Collect ALL errors.\n- **Span tracking**: Every AST node is wrapped in `Spanned<T>` with byte-offset spans from the original source.\n- **No panics**: The parser never panics. All error paths produce `ParseError` values.\n- **Zero allocations where possible**: Reuse the source string; identifiers are cloned from the token's string data.\n\n## 2. Parser State\n\n```rust\npub(crate) struct Parser<'src> {\n    source: &'src str,\n    tokens: Vec<Token>,\n    pos: usize,           // current position in token stream\n    errors: Vec<ParseError>,\n}\n```\n\n### Token Navigation Methods\n\n```rust\nimpl<'src> Parser<'src> {\n    /// Peek at current token without consuming.\n    fn peek(&self) -> &TokenKind;\n\n    /// Peek at the token `n` positions ahead.\n    fn peek_nth(&self, n: usize) -> &TokenKind;\n\n    /// Get the current token's span.\n    fn current_span(&self) -> Span;\n\n    /// Advance to next token, returning the consumed token.\n    fn advance(&mut self) -> &Token;\n\n    /// Consume current token if it matches expected kind. Returns true on match.\n    fn eat(&mut self, kind: &TokenKind) -> bool;\n\n    /// Consume current token if it matches expected kind, else push error and return None.\n    fn expect(&mut self, kind: &TokenKind, expected_desc: &str) -> Option<Span>;\n\n    /// Check if current token matches without consuming.\n    fn check(&self, kind: &TokenKind) -> bool;\n\n    /// Check if current token is an identifier with a specific name.\n    fn check_ident(&self, name: &str) -> bool;\n\n    /// Check if we've reached EOF.\n    fn at_end(&self) -> bool;\n}\n```\n\nNote on `check` / `eat` / `expect` for tokens with payloads (like `Ident(String)`): These methods use `std::mem::discriminant` comparison for variants with data. A separate `eat_ident()` / `expect_ident()` is used when we need to match AND extract the identifier string.\n\n## 3. Grammar Productions\n\nEach grammar production maps to a `parse_*` method. Below is the complete set.\n\n### 3.1 Module (Top-Level)\n\n```\nModule ::= ModuleAnnotations Item*\nModuleAnnotations ::= (Annotation ';'?)*   // module-level: @module, @intent, @constraint, @target\n```\n\n```rust\nfn parse_module(&mut self) -> Module\n```\n\nLogic:\n1. Collect leading annotations (before any `fn`/`struct`/`type`/`import`).\n2. If an `@module` annotation is found, extract its argument as the module name.\n3. Parse items in a loop until EOF.\n4. On error, synchronize to the next item-start token (`fn`, `struct`, `type`, `import`, `@`, EOF).\n\n### 3.2 Items\n\n```\nItem ::= Function | StructDef | TypeAlias | ImportDecl\n```\n\n```rust\nfn parse_item(&mut self) -> Option<Spanned<Item>>\n```\n\nLogic:\n1. Collect any annotations preceding the item.\n2. Match on the current token:\n   - `Fn` -> `parse_function(annotations)`\n   - `Struct` -> `parse_struct(annotations)`\n   - `Type` -> `parse_type_alias(annotations)`\n   - `Import` -> `parse_import(annotations)`\n   - Otherwise -> error, synchronize to next item start.\n\n### 3.3 Function Definition\n\n```\nFunction ::= Annotation* 'fn' IDENT '(' ParamList? ')' '->' TypeExpr Block\nParamList ::= Param (',' Param)* ','?\nParam ::= IDENT ':' TypeExpr Annotation*\n```\n\n```rust\nfn parse_function(&mut self, annotations: Vec<Spanned<Annotation>>) -> Spanned<Item>\nfn parse_param_list(&mut self) -> Vec<Param>\nfn parse_param(&mut self) -> Option<Param>\n```\n\nNotes:\n- Parameters may carry inline annotations like `@layout(row_major)` and `@align(64)`. These appear AFTER the type expression.\n- Return type annotation also supports inline annotations: `-> tensor[f32, M, N] @layout(row_major)`.\n- Trailing comma in parameter list is allowed.\n\n### 3.4 Struct Definition\n\n```\nStructDef ::= Annotation* 'struct' IDENT '{' StructField (',' StructField)* ','? '}'\nStructField ::= IDENT ':' TypeExpr Annotation*\n```\n\n```rust\nfn parse_struct(&mut self, annotations: Vec<Spanned<Annotation>>) -> Spanned<Item>\n```\n\n### 3.5 Type Alias\n\n```\nTypeAlias ::= 'type' IDENT '=' TypeExpr ';'\n```\n\n```rust\nfn parse_type_alias(&mut self, annotations: Vec<Spanned<Annotation>>) -> Spanned<Item>\n```\n\n### 3.6 Import\n\n```\nImport ::= 'import' IDENT ('::' IDENT)* ('as' IDENT)? ';'\n```\n\nNote: `as` is not a keyword token. We check for the identifier \"as\".\n\n```rust\nfn parse_import(&mut self, annotations: Vec<Spanned<Annotation>>) -> Spanned<Item>\n```\n\n### 3.7 Annotations\n\n```\nAnnotation ::= '@' IDENT\n             | '@' IDENT '(' AnnotationArgList ')'\n             | '@' IDENT '{' AnnotationKVList '}'\n             | '@' IDENT IDENT+          // e.g., @complexity O(n^3) — special case\n```\n\n```rust\nfn parse_annotation(&mut self) -> Option<Spanned<Annotation>>\nfn parse_annotation_args(&mut self) -> Vec<AnnotationValue>\nfn parse_annotation_kv_list(&mut self) -> Vec<(String, AnnotationValue)>\nfn parse_annotation_value(&mut self) -> Option<AnnotationValue>\n```\n\nAnnotation dispatch (based on the `@name` string from the `TokenKind::Annotation(name)`):\n\n| Annotation Name   | Form                          | AST Variant                     |\n|-------------------|-------------------------------|----------------------------------|\n| `module`          | `@module name;`               | `Annotation::Module(String)`     |\n| `pure`            | `@pure`                       | `Annotation::Pure`               |\n| `const`           | `@const`                      | `Annotation::Const`              |\n| `inline`          | `@inline(always|never|hint)`  | `Annotation::Inline(InlineHint)` |\n| `complexity`      | `@complexity O(n^3)`          | `Annotation::Complexity(String)` |\n| `intent`          | `@intent(\"description\")`      | `Annotation::Intent(String)`     |\n| `constraint`      | `@constraint { k: v, ... }`   | `Annotation::Constraint(Vec<...>)` |\n| `target`          | `@target { ... }`             | `Annotation::Target(Vec<String>)` |\n| `strategy`        | `@strategy { ... }`           | `Annotation::Strategy(StrategyBlock)` |\n| `vectorizable`    | `@vectorizable(dims)`         | `Annotation::Vectorizable(Vec<String>)` |\n| `parallel`        | `@parallel(dims)`             | `Annotation::Parallel(Vec<String>)` |\n| `layout`          | `@layout(kind)`               | `Annotation::Layout(LayoutKind)` |\n| `align`           | `@align(bytes)`               | `Annotation::Align(u64)`        |\n| other             | `@name(args)` or `@name{kv}`  | `Annotation::Custom(name, args)` |\n\nSpecial parsing for `@complexity`: The tokens after `@complexity` until the next newline-delimited statement or known delimiter are collected as a raw string (e.g., `O(n^3)`). Since the lexer produces `Ident(\"O\")`, `LParen`, `Ident(\"n\")`, `Caret`, `IntLiteral(3)`, `RParen` for `O(n^3)`, we reconstruct the string from spans.\n\nSpecial parsing for `@target { cpu.simd }`: The braces contain dot-separated identifiers and commas. `cpu.simd` lexes as `Ident(\"cpu\")`, `Dot`, `Ident(\"simd\")`. We collect these as dot-joined strings.\n\nSpecial parsing for `@constraint { correctness: \"IEEE 754 compliant\" }`: Standard key-value parsing where keys are identifiers and values are `AnnotationValue`.\n\n### 3.8 Strategy Block\n\n```\nStrategyBlock ::= '@strategy' '{' StrategyEntry* '}'\nStrategyEntry ::= IDENT ':' StrategyValue\nStrategyValue ::= '?' IDENT              // optimization hole\n                | '{' (IDENT ':' StrategyValue ',')* '}'\n                | AnnotationValue          // concrete value\n```\n\n```rust\nfn parse_strategy_block(&mut self) -> StrategyBlock\nfn parse_strategy_entry(&mut self) -> Option<(String, StrategyValue)>\nfn parse_strategy_value(&mut self) -> StrategyValue\n```\n\nNotes:\n- Strategy entries are NOT separated by commas or semicolons in the sample files. They are separated by newlines, but since our lexer ignores whitespace, entries are delimited by the pattern: `IDENT ':' Value`. We detect the start of a new entry by seeing an identifier followed by `:` (lookahead).\n- Nested maps (like `tiling: { M: ?tile_m, N: ?tile_n, K: ?tile_k }`) use commas or whitespace-separation within inner braces.\n\n### 3.9 Type Expressions\n\n```\nTypeExpr ::= NamedType | TensorType | ArrayType | SliceType | PtrType | TupleType | FnType\nNamedType ::= IDENT                          // i32, MyStruct, M\nTensorType ::= 'tensor' '[' TypeExpr (',' DimExpr)* ']'\nArrayType ::= 'array' '[' TypeExpr ',' Expr ']'\nSliceType ::= 'slice' '[' TypeExpr ']'\nPtrType ::= 'ptr' '[' TypeExpr ']'\nTupleType ::= '(' TypeExpr (',' TypeExpr)+ ')'\nFnType ::= 'fn' '(' TypeExprList? ')' '->' TypeExpr\n\nDimExpr ::= INT_LITERAL | IDENT | '?'\n```\n\n```rust\nfn parse_type_expr(&mut self) -> TypeExpr\nfn parse_dim_expr(&mut self) -> DimExpr\n```\n\nType keyword tokens (`I8`, `I16`, ..., `F64`, `Bool`) are mapped to `TypeExpr::Named(\"i32\")` etc. The `Tensor`, `Array`, `Slice`, `Ptr` keyword tokens trigger their respective compound type parsing.\n\n### 3.10 Statements\n\n```\nStmt ::= LetStmt | ReturnStmt | IfStmt | ForStmt | WhileStmt | AssignOrExprStmt\nLetStmt ::= 'let' IDENT ':' TypeExpr '=' Expr ';'\nReturnStmt ::= 'return' Expr ';'\nIfStmt ::= 'if' Expr Block ('else' Block)?\nForStmt ::= 'for' IDENT ':' TypeExpr 'in' Expr Block\nWhileStmt ::= 'while' Expr Block\nAssignOrExprStmt ::= Expr ('=' Expr)? ';'\n```\n\n```rust\nfn parse_stmt(&mut self) -> Option<Spanned<Stmt>>\nfn parse_let_stmt(&mut self) -> Spanned<Stmt>\nfn parse_return_stmt(&mut self) -> Spanned<Stmt>\nfn parse_if_stmt(&mut self) -> Spanned<Stmt>\nfn parse_for_stmt(&mut self) -> Spanned<Stmt>\nfn parse_while_stmt(&mut self) -> Spanned<Stmt>\nfn parse_assign_or_expr_stmt(&mut self) -> Spanned<Stmt>\n```\n\nNotes:\n- `let` does NOT support `mut` keyword in the current AST (the `mutable` field exists but is always false for now). We can extend this later.\n  UPDATE: Actually the `Mut` keyword token exists. So we parse `let mut x: T = v;` and set `mutable: true`.\n- `if` does NOT require parentheses around the condition (unlike C). The condition is any expression parsed up to the `{`.\n- `for` uses the `in` keyword, not `:` for the iterable.\n- `AssignOrExprStmt`: Parse an expression. If followed by `=`, it's an assignment (`target = value;`). Otherwise it's an expression statement (`expr;`). The semicolon is consumed.\n\n### 3.11 Block\n\n```\nBlock ::= '{' Stmt* '}'\n```\n\n```rust\nfn parse_block(&mut self) -> Block\n```\n\nSpecial: Strategy blocks (`@strategy { ... }`) can appear inside function bodies. When we see an `@strategy` annotation inside a block, we parse it and attach it as a statement-level annotation. Since the AST `Stmt` enum doesn't have an annotation variant, strategy blocks inside function bodies are parsed as `Stmt::Expr(Expr::StrategyBlock(...))` — BUT wait, the current `Expr` enum has no `StrategyBlock` variant. \n\n**Resolution**: Strategy blocks inside function bodies are parsed as standalone annotations attached to the Block. We add an `annotations` field to the `Block` struct:\n```rust\npub struct Block {\n    pub annotations: Vec<Spanned<Annotation>>,  // strategy blocks, etc.\n    pub stmts: Vec<Spanned<Stmt>>,\n}\n```\nAlternatively, we keep the existing Block struct and parse strategy blocks as part of the function's annotations (since `@strategy` appears in the function body before any loop code, it's semantically a function-level annotation). Looking at `matmul_naive.axm`, the `@strategy { ... }` block is INSIDE the function body, right after the opening brace. We will parse it as a standalone item inside the block and collect it into a `Vec<Spanned<Annotation>>` on the `Block`.\n\nActually, the simplest approach: when parsing statements inside a block, if we encounter an `Annotation` token, we parse the annotation and store it in the block's annotation list. The existing `Block` struct needs the `annotations` field added.\n\n### 3.12 Expression Parsing (Pratt Parser)\n\nThe Pratt parser is the core of expression parsing. It handles precedence and associativity without explicit grammar rules for each level.\n\n#### Binding Power Table\n\nPratt parsing uses \"binding power\" (bp) instead of precedence levels. Higher bp = tighter binding. Left-associative operators have `left_bp < right_bp`. Right-associative would have `left_bp > right_bp`.\n\n| Precedence | Operators                             | Left BP | Right BP | Assoc |\n|------------|---------------------------------------|---------|----------|-------|\n| 1 (lowest) | `or`                                  | 1       | 2        | left  |\n| 2          | `and`                                 | 3       | 4        | left  |\n| 3          | `==`, `!=`, `<`, `>`, `<=`, `>=`      | 5       | 6        | left  |\n| 4          | `+`, `-`, `+%`, `+|`, `-%`, `-|`      | 7       | 8        | left  |\n| 5          | `*`, `/`, `%`, `*%`                   | 9       | 10       | left  |\n| 6 (prefix) | `-` (negate), `not`                   | —       | 11       | right |\n| 7 (postfix)| `f(x)`, `a[i]`, `.field`, `.method()` | 13      | —        | left  |\n\n#### Pratt Parser Functions\n\n```rust\n/// Parse an expression with the given minimum binding power.\nfn parse_expr(&mut self) -> Expr {\n    self.parse_expr_bp(0)\n}\n\n/// Core Pratt expression parser.\nfn parse_expr_bp(&mut self, min_bp: u8) -> Expr {\n    // 1. Parse prefix: literal, ident, unary op, grouped expr, etc.\n    let mut lhs = self.parse_prefix();\n\n    // 2. Loop: while next token is an infix/postfix op with bp >= min_bp\n    loop {\n        let (op, left_bp, right_bp) = match self.peek_infix_op() {\n            Some(info) if info.left_bp >= min_bp => info,\n            _ => break,\n        };\n\n        // Handle postfix operators (call, index, field access)\n        if is_postfix(op) {\n            lhs = self.parse_postfix(lhs);\n            continue;\n        }\n\n        // Consume the operator token\n        self.advance();\n\n        // Recurse for the right-hand side\n        let rhs = self.parse_expr_bp(right_bp);\n\n        lhs = Expr::BinaryOp {\n            op,\n            lhs: Box::new(lhs),\n            rhs: Box::new(rhs),\n        };\n    }\n\n    lhs\n}\n```\n\n#### Prefix Parsing\n\n```rust\nfn parse_prefix(&mut self) -> Expr\n```\n\nHandles:\n- **Integer literal**: `IntLiteral { value, .. }` -> `Expr::IntLiteral(value)`\n- **Float literal**: `FloatLiteral { value, .. }` -> `Expr::FloatLiteral(value)`\n- **String literal**: `StringLiteral(s)` -> `Expr::StringLiteral(s)`\n- **Bool literal**: `BoolLiteral(b)` -> `Expr::BoolLiteral(b)`\n- **Identifier**: `Ident(s)` -> `Expr::Ident(s)`\n- **Optimization hole**: `OptHole(s)` -> `Expr::OptHole(s)`\n- **Unary minus**: `Minus` -> consume, parse operand with prefix bp (11), produce `Expr::UnaryOp { op: UnaryOp::Neg, operand }`\n- **Unary not**: `Not` -> consume, parse operand with prefix bp (11), produce `Expr::UnaryOp { op: UnaryOp::Not, operand }`\n- **Grouped expression**: `LParen` -> consume, parse expr, expect `RParen`, return inner expr. Also handles tuple expressions if there are commas (but tuples are not in the current Expr enum, so we only handle grouping for now).\n- **Conversion keywords**: `Widen`/`Narrow`/`Truncate` -> parse as a call expression: consume keyword, expect `(`, parse arg, expect `)`. These become `Expr::Call { func: Expr::Ident(\"widen\"), args: [arg] }`.\n\nSpecial case — `tensor.zeros[f32, M, N]`: Lexes as `Ident(\"tensor\")`, `Dot`, `Ident(\"zeros\")`, `LBracket`, ... This is a method call with type parameters. We handle it as: parse `tensor` as ident, then `.zeros` as field access, then `[f32, M, N]` as index. So it becomes `Expr::Index { expr: Expr::FieldAccess { expr: Expr::Ident(\"tensor\"), field: \"zeros\" }, indices: [...] }`. This is syntactically correct given our AST.\n\n#### Infix Operator Lookup\n\n```rust\n/// Returns (BinOp, left_bp, right_bp) for the current token if it's an infix operator.\nfn peek_infix_op(&self) -> Option<(InfixOp, u8, u8)>\n```\n\nMapping from `TokenKind` to operator info:\n\n| TokenKind    | BinOp          | left_bp | right_bp |\n|-------------|----------------|---------|----------|\n| `Or`        | `BinOp::Or`    | 1       | 2        |\n| `And`       | `BinOp::And`   | 3       | 4        |\n| `Eq`        | `BinOp::Eq`    | 5       | 6        |\n| `NotEq`     | `BinOp::NotEq` | 5       | 6        |\n| `Lt`        | `BinOp::Lt`    | 5       | 6        |\n| `Gt`        | `BinOp::Gt`    | 5       | 6        |\n| `LtEq`      | `BinOp::LtEq`  | 5       | 6        |\n| `GtEq`      | `BinOp::GtEq`  | 5       | 6        |\n| `Plus`      | `BinOp::Add`   | 7       | 8        |\n| `Minus`     | `BinOp::Sub`   | 7       | 8        |\n| `PlusWrap`  | `BinOp::AddWrap` | 7     | 8        |\n| `PlusSat`   | `BinOp::AddSat`  | 7     | 8        |\n| `MinusWrap` | `BinOp::SubWrap` | 7     | 8        |\n| `MinusSat`  | `BinOp::SubSat`  | 7     | 8        |\n| `Star`      | `BinOp::Mul`   | 9       | 10       |\n| `Slash`     | `BinOp::Div`   | 9       | 10       |\n| `Percent`   | `BinOp::Mod`   | 9       | 10       |\n| `StarWrap`  | `BinOp::MulWrap` | 9     | 10       |\n\n#### Postfix Parsing\n\nPostfix operators have left_bp = 13 (highest). They are detected by peeking at the current token AFTER parsing the left-hand side.\n\n```rust\nfn parse_postfix(&mut self, lhs: Expr) -> Expr\n```\n\nHandles:\n- **Call**: `LParen` -> parse argument list `(expr, expr, ...)`, produce `Expr::Call { func: lhs, args }`\n- **Index**: `LBracket` -> parse index list `[expr, expr, ...]`, produce `Expr::Index { expr: lhs, indices }`\n- **Field access**: `Dot` `Ident(field)` -> produce `Expr::FieldAccess { expr: lhs, field }`\n- **Method call**: `Dot` `Ident(method)` `LParen` -> parse args, produce `Expr::MethodCall { expr: lhs, method, args }`\n\nFor Dot: peek ahead after consuming Dot. If the next-next token is `LParen`, it's a method call. Otherwise it's a field access. But we also need to handle `tensor.zeros[...]` which is field + index, not method.\n\nActual logic:\n1. Consume `Dot`\n2. Expect `Ident(name)`\n3. If next token is `LParen` -> method call, parse args\n4. Otherwise -> field access (the `[...]` will be handled as a subsequent postfix index op in the next loop iteration)\n\n## 4. Error Recovery Strategy\n\n### 4.1 Synchronization Points\n\nThe parser defines synchronization points — tokens where it's safe to resume parsing after an error:\n\n- **Statement level**: `Semicolon`, `RBrace`, `Let`, `Return`, `If`, `For`, `While`, `Fn`\n- **Item level**: `Fn`, `Struct`, `Type`, `Import`, `Annotation(_)`, `Eof`\n- **Expression level**: `Semicolon`, `RParen`, `RBracket`, `RBrace`, `Comma`\n\n### 4.2 Recovery Functions\n\n```rust\n/// Skip tokens until we reach a statement-level sync point.\nfn synchronize_stmt(&mut self)\n\n/// Skip tokens until we reach an item-level sync point.\nfn synchronize_item(&mut self)\n\n/// Skip tokens until we reach one of the specified token kinds.\nfn synchronize_to(&mut self, stops: &[TokenKind])\n```\n\n### 4.3 Recovery Protocol\n\nWhen a parse function encounters an unexpected token:\n\n1. **Record the error** with span and context (expected vs. found).\n2. **Determine recovery scope**:\n   - In `parse_stmt`: call `synchronize_stmt()`, return `None` for this statement, continue parsing the block.\n   - In `parse_item`: call `synchronize_item()`, return `None` for this item, continue parsing the module.\n   - In `parse_expr`: return an error expression or propagate up. Expression-level errors typically bubble up to the statement level.\n3. **Continue parsing** from the synchronization point.\n\n### 4.4 Missing Semicolons\n\nSemicolons are required but we provide helpful recovery:\n- If we expect `;` but see a token that could start a new statement (`let`, `return`, `if`, `for`, `while`, `}`), record a `MissingSemicolon` error and continue WITHOUT consuming the next token.\n- This prevents cascading errors from a single missing semicolon.\n\n### 4.5 Unmatched Delimiters\n\nFor `(`, `[`, `{`:\n- Track the opening delimiter's span.\n- If we reach EOF or an obviously wrong delimiter while looking for the closer, record a `MissingClosingDelimiter` error with both the opening span and current span.\n- The opening span helps AI agents locate WHERE the unmatched delimiter was opened.\n\n## 5. Special Parsing Challenges\n\n### 5.1 `@complexity O(n^3)` — Free-form Annotation\n\nThe `@complexity` annotation takes a complexity expression that is NOT a standard AXIOM expression (it uses `O(...)` notation with `^` for exponentiation). The parser handles this by:\n\n1. After seeing `@complexity`, collect all tokens until the next newline-adjacent statement start or `fn` keyword.\n2. Reconstruct the source text from the token spans: `source[first_span.start..last_span.end]`.\n3. Store as `Annotation::Complexity(String)`.\n\nPractical implementation: After `@complexity`, consume tokens until we see: `Fn`, another `Annotation(_)`, `Semicolon`, `LBrace`, or `Eof`. Join the source text between those spans.\n\n### 5.2 `@constraint { correctness: \"IEEE 754 compliant\" };` — Trailing Semicolon\n\nModule-level annotations may optionally be followed by a semicolon. The parser eats an optional semicolon after any module-level annotation.\n\n### 5.3 `@target { cpu.simd }` — Dot-Separated Identifiers\n\nInside `@target { ... }`, identifiers can be dot-separated: `cpu.simd`, `gpu.compute`. Parse these as:\n1. Consume `Ident`\n2. While next is `Dot` followed by `Ident`, consume and append with dot.\n3. Commas separate multiple targets.\n4. Result: `Annotation::Target(vec![\"cpu.simd\".to_string()])`\n\n### 5.4 Parameter-Level Annotations\n\nIn `matmul_naive.axm`:\n```\na: tensor[f32, M, K] @layout(row_major) @align(64),\n```\n\nAfter parsing the type expression `tensor[f32, M, K]`, check if the next token is an `Annotation`. If so, parse annotations and attach them to the `Param` node.\n\n### 5.5 Return Type Annotations\n\n```\n) -> tensor[f32, M, N] @layout(row_major) {\n```\n\nAfter parsing the return type, check for annotations before the opening `{` of the function body. These are attached to the function's annotations list (or a separate return_type_annotations field if we add one).\n\n### 5.6 `range(M)` and `range(2, n + 1)` — Built-in Calls\n\nThese are just regular function calls. `range` is parsed as `Expr::Ident(\"range\")` and the call syntax produces `Expr::Call { func: Expr::Ident(\"range\"), args: [...] }`.\n\n### 5.7 `widen(n)` — Conversion Keywords\n\nThe tokens `Widen`, `Narrow`, `Truncate` are keyword tokens (not identifiers). In expression position, they behave like function calls. The prefix parser checks for these keywords and parses them as: keyword -> `(` -> expr -> `)`, producing `Expr::Call { func: Expr::Ident(\"widen\"), args: [expr] }`. This treats them uniformly with regular calls for downstream processing.\n\n### 5.8 Disambiguating `<` — Comparison vs. Generic\n\nAXIOM has no generics syntax using `<>` — tensor types use `[]`. So `<` is always the less-than comparison operator. No ambiguity.\n\n## 6. AST Modifications Required\n\nThe existing `ast.rs` needs minor modifications:\n\n1. **Block struct**: Add `annotations` field for strategy blocks inside function bodies:\n   ```rust\n   pub struct Block {\n       pub annotations: Vec<Spanned<Annotation>>,\n       pub stmts: Vec<Spanned<Stmt>>,\n   }\n   ```\n\n2. No other structural changes needed — the existing AST types are comprehensive.\n\n## 7. `--emit=ast` Driver Integration\n\nIn `axiom-driver/src/main.rs`, the `Some(\"ast\")` branch:\n\n```rust\nSome(\"ast\") => {\n    let result = axiom_parser::parse(&source);\n    if !result.errors.is_empty() {\n        for err in &result.errors {\n            eprintln!(\"{:?}\", err);\n        }\n    }\n    println!(\"{:#?}\", result.module);\n}\n```\n\nThis uses `Debug` formatting for now. A pretty-printer is a future enhancement.\n\n## 8. Error Types Design\n\n```rust\nuse miette::{Diagnostic, SourceSpan};\nuse thiserror::Error;\n\n#[derive(Debug, Clone, Error, Diagnostic)]\npub enum ParseError {\n    #[error(\"expected {expected}, found {found}\")]\n    #[diagnostic(code(axiom::parse::unexpected_token))]\n    UnexpectedToken {\n        expected: String,\n        found: String,\n        #[label(\"unexpected token here\")]\n        span: SourceSpan,\n    },\n\n    #[error(\"unexpected end of file, expected {expected}\")]\n    #[diagnostic(code(axiom::parse::unexpected_eof))]\n    UnexpectedEof {\n        expected: String,\n        #[label(\"file ends here\")]\n        span: SourceSpan,\n    },\n\n    #[error(\"invalid annotation @{name}: {reason}\")]\n    #[diagnostic(code(axiom::parse::invalid_annotation))]\n    InvalidAnnotation {\n        name: String,\n        reason: String,\n        #[label(\"this annotation\")]\n        span: SourceSpan,\n    },\n\n    #[error(\"invalid type expression: {detail}\")]\n    #[diagnostic(code(axiom::parse::invalid_type))]\n    InvalidTypeExpression {\n        detail: String,\n        #[label(\"here\")]\n        span: SourceSpan,\n    },\n\n    #[error(\"missing semicolon\")]\n    #[diagnostic(code(axiom::parse::missing_semicolon), help(\"add `;` at the end of this statement\"))]\n    MissingSemicolon {\n        #[label(\"expected `;` after this\")]\n        span: SourceSpan,\n    },\n\n    #[error(\"missing closing `{delimiter}`\")]\n    #[diagnostic(code(axiom::parse::missing_delimiter))]\n    MissingClosingDelimiter {\n        delimiter: char,\n        #[label(\"opened here\")]\n        open_span: SourceSpan,\n        #[label(\"expected closing `{delimiter}` before here\")]\n        span: SourceSpan,\n    },\n\n    #[error(\"invalid expression: {detail}\")]\n    #[diagnostic(code(axiom::parse::invalid_expression))]\n    InvalidExpression {\n        detail: String,\n        #[label(\"here\")]\n        span: SourceSpan,\n    },\n\n    #[error(\"lexer error: {message}\")]\n    #[diagnostic(code(axiom::lex::error))]\n    LexerError {\n        message: String,\n        #[label(\"here\")]\n        span: SourceSpan,\n    },\n}\n\npub struct ParseResult {\n    pub module: Module,\n    pub errors: Vec<ParseError>,\n}\n\nimpl ParseResult {\n    pub fn has_errors(&self) -> bool {\n        !self.errors.is_empty()\n    }\n}\n```\n\nNote: `miette::SourceSpan` is a `(offset, length)` tuple. Convert from our `Span { start, end }` with `SourceSpan::new(start.into(), (end - start).into())`.\n\n## 9. Testing Strategy\n\nAll tests go in `crates/axiom-parser/src/parser.rs` in a `#[cfg(test)] mod tests` block.\n\n### Unit Test Categories\n\n1. **Expression precedence tests** (`test_precedence_*`)\n2. **Annotation parsing tests** (`test_annotation_*`)\n3. **Strategy block tests** (`test_strategy_block_*`)\n4. **Type expression tests** (`test_type_expr_*`)\n5. **Statement tests** (`test_stmt_*`)\n6. **Full module tests** (`test_module_*`)\n7. **Error recovery tests** (`test_error_recovery_*`)\n8. **Sample file tests** (`test_sample_*`)\n\n### Snapshot Tests\n\nUse `insta` for snapshot testing of AST output from sample files. This catches unintended AST structure changes.\n",
+
+  "acceptance_tests": [
+    {
+      "id": "AT-1",
+      "name": "test_parse_hello",
+      "description": "Parse hello.axm into Module with @module, @intent annotations and a main function",
+      "input": "tests/samples/hello.axm",
+      "expected": "Module { name: Some(\"hello\"), annotations: [@intent(...)], items: [Function { name: \"main\", params: [], return_type: Named(\"i32\"), body: { print(...); return 0; } }] }"
+    },
+    {
+      "id": "AT-2",
+      "name": "test_parse_fibonacci",
+      "description": "Parse fibonacci.axm — two functions, annotations, if/else, for loop, let bindings, binary ops, function calls",
+      "input": "tests/samples/fibonacci.axm",
+      "expected": "Module with name 'fibonacci', 2 functions (fib and main), @pure and @complexity annotations on fib, if/else with return, for loop with range(), let bindings, binary ops (+, <=), widen() call"
+    },
+    {
+      "id": "AT-3",
+      "name": "test_parse_matmul_naive",
+      "description": "Parse matmul_naive.axm — annotations with args, tensor types, strategy blocks with ?holes, nested for loops, multi-index expressions",
+      "input": "tests/samples/matmul_naive.axm",
+      "expected": "Module with name 'matmul', @constraint and @target module annotations, function with tensor params with @layout/@align annotations, @strategy block with ?hole values, tensor type expressions with dimension params, nested for loops, a[i,k] multi-index expressions"
+    },
+    {
+      "id": "AT-4",
+      "name": "test_precedence_mul_over_add",
+      "description": "Verify * binds tighter than +",
+      "input": "a + b * c",
+      "expected": "BinaryOp { op: Add, lhs: Ident(a), rhs: BinaryOp { op: Mul, lhs: Ident(b), rhs: Ident(c) } }"
+    },
+    {
+      "id": "AT-5",
+      "name": "test_precedence_comparison_over_logic",
+      "description": "Verify == binds tighter than and/or",
+      "input": "a == b and c != d",
+      "expected": "BinaryOp { op: And, lhs: BinaryOp { op: Eq, lhs: a, rhs: b }, rhs: BinaryOp { op: NotEq, lhs: c, rhs: d } }"
+    },
+    {
+      "id": "AT-6",
+      "name": "test_precedence_unary_neg",
+      "description": "Verify unary minus binds tighter than binary operators",
+      "input": "-a + b",
+      "expected": "BinaryOp { op: Add, lhs: UnaryOp { op: Neg, operand: Ident(a) }, rhs: Ident(b) }"
+    },
+    {
+      "id": "AT-7",
+      "name": "test_precedence_call_and_index",
+      "description": "Verify call and index bind tightest",
+      "input": "a[i] + f(x)",
+      "expected": "BinaryOp { op: Add, lhs: Index { expr: a, indices: [i] }, rhs: Call { func: f, args: [x] } }"
+    },
+    {
+      "id": "AT-8",
+      "name": "test_precedence_chained_postfix",
+      "description": "Verify chained field access and method call",
+      "input": "a.b.c(x)",
+      "expected": "MethodCall { expr: FieldAccess { expr: FieldAccess { expr: a, field: b }, field: c... wait, no: FieldAccess { expr: a, field: b } then .c(x) is MethodCall { expr: FieldAccess{a,b}, method: c, args: [x] } }"
+    },
+    {
+      "id": "AT-9",
+      "name": "test_left_associativity",
+      "description": "Verify left associativity of arithmetic",
+      "input": "a - b - c",
+      "expected": "BinaryOp { op: Sub, lhs: BinaryOp { op: Sub, lhs: a, rhs: b }, rhs: c }"
+    },
+    {
+      "id": "AT-10",
+      "name": "test_grouped_expression",
+      "description": "Verify parenthesized grouping overrides precedence",
+      "input": "(a + b) * c",
+      "expected": "BinaryOp { op: Mul, lhs: BinaryOp { op: Add, lhs: a, rhs: b }, rhs: c }"
+    },
+    {
+      "id": "AT-11",
+      "name": "test_annotations_pure",
+      "description": "Parse @pure annotation",
+      "input": "@pure",
+      "expected": "Annotation::Pure"
+    },
+    {
+      "id": "AT-12",
+      "name": "test_annotations_inline",
+      "description": "Parse @inline(always) annotation",
+      "input": "@inline(always)",
+      "expected": "Annotation::Inline(InlineHint::Always)"
+    },
+    {
+      "id": "AT-13",
+      "name": "test_annotations_intent",
+      "description": "Parse @intent(\"description\") annotation",
+      "input": "@intent(\"Compute Nth Fibonacci number iteratively\")",
+      "expected": "Annotation::Intent(\"Compute Nth Fibonacci number iteratively\")"
+    },
+    {
+      "id": "AT-14",
+      "name": "test_annotations_constraint_kv",
+      "description": "Parse @constraint { k: v } annotation",
+      "input": "@constraint { correctness: \"IEEE 754 compliant\" }",
+      "expected": "Annotation::Constraint([(\"correctness\", String(\"IEEE 754 compliant\"))])"
+    },
+    {
+      "id": "AT-15",
+      "name": "test_strategy_block_with_holes",
+      "description": "Parse strategy block with optimization holes",
+      "input": "@strategy { tiling: { M: ?tile_m, N: ?tile_n } order: ?loop_order unroll: ?unroll_factor }",
+      "expected": "Annotation::Strategy(StrategyBlock { entries: [(tiling, Map{M: Hole(tile_m), N: Hole(tile_n)}), (order, Hole(loop_order)), (unroll, Hole(unroll_factor))] })"
+    },
+    {
+      "id": "AT-16",
+      "name": "test_opt_hole_in_expr",
+      "description": "Parse ?param_name as Expr::OptHole",
+      "input": "?tile_size",
+      "expected": "Expr::OptHole(\"tile_size\")"
+    },
+    {
+      "id": "AT-17",
+      "name": "test_type_expr_named",
+      "description": "Parse named type",
+      "input": "i32",
+      "expected": "TypeExpr::Named(\"i32\")"
+    },
+    {
+      "id": "AT-18",
+      "name": "test_type_expr_tensor",
+      "description": "Parse tensor type with dimensions",
+      "input": "tensor[f32, M, N]",
+      "expected": "TypeExpr::Tensor(Named(\"f32\"), [Named(\"M\"), Named(\"N\")])"
+    },
+    {
+      "id": "AT-19",
+      "name": "test_type_expr_array",
+      "description": "Parse array type with fixed size",
+      "input": "array[f32, 1024]",
+      "expected": "TypeExpr::Array(Named(\"f32\"), IntLiteral(1024))"
+    },
+    {
+      "id": "AT-20",
+      "name": "test_type_expr_fn",
+      "description": "Parse function type",
+      "input": "fn(i32, f64) -> bool",
+      "expected": "TypeExpr::Fn([Named(\"i32\"), Named(\"f64\")], Named(\"bool\"))"
+    },
+    {
+      "id": "AT-21",
+      "name": "test_type_expr_tuple",
+      "description": "Parse tuple type",
+      "input": "(i32, f64, bool)",
+      "expected": "TypeExpr::Tuple([Named(\"i32\"), Named(\"f64\"), Named(\"bool\")])"
+    },
+    {
+      "id": "AT-22",
+      "name": "test_type_expr_dynamic_dim",
+      "description": "Parse tensor with dynamic dimension ?",
+      "input": "tensor[f32, ?, N]",
+      "expected": "TypeExpr::Tensor(Named(\"f32\"), [Dynamic, Named(\"N\")])"
+    },
+    {
+      "id": "AT-23",
+      "name": "test_let_stmt",
+      "description": "Parse let binding",
+      "input": "let x: i32 = 42;",
+      "expected": "Stmt::Let { name: \"x\", ty: Named(\"i32\"), value: IntLiteral(42), mutable: false }"
+    },
+    {
+      "id": "AT-24",
+      "name": "test_let_mut_stmt",
+      "description": "Parse mutable let binding",
+      "input": "let mut x: i32 = 0;",
+      "expected": "Stmt::Let { name: \"x\", ty: Named(\"i32\"), value: IntLiteral(0), mutable: true }"
+    },
+    {
+      "id": "AT-25",
+      "name": "test_for_stmt",
+      "description": "Parse for loop with range",
+      "input": "for i: i32 in range(10) { x = x + 1; }",
+      "expected": "Stmt::For { var: \"i\", var_type: Named(\"i32\"), iterable: Call{range, [10]}, body: Block{[Assign{x, BinaryOp{Add, x, 1}}]} }"
+    },
+    {
+      "id": "AT-26",
+      "name": "test_if_else",
+      "description": "Parse if/else",
+      "input": "if x > 0 { return x; } else { return 0; }",
+      "expected": "Stmt::If { condition: BinaryOp{Gt, x, 0}, then_block: Block{[Return(x)]}, else_block: Some(Block{[Return(0)]}) }"
+    },
+    {
+      "id": "AT-27",
+      "name": "test_multi_index",
+      "description": "Parse multi-dimensional indexing a[i, j]",
+      "input": "a[i, j]",
+      "expected": "Expr::Index { expr: Ident(a), indices: [Ident(i), Ident(j)] }"
+    },
+    {
+      "id": "AT-28",
+      "name": "test_method_call",
+      "description": "Parse method call obj.method(args)",
+      "input": "tensor.zeros()",
+      "expected": "Expr::MethodCall { expr: Ident(tensor), method: zeros, args: [] }"
+    },
+    {
+      "id": "AT-29",
+      "name": "test_wrapping_operators",
+      "description": "Parse wrapping/saturating arithmetic operators",
+      "input": "a +% b -| c *% d",
+      "expected": "Correct AST with AddWrap, SubSat, MulWrap operators respecting same-tier precedence (left-assoc)"
+    }
+  ],
+
+  "edge_cases": [
+    {
+      "id": "EC-1",
+      "name": "Missing semicolon recovery",
+      "input": "let x: i32 = 1\nlet y: i32 = 2;",
+      "expected_behavior": "Parser records MissingSemicolon error for first let, then parses second let successfully. Two statements in output, one error.",
+      "recovery_strategy": "When expecting `;` but see `let`, record error, do NOT consume `let`, continue parsing"
+    },
+    {
+      "id": "EC-2",
+      "name": "Missing closing brace",
+      "input": "fn foo() -> i32 { return 1;",
+      "expected_behavior": "Parser records MissingClosingDelimiter error with span of opening `{`. Returns partial function with body containing the return statement.",
+      "recovery_strategy": "When parsing block and hit EOF, record error, close the block implicitly"
+    },
+    {
+      "id": "EC-3",
+      "name": "Multiple errors in one file",
+      "input": "fn foo( -> i32 { return 1; }\nfn bar() -> { return 2; }",
+      "expected_behavior": "Two errors collected: missing `)` in foo's params, missing return type in bar. Both functions partially parsed.",
+      "recovery_strategy": "After error in foo params, sync to `{`. After missing type in bar, sync to `{`."
+    },
+    {
+      "id": "EC-4",
+      "name": "Invalid token in expression",
+      "input": "let x: i32 = 1 + @ + 2;",
+      "expected_behavior": "Error on unexpected `@` in expression position. Recovery produces partial expression.",
+      "recovery_strategy": "Record InvalidExpression, sync to `;`"
+    },
+    {
+      "id": "EC-5",
+      "name": "Empty function body",
+      "input": "fn foo() -> i32 { }",
+      "expected_behavior": "Valid parse — empty block. No error (the type system / HIR will catch missing return).",
+      "recovery_strategy": "N/A — valid syntax"
+    },
+    {
+      "id": "EC-6",
+      "name": "Nested unmatched delimiters",
+      "input": "fn foo() -> i32 { if true { return 1; }",
+      "expected_behavior": "Missing closing `}` for the function body. The if block closes fine. Error points to the function's `{`.",
+      "recovery_strategy": "Track delimiter nesting depth. On EOF, report outermost unmatched delimiter."
+    },
+    {
+      "id": "EC-7",
+      "name": "Annotation on wrong item",
+      "input": "@pure\nlet x: i32 = 1;",
+      "expected_behavior": "Parse succeeds syntactically — annotation is attached to the let statement context. Semantic validation (in HIR) will reject @pure on a let binding, not the parser.",
+      "recovery_strategy": "Parser does not validate annotation semantics — it only parses structure."
+    },
+    {
+      "id": "EC-8",
+      "name": "Strategy block outside function",
+      "input": "@strategy { tiling: ?t }\nfn foo() -> i32 { return 0; }",
+      "expected_behavior": "Strategy block is parsed as a module-level annotation. Semantic validation happens later.",
+      "recovery_strategy": "N/A — valid syntax"
+    },
+    {
+      "id": "EC-9",
+      "name": "Deeply nested expressions",
+      "input": "((((((a + b) * c) - d) / e) + f) * g)",
+      "expected_behavior": "Correct AST with proper nesting. No stack overflow for reasonable depth.",
+      "recovery_strategy": "N/A — valid syntax. Consider adding a nesting depth limit (e.g., 256) to prevent stack overflow on adversarial input."
+    },
+    {
+      "id": "EC-10",
+      "name": "Lexer error tokens forwarded",
+      "input": "let x: i32 = 1 + $ + 2;",
+      "expected_behavior": "Lexer produces Error token for `$`. Parser wraps it as ParseError::LexerError and continues.",
+      "recovery_strategy": "When encountering TokenKind::Error in any parse position, record LexerError and skip the token."
+    },
+    {
+      "id": "EC-11",
+      "name": "Trailing comma in parameter list",
+      "input": "fn foo(a: i32, b: i64,) -> i32 { return 0; }",
+      "expected_behavior": "Valid parse — trailing comma is allowed in parameter lists.",
+      "recovery_strategy": "N/A — valid syntax"
+    },
+    {
+      "id": "EC-12",
+      "name": "Empty module",
+      "input": "",
+      "expected_behavior": "Valid parse — Module with no name, no annotations, no items.",
+      "recovery_strategy": "N/A — valid syntax"
+    },
+    {
+      "id": "EC-13",
+      "name": "Module with only annotations",
+      "input": "@module test;\n@intent(\"A module with no functions\");",
+      "expected_behavior": "Valid parse — Module with name 'test' and intent annotation, zero items.",
+      "recovery_strategy": "N/A — valid syntax"
+    },
+    {
+      "id": "EC-14",
+      "name": "Chained comparison operators (no chaining)",
+      "input": "a < b < c",
+      "expected_behavior": "Parses as BinaryOp { Lt, BinaryOp { Lt, a, b }, c } — left-associative. No special chaining semantics. Semantic analysis may reject this.",
+      "recovery_strategy": "N/A — valid syntax at parse level"
+    },
+    {
+      "id": "EC-15",
+      "name": "Strategy block with nested maps and no commas between top-level entries",
+      "input": "@strategy {\n    tiling:   { M: ?tile_m, N: ?tile_n, K: ?tile_k }\n    order:    ?loop_order\n    parallel: ?parallel_dims\n}",
+      "expected_behavior": "All 3 top-level entries parsed. The inner map uses commas. Top-level entries are separated by detecting `IDENT ':'` pattern.",
+      "recovery_strategy": "Lookahead: if current token is Ident and next is Colon, start a new entry. Otherwise, error."
+    }
+  ],
+
+  "implementation_notes": {
+    "token_comparison": "Many TokenKind variants carry data (Ident(String), IntLiteral{...}, etc.). For `check`/`eat` operations that only care about the variant discriminant, use `std::mem::discriminant`. For extracting data, use dedicated methods like `eat_ident() -> Option<String>` that pattern-match and extract.",
+
+    "span_construction": "Use `Span::new(start, end)` where start is the span of the first token in the production and end is the span of the last token. For `Spanned<T>`, compute the merged span across all constituent tokens using `Span::merge`.",
+
+    "miette_integration": "Convert `Span { start, end }` to `miette::SourceSpan` via `SourceSpan::from((start as usize, (end - start) as usize))`. The driver must wrap the source text in `miette::NamedSource` for rendering.",
+
+    "performance": "The parser operates on a pre-allocated Vec<Token> with index-based access. No iterator overhead. Token cloning is minimal — we clone strings only when building AST nodes. For the benchmark criteria (fibonacci < 10ms, matmul < 20ms), this design is more than sufficient.",
+
+    "nesting_depth_guard": "Add a `depth: u32` counter to the Parser struct. Increment on entering recursive calls (parse_expr, parse_block). If depth exceeds 256, return an error instead of recursing. This prevents stack overflow on adversarial input.",
+
+    "ast_rs_modification": "The Block struct needs an `annotations` field. This is a MINOR change that must be made to `ast.rs` before the parser can handle strategy blocks inside function bodies. The coder agent should make this change as part of the parser implementation.",
+
+    "handling_annotation_token": "The lexer produces `TokenKind::Annotation(String)` where the String is the annotation name WITHOUT the `@` prefix. So `@pure` produces `Annotation(\"pure\")`. The parser dispatches on this string to build the appropriate `Annotation` enum variant."
+  },
+
+  "dependency_graph": {
+    "axiom-lexer": "provides Token, TokenKind, Span, Lexer — already complete (M1.1)",
+    "axiom-parser": {
+      "ast.rs": "existing — minor modification (add annotations to Block)",
+      "error.rs": "new — ParseError enum, ParseResult struct",
+      "parser.rs": "new — Parser struct, all parse_* functions, Pratt expression parser",
+      "lib.rs": "modify — add module declarations and re-exports"
+    },
+    "axiom-driver": {
+      "main.rs": "modify — wire --emit=ast"
+    }
+  },
+
+  "estimated_effort": {
+    "parser.rs": "~1200 lines — largest file, contains all parsing logic",
+    "error.rs": "~120 lines — error types and conversion helpers",
+    "lib.rs_changes": "~10 lines — module declarations and re-exports",
+    "ast.rs_changes": "~3 lines — add annotations field to Block",
+    "main.rs_changes": "~15 lines — wire --emit=ast",
+    "tests": "~400 lines — comprehensive test suite in parser.rs #[cfg(test)]",
+    "total": "~1750 lines of new/modified code"
+  }
+}
