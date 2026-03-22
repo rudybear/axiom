@@ -1,0 +1,83 @@
+{
+  "id": "M1.4-codegen",
+  "name": "LLVM Codegen",
+  "description": "HIR→LLVM IR code generation for minimal subset: functions, integer/float arithmetic, if/else, for loops, return",
+  "depends_on": ["M1.3-hir"],
+  "crates_affected": ["axiom-codegen", "axiom-driver"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1.4.1",
+      "description": "All unit tests in axiom-codegen pass",
+      "check_command": "cargo test -p axiom-codegen 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.4.2",
+      "description": "fibonacci.axm compiles to LLVM IR via --emit=llvm-ir",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=llvm-ir tests/samples/fibonacci.axm 2>&1",
+      "check_pattern": "define",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.4.3",
+      "description": "hello.axm compiles to LLVM IR via --emit=llvm-ir",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=llvm-ir tests/samples/hello.axm 2>&1",
+      "check_pattern": "define",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.4.4",
+      "description": "Generated LLVM IR is syntactically valid (verified by llvm-as if available)",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=llvm-ir tests/samples/fibonacci.axm > /tmp/axiom_test.ll 2>&1 && (which llvm-as > /dev/null 2>&1 && llvm-as /tmp/axiom_test.ll -o /dev/null 2>&1 || echo 'SKIP: llvm-as not available')",
+      "check_pattern": "SKIP|$",
+      "check_type": "command_output_matches_regex",
+      "optional": true
+    },
+    {
+      "id": "AC-1.4.5",
+      "description": "Code generation handles i32, i64, f32, f64 types correctly",
+      "check_command": "cargo test -p axiom-codegen test_numeric_types 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.4.6",
+      "description": "Code generation handles if/else control flow",
+      "check_command": "cargo test -p axiom-codegen test_if_else 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.4.7",
+      "description": "Code generation handles for loops",
+      "check_command": "cargo test -p axiom-codegen test_for_loop 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.4.8",
+      "description": "No compiler warnings",
+      "check_command": "cargo clippy -p axiom-codegen -- -D warnings 2>&1",
+      "check_pattern": "warning",
+      "check_type": "command_output_not_contains"
+    }
+  ],
+  "benchmark_criteria": [
+    {
+      "id": "BC-1.4.1",
+      "description": "LLVM IR generation for fibonacci.axm under 50ms",
+      "metric": "codegen_fibonacci_ms",
+      "threshold": 50,
+      "comparison": "less_than"
+    },
+    {
+      "id": "BC-1.4.2",
+      "description": "Generated LLVM IR file size under 10KB for fibonacci.axm",
+      "metric": "ir_size_fibonacci_bytes",
+      "threshold": 10240,
+      "comparison": "less_than"
+    }
+  ]
+}

@@ -3,3 +3,6 @@
 *.swo
 *~
 .DS_Store
+
+# Pipeline ephemeral run data (prompts, raw outputs, per-run state)
+.pipeline/runs/

@@ -1,0 +1,75 @@
+{
+  "id": "M1.3-hir",
+  "name": "HIR (High-Level IR)",
+  "description": "High-level intermediate representation preserving semantic annotations, with AST→HIR lowering and type validation",
+  "depends_on": ["M1.2-parser"],
+  "crates_affected": ["axiom-hir", "axiom-driver"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1.3.1",
+      "description": "All unit tests in axiom-hir pass",
+      "check_command": "cargo test -p axiom-hir 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.3.2",
+      "description": "HIR node types cover all AST constructs (functions, structs, let, if, for, while, return, expressions)",
+      "check_command": "cargo test -p axiom-hir test_hir_coverage 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.3.3",
+      "description": "AST→HIR lowering compiles and produces valid HIR from fibonacci.axm",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=hir tests/samples/fibonacci.axm 2>&1",
+      "check_pattern": "fn fib",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.3.4",
+      "description": "Semantic annotations (@pure, @intent, @complexity) survive AST→HIR lowering",
+      "check_command": "cargo test -p axiom-hir test_annotation_preservation 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.3.5",
+      "description": "Annotation validation rejects invalid annotation targets (e.g., @pure on a let binding)",
+      "check_command": "cargo test -p axiom-hir test_annotation_validation 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.3.6",
+      "description": "Type checking validates explicit types — no inference, only validation",
+      "check_command": "cargo test -p axiom-hir test_type_validation 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.3.7",
+      "description": "HIR pretty-printer produces readable output for --emit=hir",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=hir tests/samples/hello.axm 2>&1",
+      "check_pattern": "fn main",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.3.8",
+      "description": "No compiler warnings",
+      "check_command": "cargo clippy -p axiom-hir -- -D warnings 2>&1",
+      "check_pattern": "warning",
+      "check_type": "command_output_not_contains"
+    }
+  ],
+  "benchmark_criteria": [
+    {
+      "id": "BC-1.3.1",
+      "description": "AST→HIR lowering for fibonacci.axm under 5ms",
+      "metric": "lower_fibonacci_ms",
+      "threshold": 5,
+      "comparison": "less_than"
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "id": "M1.1-lexer",
+  "name": "Lexer",
+  "description": "Complete tokenizer for AXIOM with all token types, error recovery, and span tracking",
+  "depends_on": [],
+  "crates_affected": ["axiom-lexer", "axiom-driver"],
+  "status": "partially_complete",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1.1.1",
+      "description": "All unit tests in axiom-lexer pass",
+      "check_command": "cargo test -p axiom-lexer 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.1.2",
+      "description": "Lexer can tokenize tests/samples/hello.axm without errors",
+      "check_command": "cargo run -p axiom-driver -- lex tests/samples/hello.axm 2>&1",
+      "check_pattern": "Fn",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.1.3",
+      "description": "Lexer can tokenize tests/samples/fibonacci.axm without errors",
+      "check_command": "cargo run -p axiom-driver -- lex tests/samples/fibonacci.axm 2>&1",
+      "check_pattern": "Fn",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.1.4",
+      "description": "Lexer can tokenize tests/samples/matmul_naive.axm without errors",
+      "check_command": "cargo run -p axiom-driver -- lex tests/samples/matmul_naive.axm 2>&1",
+      "check_pattern": "Annotation",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.1.5",
+      "description": "Error recovery works — invalid input produces Error tokens but lexing continues",
+      "check_command": "cargo test -p axiom-lexer test_error_recovery 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.1.6",
+      "description": "All token types from CLAUDE.md spec are covered (keywords, types, annotations, opt holes, operators)",
+      "check_command": "cargo test -p axiom-lexer test_basic_tokens test_keywords test_type_keywords test_annotation test_optimization_hole test_wrapping_operators 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.1.7",
+      "description": "Every token carries a Span with (start, end) offsets",
+      "check_command": "cargo test -p axiom-lexer test_function_signature 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.1.8",
+      "description": "No compiler warnings",
+      "check_command": "cargo clippy -p axiom-lexer -- -D warnings 2>&1",
+      "check_pattern": "warning",
+      "check_type": "command_output_not_contains"
+    }
+  ],
+  "benchmark_criteria": [
+    {
+      "id": "BC-1.1.1",
+      "description": "Lexer tokenizes fibonacci.axm in under 5ms",
+      "metric": "lex_fibonacci_ms",
+      "threshold": 5,
+      "comparison": "less_than"
+    },
+    {
+      "id": "BC-1.1.2",
+      "description": "Lexer tokenizes matmul_naive.axm in under 10ms",
+      "metric": "lex_matmul_ms",
+      "threshold": 10,
+      "comparison": "less_than"
+    }
+  ]
+}

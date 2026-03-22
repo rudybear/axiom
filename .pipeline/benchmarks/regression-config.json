@@ -1,0 +1,13 @@
+{
+  "description": "Regression thresholds — if a metric worsens by more than this percentage, the benchmark gate fails",
+  "thresholds": {
+    "compile_time_pct": 20,
+    "test_execution_time_pct": 25,
+    "binary_size_pct": 10,
+    "runtime_performance_pct": 5,
+    "memory_usage_pct": 15
+  },
+  "warmup_runs": 3,
+  "measurement_runs": 5,
+  "skip_benchmark_if_no_baseline": true
+}

@@ -1,0 +1,89 @@
+{
+  "id": "M1.5-e2e",
+  "name": "End-to-End Demo",
+  "description": "Full compilation pipeline: .axm → tokens → AST → HIR → LLVM IR → native binary. The axiom compile command produces a runnable executable.",
+  "depends_on": ["M1.4-codegen"],
+  "crates_affected": ["axiom-driver", "axiom-codegen"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1.5.1",
+      "description": "axiom compile fibonacci.axm -o fib produces an executable",
+      "check_command": "cargo run -p axiom-driver -- compile tests/samples/fibonacci.axm -o /tmp/axiom_fib 2>&1 && test -f /tmp/axiom_fib && echo 'BINARY_EXISTS'",
+      "check_pattern": "BINARY_EXISTS",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.5.2",
+      "description": "Compiled fibonacci program runs and prints correct Fibonacci(40) = 102334155",
+      "check_command": "/tmp/axiom_fib 2>&1",
+      "check_pattern": "102334155",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.5.3",
+      "description": "axiom compile hello.axm -o hello produces an executable that prints greeting",
+      "check_command": "cargo run -p axiom-driver -- compile tests/samples/hello.axm -o /tmp/axiom_hello 2>&1 && /tmp/axiom_hello 2>&1",
+      "check_pattern": "Hello from AXIOM",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.5.4",
+      "description": "--emit=tokens works",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=tokens tests/samples/hello.axm 2>&1",
+      "check_pattern": "Fn",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.5.5",
+      "description": "--emit=ast works",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=ast tests/samples/hello.axm 2>&1",
+      "check_pattern": "Module",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.5.6",
+      "description": "--emit=hir works",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=hir tests/samples/hello.axm 2>&1",
+      "check_pattern": "fn main",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.5.7",
+      "description": "--emit=llvm-ir works",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=llvm-ir tests/samples/hello.axm 2>&1",
+      "check_pattern": "define",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.5.8",
+      "description": "All workspace tests pass",
+      "check_command": "cargo test --workspace 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    }
+  ],
+  "benchmark_criteria": [
+    {
+      "id": "BC-1.5.1",
+      "description": "Full pipeline (source → binary) for fibonacci.axm under 5 seconds",
+      "metric": "full_pipeline_fibonacci_ms",
+      "threshold": 5000,
+      "comparison": "less_than"
+    },
+    {
+      "id": "BC-1.5.2",
+      "description": "Compiled fibonacci binary size under 1MB",
+      "metric": "binary_size_fibonacci_bytes",
+      "threshold": 1048576,
+      "comparison": "less_than"
+    },
+    {
+      "id": "BC-1.5.3",
+      "description": "Compiled fibonacci runtime under 1 second",
+      "metric": "runtime_fibonacci_ms",
+      "threshold": 1000,
+      "comparison": "less_than"
+    }
+  ]
+}

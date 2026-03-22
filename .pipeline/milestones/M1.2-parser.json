@@ -1,0 +1,96 @@
+{
+  "id": "M1.2-parser",
+  "name": "Parser",
+  "description": "Recursive descent parser producing typed AST from token stream, with Pratt parsing for expressions and full error recovery",
+  "depends_on": ["M1.1-lexer"],
+  "crates_affected": ["axiom-parser", "axiom-driver"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {
+      "id": "AC-1.2.1",
+      "description": "All unit tests in axiom-parser pass",
+      "check_command": "cargo test -p axiom-parser 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.2.2",
+      "description": "Parser can parse tests/samples/hello.axm into a Module with a main function",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=ast tests/samples/hello.axm 2>&1",
+      "check_pattern": "Module",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.2.3",
+      "description": "Parser can parse tests/samples/fibonacci.axm — functions, if/else, for loops, let bindings",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=ast tests/samples/fibonacci.axm 2>&1",
+      "check_pattern": "Function",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.2.4",
+      "description": "Annotations (@pure, @intent, @complexity, @module) are parsed as structured Annotation enum variants",
+      "check_command": "cargo test -p axiom-parser test_annotations 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.2.5",
+      "description": "Strategy blocks with ?param optimization holes are parsed correctly",
+      "check_command": "cargo test -p axiom-parser test_strategy_block 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.2.6",
+      "description": "Error recovery — parser reports ALL errors, not just the first one",
+      "check_command": "cargo test -p axiom-parser test_error_recovery 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.2.7",
+      "description": "Optimization hole ?param appears in AST as Expr::OptHole",
+      "check_command": "cargo test -p axiom-parser test_opt_hole 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.2.8",
+      "description": "Expression precedence is correct (Pratt parsing): *, / bind tighter than +, -; comparisons bind looser",
+      "check_command": "cargo test -p axiom-parser test_precedence 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.2.9",
+      "description": "Type expressions parse: named types, tensor[f32, M, N], array[f32, 1024], tuple types, fn types",
+      "check_command": "cargo test -p axiom-parser test_type_expr 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-1.2.10",
+      "description": "No compiler warnings",
+      "check_command": "cargo clippy -p axiom-parser -- -D warnings 2>&1",
+      "check_pattern": "warning",
+      "check_type": "command_output_not_contains"
+    }
+  ],
+  "benchmark_criteria": [
+    {
+      "id": "BC-1.2.1",
+      "description": "Parser processes fibonacci.axm in under 10ms",
+      "metric": "parse_fibonacci_ms",
+      "threshold": 10,
+      "comparison": "less_than"
+    },
+    {
+      "id": "BC-1.2.2",
+      "description": "Parser processes matmul_naive.axm in under 20ms",
+      "metric": "parse_matmul_ms",
+      "threshold": 20,
+      "comparison": "less_than"
+    }
+  ]
+}
