@@ -81,6 +81,28 @@ fn main() -> miette::Result<()> {
                     }
                     println!("{:#?}", result.module);
                 }
+                Some("hir") => {
+                    let result = axiom_parser::parse(&source);
+                    if result.has_errors() {
+                        eprintln!("--- Parse Errors ---");
+                        for err in &result.errors {
+                            eprintln!("  {err}");
+                        }
+                        return Err(miette::miette!("parsing failed with {} error(s)", result.errors.len()));
+                    }
+                    match axiom_hir::lower(&result.module) {
+                        Ok(hir_module) => {
+                            println!("{hir_module}");
+                        }
+                        Err(errors) => {
+                            eprintln!("--- HIR Lowering Errors ---");
+                            for err in &errors {
+                                eprintln!("  {err}");
+                            }
+                            return Err(miette::miette!("HIR lowering failed with {} error(s)", errors.len()));
+                        }
+                    }
+                }
                 Some(level) => {
                     eprintln!("TODO: --emit={level} not yet implemented");
                 }

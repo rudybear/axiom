@@ -93,6 +93,7 @@ dependencies = [
 name = "axiom-driver"
 version = "0.1.0"
 dependencies = [
+ "axiom-hir",
  "axiom-lexer",
  "axiom-parser",
  "clap",
@@ -105,6 +106,10 @@ dependencies = [
 name = "axiom-hir"
 version = "0.1.0"
 dependencies = [
+ "axiom-lexer",
+ "axiom-parser",
+ "insta",
+ "miette",
  "thiserror",
 ]
 
