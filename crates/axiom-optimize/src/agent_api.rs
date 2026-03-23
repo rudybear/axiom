@@ -218,14 +218,18 @@ impl AgentSession {
     /// Generate the source text with an appended `@transfer` block.
     ///
     /// The original source is preserved as-is, and the transfer block is
-    /// appended as a comment-delimited section at the end. This produces
-    /// valid AXIOM text that the next agent can parse.
+    /// appended inside a sentinel function `__transfer__` at the end so that
+    /// the next agent can parse the source and extract the transfer metadata
+    /// via [`AgentSession::transfer()`].
     pub fn export_with_transfer(&self, transfer: TransferInfo) -> String {
         let transfer_text = generate_transfer(&transfer);
-        let mut output = self.source.trim_end().to_string();
+        // Strip any previous __transfer__ sentinel function to avoid duplicates
+        let base = strip_transfer_sentinel(&self.source);
+        let mut output = base.trim_end().to_string();
         output.push_str("\n\n// --- Agent Transfer ---\n");
-        output.push_str(&transfer_text);
-        output.push('\n');
+        output.push_str("fn __transfer__() -> i32 {\n    ");
+        output.push_str(&transfer_text.replace('\n', "\n    "));
+        output.push_str("\n    return 0;\n}\n");
         output
     }
 
@@ -325,6 +329,18 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         Value::Array(items) => {
             serde_json::Value::Array(items.iter().map(value_to_json).collect())
         }
+    }
+}
+
+/// Strip the `__transfer__` sentinel function (and the preceding comment
+/// marker) from source text so that `export_with_transfer` can append a
+/// fresh one without creating duplicates.
+fn strip_transfer_sentinel(source: &str) -> String {
+    // Look for the comment marker that precedes the sentinel function.
+    if let Some(marker_pos) = source.find("// --- Agent Transfer ---") {
+        source[..marker_pos].to_string()
+    } else {
+        source.to_string()
     }
 }
 
