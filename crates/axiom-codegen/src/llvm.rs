@@ -843,8 +843,11 @@ fn emit_for(
     // Emit end value (once, before the loop).
     let end_val = emit_expr(ctx, end_expr.expect("end_expr should be Some"), Some(&loop_type));
 
-    // Alloca for loop variable.
-    let alloca_name = format!("%{var}");
+    // Alloca for loop variable — use unique name to avoid collisions with
+    // multiple loops using the same variable name.
+    let unique_id = ctx.next_reg;
+    ctx.next_reg += 1;
+    let alloca_name = format!("%{var}.{unique_id}");
     ctx.emit(&format!("{alloca_name} = alloca {loop_type}"));
     ctx.emit(&format!(
         "store {loop_type} {}, ptr {alloca_name}",
@@ -2488,7 +2491,7 @@ mod tests {
         );
 
         let ir = codegen(&m).expect("codegen should succeed");
-        assert!(ir.contains("%i = alloca i32"), "should alloca loop var");
+        assert!(ir.contains("alloca i32"), "should alloca loop var");
         assert!(ir.contains("icmp slt"), "should have loop comparison");
         assert!(ir.contains("for.cond."), "should have for.cond label");
         assert!(ir.contains("for.body."), "should have for.body label");
