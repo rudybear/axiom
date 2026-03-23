@@ -1,0 +1,32 @@
+{
+  "id": "M2.4-matmul-demo",
+  "name": "Matmul Optimization Demo",
+  "description": "End-to-end demo: AI agent iteratively optimizes matmul from naive to optimized using the optimization protocol. Demonstrates ?params, @strategy, benchmarking, and history recording.",
+  "depends_on": ["M2.3-optimize-cli"],
+  "crates_affected": ["axiom-optimize", "axiom-driver"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {
+      "id": "AC-2.4.1",
+      "description": "matmul example with strategy block compiles",
+      "check_command": "cargo run -p axiom-driver -- compile --emit=llvm-ir tests/samples/matmul_naive.axm 2>&1",
+      "check_pattern": "define",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-2.4.2",
+      "description": "Optimization surfaces extracted from matmul",
+      "check_command": "cargo test -p axiom-optimize test_matmul_surfaces 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-2.4.3",
+      "description": "All workspace tests pass",
+      "check_command": "cargo test --workspace 2>&1",
+      "check_pattern": "failures",
+      "check_type": "command_output_not_contains"
+    }
+  ],
+  "benchmark_criteria": []
+}

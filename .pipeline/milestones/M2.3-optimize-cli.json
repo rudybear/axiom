@@ -1,0 +1,32 @@
+{
+  "id": "M2.3-optimize-cli",
+  "name": "Optimization History & CLI",
+  "description": "Record optimization attempts and results in @optimization_log annotations. CLI command: axiom optimize that proposes, benchmarks, and records optimization parameter values.",
+  "depends_on": ["M2.2-benchmark-harness"],
+  "crates_affected": ["axiom-optimize", "axiom-driver", "axiom-parser"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {
+      "id": "AC-2.3.1",
+      "description": "axiom optimize command exists",
+      "check_command": "cargo run -p axiom-driver -- optimize --help 2>&1",
+      "check_pattern": "optimize",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-2.3.2",
+      "description": "Optimization history can be serialized to/from JSON",
+      "check_command": "cargo test -p axiom-optimize test_history 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-2.3.3",
+      "description": "All workspace tests pass",
+      "check_command": "cargo test --workspace 2>&1",
+      "check_pattern": "failures",
+      "check_type": "command_output_not_contains"
+    }
+  ],
+  "benchmark_criteria": []
+}

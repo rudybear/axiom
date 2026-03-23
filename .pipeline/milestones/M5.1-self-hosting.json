@@ -1,0 +1,18 @@
+{
+  "id": "M5.1-self-hosting",
+  "name": "Self-Hosting Bootstrap",
+  "description": "Write a subset of the AXIOM compiler (lexer) in AXIOM itself. Demonstrate that AXIOM can compile its own lexer, proving the language is expressive enough for systems programming.",
+  "depends_on": ["M4.3-mcp-server"],
+  "crates_affected": ["axiom-driver"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {
+      "id": "AC-5.1.1",
+      "description": "Self-hosted lexer example compiles and runs",
+      "check_command": "cargo test --workspace 2>&1",
+      "check_pattern": "failures",
+      "check_type": "command_output_not_contains"
+    }
+  ],
+  "benchmark_criteria": []
+}

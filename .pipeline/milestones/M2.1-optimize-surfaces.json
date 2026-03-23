@@ -1,0 +1,39 @@
+{
+  "id": "M2.1-optimize-surfaces",
+  "name": "Optimization Surface Extraction & Validation",
+  "description": "Extract ?param optimization holes and @strategy blocks from HIR, validate proposed values against type/range constraints, provide programmatic API for discovering optimization surfaces",
+  "depends_on": ["M1.5-e2e"],
+  "crates_affected": ["axiom-optimize", "axiom-hir", "axiom-parser"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {
+      "id": "AC-2.1.1",
+      "description": "axiom-optimize crate compiles and tests pass",
+      "check_command": "cargo test -p axiom-optimize 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-2.1.2",
+      "description": "Can extract optimization surfaces from matmul_naive.axm",
+      "check_command": "cargo test -p axiom-optimize test_extract_surfaces 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-2.1.3",
+      "description": "Can validate proposed values against type constraints",
+      "check_command": "cargo test -p axiom-optimize test_validate_proposal 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-2.1.4",
+      "description": "No compiler warnings",
+      "check_command": "cargo clippy -p axiom-optimize -- -D warnings 2>&1",
+      "check_pattern": "warning",
+      "check_type": "command_output_not_contains"
+    }
+  ],
+  "benchmark_criteria": []
+}

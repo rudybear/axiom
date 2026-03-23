@@ -1,0 +1,25 @@
+{
+  "id": "M4.3-mcp-server",
+  "name": "MCP Server",
+  "description": "Model Context Protocol server exposing AXIOM optimization as tools AI agents can call: load program, extract surfaces, propose optimization, benchmark, record history.",
+  "depends_on": ["M4.2-interop"],
+  "crates_affected": ["axiom-optimize", "axiom-driver"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {
+      "id": "AC-4.3.1",
+      "description": "MCP server binary compiles",
+      "check_command": "cargo build -p axiom-driver 2>&1",
+      "check_pattern": "Finished",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-4.3.2",
+      "description": "All workspace tests pass",
+      "check_command": "cargo test --workspace 2>&1",
+      "check_pattern": "failures",
+      "check_type": "command_output_not_contains"
+    }
+  ],
+  "benchmark_criteria": []
+}

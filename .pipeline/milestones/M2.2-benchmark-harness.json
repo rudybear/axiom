@@ -1,0 +1,32 @@
+{
+  "id": "M2.2-benchmark-harness",
+  "name": "Built-in Benchmarking Harness",
+  "description": "Compile, run, measure, and report performance of AXIOM programs with different optimization parameters. Supports timing, instruction counting, and metric collection.",
+  "depends_on": ["M2.1-optimize-surfaces"],
+  "crates_affected": ["axiom-optimize", "axiom-driver"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {
+      "id": "AC-2.2.1",
+      "description": "Benchmark harness can compile and time an AXIOM program",
+      "check_command": "cargo test -p axiom-optimize test_benchmark_run 2>&1",
+      "check_pattern": "test result: ok",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-2.2.2",
+      "description": "axiom bench command exists in CLI",
+      "check_command": "cargo run -p axiom-driver -- bench --help 2>&1",
+      "check_pattern": "bench",
+      "check_type": "command_output_contains"
+    },
+    {
+      "id": "AC-2.2.3",
+      "description": "No compiler warnings",
+      "check_command": "cargo clippy --workspace -- -D warnings 2>&1",
+      "check_pattern": "warning",
+      "check_type": "command_output_not_contains"
+    }
+  ],
+  "benchmark_criteria": []
+}
