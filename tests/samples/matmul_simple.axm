@@ -1,0 +1,26 @@
+@module matmul_simple;
+@intent("Simple matrix multiply kernel for optimization demo");
+
+@pure
+@complexity O(n^3)
+fn matmul_simple(n: i32) -> i32 {
+    @strategy {
+        unroll: ?unroll_factor
+    }
+
+    let sum: i32 = 0;
+    for i: i32 in range(0, n) {
+        for j: i32 in range(0, n) {
+            for k: i32 in range(0, n) {
+                sum = sum + i * j + k;
+            }
+        }
+    }
+    return sum;
+}
+
+fn main() -> i32 {
+    let result: i32 = matmul_simple(100);
+    print_i64(widen(result));
+    return 0;
+}

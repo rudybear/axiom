@@ -9,7 +9,7 @@
 fn matmul(
     a: tensor[f32, M, K] @layout(row_major) @align(64),
     b: tensor[f32, K, N] @layout(col_major) @align(64),
-) -> tensor[f32, M, N] @layout(row_major) {
+) -> tensor[f32, M, N] {
 
     @strategy {
         tiling:   { M: ?tile_m, N: ?tile_n, K: ?tile_k }
