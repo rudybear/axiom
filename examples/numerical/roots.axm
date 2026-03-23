@@ -1,0 +1,84 @@
+@module roots;
+@intent("Root finding via Newton-Raphson and bisection methods");
+
+// Find a root of f(x) = x^2 - 2 (i.e., compute sqrt(2))
+// using Newton-Raphson: x_{n+1} = x_n - f(x_n) / f'(x_n)
+// For x^2 - 2: f'(x) = 2x, so x_{n+1} = x_n - (x_n^2 - 2) / (2*x_n)
+@pure
+fn newton_sqrt2(max_iter: i32) -> f64 {
+    let x: f64 = 1.0;
+    let tol: f64 = 0.000000001;
+    for i: i32 in range(0, max_iter) {
+        let fx: f64 = x * x - 2.0;
+        let fpx: f64 = 2.0 * x;
+        let dx: f64 = fx / fpx;
+        x = x - dx;
+        // Check convergence.
+        let adx: f64 = abs_f64(dx);
+        if adx < tol {
+            return x;
+        }
+    }
+    return x;
+}
+
+// Find a root of f(x) = x^3 - x - 2 via Newton-Raphson.
+// f'(x) = 3x^2 - 1
+@pure
+fn newton_cubic(max_iter: i32) -> f64 {
+    let x: f64 = 1.5;
+    let tol: f64 = 0.000000001;
+    for i: i32 in range(0, max_iter) {
+        let fx: f64 = x * x * x - x - 2.0;
+        let fpx: f64 = 3.0 * x * x - 1.0;
+        let dx: f64 = fx / fpx;
+        x = x - dx;
+        let adx: f64 = abs_f64(dx);
+        if adx < tol {
+            return x;
+        }
+    }
+    return x;
+}
+
+// Bisection method: find root of f(x) = x^2 - 2 on [1, 2].
+// Halve the interval repeatedly.
+@pure
+fn bisection_sqrt2(max_iter: i32) -> f64 {
+    let a: f64 = 1.0;
+    let b: f64 = 2.0;
+    let tol: f64 = 0.000000001;
+    for i: i32 in range(0, max_iter) {
+        let mid: f64 = (a + b) / 2.0;
+        let fmid: f64 = mid * mid - 2.0;
+        if abs_f64(fmid) < tol {
+            return mid;
+        }
+        // f(a) = 1 - 2 = -1 (always negative on left).
+        // If fmid < 0, root is in [mid, b]; else in [a, mid].
+        if fmid < 0.0 {
+            a = mid;
+        } else {
+            b = mid;
+        }
+    }
+    return (a + b) / 2.0;
+}
+
+fn main() -> i32 {
+    print("Root finding methods:");
+
+    let r1: f64 = newton_sqrt2(100);
+    print("Newton-Raphson sqrt(2):");
+    print_f64(r1);
+
+    let r2: f64 = newton_cubic(100);
+    print("Newton-Raphson root of x^3-x-2:");
+    print_f64(r2);
+
+    let r3: f64 = bisection_sqrt2(100);
+    print("Bisection sqrt(2):");
+    print_f64(r3);
+
+    return 0;
+}

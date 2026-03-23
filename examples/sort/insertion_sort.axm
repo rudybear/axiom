@@ -1,0 +1,42 @@
+@module insertion_sort;
+@intent("Insertion sort on a fixed-size integer array");
+
+// Insert each element into its correct position in the sorted prefix.
+@pure
+@complexity O(n^2)
+fn insertion_sort(arr: array[i32, 100], n: i32) -> i32 {
+    for i: i32 in range(1, n) {
+        let key: i32 = arr[i];
+        let j: i32 = i - 1;
+        while j >= 0 and arr[j] > key {
+            arr[j + 1] = arr[j];
+            j = j - 1;
+        }
+        arr[j + 1] = key;
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    let arr: array[i32, 100] = array_zeros[i32, 100];
+    let n: i32 = 20;
+
+    // Fill with a pseudo-random pattern: i*7 mod 23.
+    for i: i32 in range(0, n) {
+        arr[i] = (i * 7) % 23;
+    }
+
+    print("Before sort:");
+    for i: i32 in range(0, n) {
+        print_i32(arr[i]);
+    }
+
+    let ignored: i32 = insertion_sort(arr, n);
+
+    print("After sort:");
+    for i: i32 in range(0, n) {
+        print_i32(arr[i]);
+    }
+
+    return 0;
+}

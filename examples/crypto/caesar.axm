@@ -1,0 +1,69 @@
+@module caesar;
+@intent("Caesar cipher on an integer array treating values as ASCII character codes");
+
+// Encrypt: shift each character code by `shift` positions.
+// Only affects lowercase letters (97-122). Wraps around.
+@pure
+fn caesar_encrypt(arr: array[i32, 100], len: i32, shift: i32) -> i32 {
+    for i: i32 in range(0, len) {
+        let c: i32 = arr[i];
+        // Only shift lowercase a-z (ASCII 97-122).
+        if c >= 97 and c <= 122 {
+            arr[i] = (c - 97 + shift) % 26 + 97;
+        }
+    }
+    return 0;
+}
+
+// Decrypt: shift each character code by -shift positions.
+@pure
+fn caesar_decrypt(arr: array[i32, 100], len: i32, shift: i32) -> i32 {
+    for i: i32 in range(0, len) {
+        let c: i32 = arr[i];
+        if c >= 97 and c <= 122 {
+            // Add 26 before modulo to handle negative shifts.
+            arr[i] = (c - 97 - shift + 26) % 26 + 97;
+        }
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    let msg: array[i32, 100] = array_zeros[i32, 100];
+    // Encode "helloworld" as ASCII codes.
+    // h=104, e=101, l=108, l=108, o=111, w=119, o=111, r=114, l=108, d=100
+    let len: i32 = 10;
+    msg[0] = 104;
+    msg[1] = 101;
+    msg[2] = 108;
+    msg[3] = 108;
+    msg[4] = 111;
+    msg[5] = 119;
+    msg[6] = 111;
+    msg[7] = 114;
+    msg[8] = 108;
+    msg[9] = 100;
+
+    let shift: i32 = 3;
+
+    print("Original message (ASCII codes):");
+    for i: i32 in range(0, len) {
+        print_i32(msg[i]);
+    }
+
+    // Encrypt.
+    let ignored1: i32 = caesar_encrypt(msg, len, shift);
+    print("Encrypted (shift=3):");
+    for i: i32 in range(0, len) {
+        print_i32(msg[i]);
+    }
+
+    // Decrypt.
+    let ignored2: i32 = caesar_decrypt(msg, len, shift);
+    print("Decrypted (should match original):");
+    for i: i32 in range(0, len) {
+        print_i32(msg[i]);
+    }
+
+    return 0;
+}

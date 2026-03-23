@@ -1,0 +1,279 @@
+@module nbody;
+@intent("5-body gravitational simulation using 35 scalar f64 variables");
+
+// Gravitational constant (scaled for this simulation).
+// Each body has 7 scalars: x, y, z, vx, vy, vz, mass.
+// We use 5 bodies = 35 scalar variables.
+// Simulation runs for 1000 time steps with dt = 0.001.
+
+@pure
+fn nbody_sim() -> f64 {
+    // Time step.
+    let dt: f64 = 0.001;
+    let steps: i32 = 1000;
+
+    // Gravitational softening to avoid division by zero.
+    let softening: f64 = 0.01;
+
+    // Body 0: Sun-like (center, heavy).
+    let x0: f64 = 0.0;
+    let y0: f64 = 0.0;
+    let z0: f64 = 0.0;
+    let vx0: f64 = 0.0;
+    let vy0: f64 = 0.0;
+    let vz0: f64 = 0.0;
+    let m0: f64 = 1000.0;
+
+    // Body 1: Inner planet.
+    let x1: f64 = 1.0;
+    let y1: f64 = 0.0;
+    let z1: f64 = 0.0;
+    let vx1: f64 = 0.0;
+    let vy1: f64 = 1.0;
+    let vz1: f64 = 0.0;
+    let m1: f64 = 1.0;
+
+    // Body 2: Outer planet.
+    let x2: f64 = 0.0;
+    let y2: f64 = 2.0;
+    let z2: f64 = 0.0;
+    let vx2: f64 = -0.5;
+    let vy2: f64 = 0.0;
+    let vz2: f64 = 0.3;
+    let m2: f64 = 2.0;
+
+    // Body 3: Inclined orbit.
+    let x3: f64 = -1.5;
+    let y3: f64 = 0.0;
+    let z3: f64 = 0.5;
+    let vx3: f64 = 0.0;
+    let vy3: f64 = -0.8;
+    let vz3: f64 = 0.0;
+    let m3: f64 = 0.5;
+
+    // Body 4: Distant body.
+    let x4: f64 = 3.0;
+    let y4: f64 = 3.0;
+    let z4: f64 = 0.0;
+    let vx4: f64 = -0.3;
+    let vy4: f64 = 0.3;
+    let vz4: f64 = 0.0;
+    let m4: f64 = 1.5;
+
+    for step: i32 in range(0, steps) {
+        // Accumulate forces on each body.
+        let ax0: f64 = 0.0;
+        let ay0: f64 = 0.0;
+        let az0: f64 = 0.0;
+        let ax1: f64 = 0.0;
+        let ay1: f64 = 0.0;
+        let az1: f64 = 0.0;
+        let ax2: f64 = 0.0;
+        let ay2: f64 = 0.0;
+        let az2: f64 = 0.0;
+        let ax3: f64 = 0.0;
+        let ay3: f64 = 0.0;
+        let az3: f64 = 0.0;
+        let ax4: f64 = 0.0;
+        let ay4: f64 = 0.0;
+        let az4: f64 = 0.0;
+
+        // Pair 0-1.
+        let dx01: f64 = x1 - x0;
+        let dy01: f64 = y1 - y0;
+        let dz01: f64 = z1 - z0;
+        let dist01_sq: f64 = dx01 * dx01 + dy01 * dy01 + dz01 * dz01 + softening;
+        let dist01: f64 = sqrt(dist01_sq);
+        let inv01: f64 = 1.0 / (dist01 * dist01_sq);
+        ax0 = ax0 + m1 * dx01 * inv01;
+        ay0 = ay0 + m1 * dy01 * inv01;
+        az0 = az0 + m1 * dz01 * inv01;
+        ax1 = ax1 - m0 * dx01 * inv01;
+        ay1 = ay1 - m0 * dy01 * inv01;
+        az1 = az1 - m0 * dz01 * inv01;
+
+        // Pair 0-2.
+        let dx02: f64 = x2 - x0;
+        let dy02: f64 = y2 - y0;
+        let dz02: f64 = z2 - z0;
+        let dist02_sq: f64 = dx02 * dx02 + dy02 * dy02 + dz02 * dz02 + softening;
+        let dist02: f64 = sqrt(dist02_sq);
+        let inv02: f64 = 1.0 / (dist02 * dist02_sq);
+        ax0 = ax0 + m2 * dx02 * inv02;
+        ay0 = ay0 + m2 * dy02 * inv02;
+        az0 = az0 + m2 * dz02 * inv02;
+        ax2 = ax2 - m0 * dx02 * inv02;
+        ay2 = ay2 - m0 * dy02 * inv02;
+        az2 = az2 - m0 * dz02 * inv02;
+
+        // Pair 0-3.
+        let dx03: f64 = x3 - x0;
+        let dy03: f64 = y3 - y0;
+        let dz03: f64 = z3 - z0;
+        let dist03_sq: f64 = dx03 * dx03 + dy03 * dy03 + dz03 * dz03 + softening;
+        let dist03: f64 = sqrt(dist03_sq);
+        let inv03: f64 = 1.0 / (dist03 * dist03_sq);
+        ax0 = ax0 + m3 * dx03 * inv03;
+        ay0 = ay0 + m3 * dy03 * inv03;
+        az0 = az0 + m3 * dz03 * inv03;
+        ax3 = ax3 - m0 * dx03 * inv03;
+        ay3 = ay3 - m0 * dy03 * inv03;
+        az3 = az3 - m0 * dz03 * inv03;
+
+        // Pair 0-4.
+        let dx04: f64 = x4 - x0;
+        let dy04: f64 = y4 - y0;
+        let dz04: f64 = z4 - z0;
+        let dist04_sq: f64 = dx04 * dx04 + dy04 * dy04 + dz04 * dz04 + softening;
+        let dist04: f64 = sqrt(dist04_sq);
+        let inv04: f64 = 1.0 / (dist04 * dist04_sq);
+        ax0 = ax0 + m4 * dx04 * inv04;
+        ay0 = ay0 + m4 * dy04 * inv04;
+        az0 = az0 + m4 * dz04 * inv04;
+        ax4 = ax4 - m0 * dx04 * inv04;
+        ay4 = ay4 - m0 * dy04 * inv04;
+        az4 = az4 - m0 * dz04 * inv04;
+
+        // Pair 1-2.
+        let dx12: f64 = x2 - x1;
+        let dy12: f64 = y2 - y1;
+        let dz12: f64 = z2 - z1;
+        let dist12_sq: f64 = dx12 * dx12 + dy12 * dy12 + dz12 * dz12 + softening;
+        let dist12: f64 = sqrt(dist12_sq);
+        let inv12: f64 = 1.0 / (dist12 * dist12_sq);
+        ax1 = ax1 + m2 * dx12 * inv12;
+        ay1 = ay1 + m2 * dy12 * inv12;
+        az1 = az1 + m2 * dz12 * inv12;
+        ax2 = ax2 - m1 * dx12 * inv12;
+        ay2 = ay2 - m1 * dy12 * inv12;
+        az2 = az2 - m1 * dz12 * inv12;
+
+        // Pair 1-3.
+        let dx13: f64 = x3 - x1;
+        let dy13: f64 = y3 - y1;
+        let dz13: f64 = z3 - z1;
+        let dist13_sq: f64 = dx13 * dx13 + dy13 * dy13 + dz13 * dz13 + softening;
+        let dist13: f64 = sqrt(dist13_sq);
+        let inv13: f64 = 1.0 / (dist13 * dist13_sq);
+        ax1 = ax1 + m3 * dx13 * inv13;
+        ay1 = ay1 + m3 * dy13 * inv13;
+        az1 = az1 + m3 * dz13 * inv13;
+        ax3 = ax3 - m1 * dx13 * inv13;
+        ay3 = ay3 - m1 * dy13 * inv13;
+        az3 = az3 - m1 * dz13 * inv13;
+
+        // Pair 1-4.
+        let dx14: f64 = x4 - x1;
+        let dy14: f64 = y4 - y1;
+        let dz14: f64 = z4 - z1;
+        let dist14_sq: f64 = dx14 * dx14 + dy14 * dy14 + dz14 * dz14 + softening;
+        let dist14: f64 = sqrt(dist14_sq);
+        let inv14: f64 = 1.0 / (dist14 * dist14_sq);
+        ax1 = ax1 + m4 * dx14 * inv14;
+        ay1 = ay1 + m4 * dy14 * inv14;
+        az1 = az1 + m4 * dz14 * inv14;
+        ax4 = ax4 - m1 * dx14 * inv14;
+        ay4 = ay4 - m1 * dy14 * inv14;
+        az4 = az4 - m1 * dz14 * inv14;
+
+        // Pair 2-3.
+        let dx23: f64 = x3 - x2;
+        let dy23: f64 = y3 - y2;
+        let dz23: f64 = z3 - z2;
+        let dist23_sq: f64 = dx23 * dx23 + dy23 * dy23 + dz23 * dz23 + softening;
+        let dist23: f64 = sqrt(dist23_sq);
+        let inv23: f64 = 1.0 / (dist23 * dist23_sq);
+        ax2 = ax2 + m3 * dx23 * inv23;
+        ay2 = ay2 + m3 * dy23 * inv23;
+        az2 = az2 + m3 * dz23 * inv23;
+        ax3 = ax3 - m2 * dx23 * inv23;
+        ay3 = ay3 - m2 * dy23 * inv23;
+        az3 = az3 - m2 * dz23 * inv23;
+
+        // Pair 2-4.
+        let dx24: f64 = x4 - x2;
+        let dy24: f64 = y4 - y2;
+        let dz24: f64 = z4 - z2;
+        let dist24_sq: f64 = dx24 * dx24 + dy24 * dy24 + dz24 * dz24 + softening;
+        let dist24: f64 = sqrt(dist24_sq);
+        let inv24: f64 = 1.0 / (dist24 * dist24_sq);
+        ax2 = ax2 + m4 * dx24 * inv24;
+        ay2 = ay2 + m4 * dy24 * inv24;
+        az2 = az2 + m4 * dz24 * inv24;
+        ax4 = ax4 - m2 * dx24 * inv24;
+        ay4 = ay4 - m2 * dy24 * inv24;
+        az4 = az4 - m2 * dz24 * inv24;
+
+        // Pair 3-4.
+        let dx34: f64 = x4 - x3;
+        let dy34: f64 = y4 - y3;
+        let dz34: f64 = z4 - z3;
+        let dist34_sq: f64 = dx34 * dx34 + dy34 * dy34 + dz34 * dz34 + softening;
+        let dist34: f64 = sqrt(dist34_sq);
+        let inv34: f64 = 1.0 / (dist34 * dist34_sq);
+        ax3 = ax3 + m4 * dx34 * inv34;
+        ay3 = ay3 + m4 * dy34 * inv34;
+        az3 = az3 + m4 * dz34 * inv34;
+        ax4 = ax4 - m3 * dx34 * inv34;
+        ay4 = ay4 - m3 * dy34 * inv34;
+        az4 = az4 - m3 * dz34 * inv34;
+
+        // Update velocities (leapfrog step 1).
+        vx0 = vx0 + ax0 * dt;
+        vy0 = vy0 + ay0 * dt;
+        vz0 = vz0 + az0 * dt;
+        vx1 = vx1 + ax1 * dt;
+        vy1 = vy1 + ay1 * dt;
+        vz1 = vz1 + az1 * dt;
+        vx2 = vx2 + ax2 * dt;
+        vy2 = vy2 + ay2 * dt;
+        vz2 = vz2 + az2 * dt;
+        vx3 = vx3 + ax3 * dt;
+        vy3 = vy3 + ay3 * dt;
+        vz3 = vz3 + az3 * dt;
+        vx4 = vx4 + ax4 * dt;
+        vy4 = vy4 + ay4 * dt;
+        vz4 = vz4 + az4 * dt;
+
+        // Update positions.
+        x0 = x0 + vx0 * dt;
+        y0 = y0 + vy0 * dt;
+        z0 = z0 + vz0 * dt;
+        x1 = x1 + vx1 * dt;
+        y1 = y1 + vy1 * dt;
+        z1 = z1 + vz1 * dt;
+        x2 = x2 + vx2 * dt;
+        y2 = y2 + vy2 * dt;
+        z2 = z2 + vz2 * dt;
+        x3 = x3 + vx3 * dt;
+        y3 = y3 + vy3 * dt;
+        z3 = z3 + vz3 * dt;
+        x4 = x4 + vx4 * dt;
+        y4 = y4 + vy4 * dt;
+        z4 = z4 + vz4 * dt;
+    }
+
+    // Compute total kinetic energy as a simulation checksum.
+    let ke: f64 = 0.0;
+    ke = ke + 0.5 * m0 * (vx0 * vx0 + vy0 * vy0 + vz0 * vz0);
+    ke = ke + 0.5 * m1 * (vx1 * vx1 + vy1 * vy1 + vz1 * vz1);
+    ke = ke + 0.5 * m2 * (vx2 * vx2 + vy2 * vy2 + vz2 * vz2);
+    ke = ke + 0.5 * m3 * (vx3 * vx3 + vy3 * vy3 + vz3 * vz3);
+    ke = ke + 0.5 * m4 * (vx4 * vx4 + vy4 * vy4 + vz4 * vz4);
+
+    return ke;
+}
+
+fn main() -> i32 {
+    print("N-body simulation (5 bodies, 1000 steps)");
+
+    let energy: f64 = nbody_sim();
+
+    print("Final kinetic energy:");
+    print_f64(energy);
+
+    // Print final positions of body 1 (inner planet).
+    print("Simulation complete.");
+
+    return 0;
+}

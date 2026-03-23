@@ -1,0 +1,94 @@
+@module math_test;
+@intent("Test all math builtins: abs, abs_f64, min, max, min_f64, max_f64, sqrt, pow, to_f64, to_f64_i64, widen, narrow, truncate");
+
+fn main() -> i32 {
+    // Test abs (i32).
+    let a1: i32 = abs(-42);
+    print("abs(-42):");
+    print_i32(a1);
+
+    let a2: i32 = abs(7);
+    print("abs(7):");
+    print_i32(a2);
+
+    // Test abs_f64.
+    let a3: f64 = abs_f64(-3.14);
+    print("abs_f64(-3.14):");
+    print_f64(a3);
+
+    // Test min (i32).
+    let m1: i32 = min(10, 20);
+    print("min(10, 20):");
+    print_i32(m1);
+
+    let m2: i32 = min(20, 10);
+    print("min(20, 10):");
+    print_i32(m2);
+
+    // Test max (i32).
+    let m3: i32 = max(10, 20);
+    print("max(10, 20):");
+    print_i32(m3);
+
+    // Test min_f64.
+    let m4: f64 = min_f64(1.5, 2.5);
+    print("min_f64(1.5, 2.5):");
+    print_f64(m4);
+
+    // Test max_f64.
+    let m5: f64 = max_f64(1.5, 2.5);
+    print("max_f64(1.5, 2.5):");
+    print_f64(m5);
+
+    // Test sqrt.
+    let s1: f64 = sqrt(4.0);
+    print("sqrt(4.0):");
+    print_f64(s1);
+
+    let s2: f64 = sqrt(2.0);
+    print("sqrt(2.0):");
+    print_f64(s2);
+
+    // Test pow.
+    let p1: f64 = pow(2.0, 10.0);
+    print("pow(2.0, 10.0):");
+    print_f64(p1);
+
+    let p2: f64 = pow(3.0, 3.0);
+    print("pow(3.0, 3.0):");
+    print_f64(p2);
+
+    // Test to_f64 (i32 -> f64).
+    let f1: f64 = to_f64(42);
+    print("to_f64(42):");
+    print_f64(f1);
+
+    // Test to_f64_i64 (i64 -> f64).
+    let big: i64 = 1000000;
+    let f2: f64 = to_f64_i64(big);
+    print("to_f64_i64(1000000):");
+    print_f64(f2);
+
+    // Test widen (i32 -> i64).
+    let w: i64 = widen(12345);
+    print("widen(12345):");
+    print_i64(w);
+
+    // Test narrow (i64 -> i32).
+    let wide: i64 = 99;
+    let n1: i32 = narrow(wide);
+    print("narrow(99i64):");
+    print_i32(n1);
+
+    // Test truncate (f64 -> i32).
+    let t1: i32 = truncate(3.99);
+    print("truncate(3.99):");
+    print_i32(t1);
+
+    let t2: i32 = truncate(-2.7);
+    print("truncate(-2.7):");
+    print_i32(t2);
+
+    print("All math builtin tests complete.");
+    return 0;
+}

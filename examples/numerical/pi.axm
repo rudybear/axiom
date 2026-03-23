@@ -1,0 +1,64 @@
+@module pi;
+@intent("Compute Pi via multiple series: Leibniz, Wallis, and BBP formula");
+
+// Leibniz series: Pi/4 = 1 - 1/3 + 1/5 - 1/7 + ...
+// Converges slowly but is elegant.
+@pure
+@complexity O(n)
+fn pi_leibniz(terms: i32) -> f64 {
+    let sum: f64 = 0.0;
+    let sign: f64 = 1.0;
+    for i: i32 in range(0, terms) {
+        let denom: f64 = to_f64(2 * i + 1);
+        sum = sum + sign / denom;
+        sign = sign * -1.0;
+    }
+    return sum * 4.0;
+}
+
+// Wallis product: Pi/2 = (2/1)(2/3)(4/3)(4/5)(6/5)(6/7)...
+// Each factor is (2k)/(2k-1) * (2k)/(2k+1).
+@pure
+@complexity O(n)
+fn pi_wallis(terms: i32) -> f64 {
+    let product: f64 = 1.0;
+    for i: i32 in range(1, terms + 1) {
+        let n: f64 = to_f64(2 * i);
+        product = product * (n / (n - 1.0)) * (n / (n + 1.0));
+    }
+    return product * 2.0;
+}
+
+// Bailey-Borwein-Plouffe (BBP) formula:
+// Pi = sum_{k=0}^{n} (1/16^k) * (4/(8k+1) - 2/(8k+4) - 1/(8k+5) - 1/(8k+6))
+@pure
+@complexity O(n)
+fn pi_bbp(terms: i32) -> f64 {
+    let sum: f64 = 0.0;
+    let power: f64 = 1.0;
+    for k: i32 in range(0, terms) {
+        let k8: f64 = to_f64(8 * k);
+        let term: f64 = 4.0 / (k8 + 1.0) - 2.0 / (k8 + 4.0) - 1.0 / (k8 + 5.0) - 1.0 / (k8 + 6.0);
+        sum = sum + power * term;
+        power = power / 16.0;
+    }
+    return sum;
+}
+
+fn main() -> i32 {
+    print("Computing Pi via three methods:");
+
+    let pi1: f64 = pi_leibniz(100000);
+    print("Leibniz (100000 terms):");
+    print_f64(pi1);
+
+    let pi2: f64 = pi_wallis(100000);
+    print("Wallis (100000 terms):");
+    print_f64(pi2);
+
+    let pi3: f64 = pi_bbp(20);
+    print("BBP (20 terms):");
+    print_f64(pi3);
+
+    return 0;
+}

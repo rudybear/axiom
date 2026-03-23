@@ -1,0 +1,46 @@
+@module bubble_sort;
+@intent("Bubble sort on a fixed-size integer array");
+
+// Swap adjacent elements repeatedly until sorted.
+// After each pass the largest unsorted element bubbles to the end.
+@pure
+@complexity O(n^2)
+fn bubble_sort(arr: array[i32, 100], n: i32) -> i32 {
+    for i: i32 in range(0, n - 1) {
+        for j: i32 in range(0, n - 1 - i) {
+            if arr[j] > arr[j + 1] {
+                let tmp: i32 = arr[j];
+                arr[j] = arr[j + 1];
+                arr[j + 1] = tmp;
+            }
+        }
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    let arr: array[i32, 100] = array_zeros[i32, 100];
+    let n: i32 = 20;
+
+    // Fill with descending values so sort has maximum work.
+    for i: i32 in range(0, n) {
+        arr[i] = n - i;
+    }
+
+    // Print before sorting.
+    print("Before sort:");
+    for i: i32 in range(0, n) {
+        print_i32(arr[i]);
+    }
+
+    // Sort.
+    let ignored: i32 = bubble_sort(arr, n);
+
+    // Print after sorting.
+    print("After sort:");
+    for i: i32 in range(0, n) {
+        print_i32(arr[i]);
+    }
+
+    return 0;
+}
