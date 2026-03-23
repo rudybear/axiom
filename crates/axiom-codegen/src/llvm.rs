@@ -1254,7 +1254,7 @@ fn emit_expr(ctx: &mut CodegenContext, expr: &HirExpr, expected_type: Option<&st
         }
         HirExprKind::Ident { name } => emit_ident(ctx, name),
         HirExprKind::BinaryOp { op, lhs, rhs } => emit_binary_op(ctx, *op, lhs, rhs),
-        HirExprKind::UnaryOp { op, operand } => emit_unary_op(ctx, *op, operand),
+        HirExprKind::UnaryOp { op, operand } => emit_unary_op(ctx, *op, operand, expected_type),
         HirExprKind::Call { func, args } => emit_call(ctx, func, args),
         HirExprKind::Index {
             expr: arr_expr,
@@ -1436,8 +1436,43 @@ fn emit_binary_op(
     lhs: &HirExpr,
     rhs: &HirExpr,
 ) -> LlvmValue {
-    let lhs_val = emit_expr(ctx, lhs, None);
-    let rhs_val = emit_expr(ctx, rhs, Some(&lhs_val.ty));
+    let mut lhs_val = emit_expr(ctx, lhs, None);
+    let mut rhs_val = emit_expr(ctx, rhs, Some(&lhs_val.ty));
+
+    // If types mismatch (e.g., literal defaulted to i64 but variable is i32),
+    // coerce the literal side to match the variable side.
+    if lhs_val.ty != rhs_val.ty {
+        let lhs_is_literal = is_literal_reg(&lhs_val.reg);
+        let rhs_is_literal = is_literal_reg(&rhs_val.reg);
+        if lhs_is_literal && !rhs_is_literal {
+            // LHS is a literal — adopt RHS type
+            lhs_val.ty = rhs_val.ty.clone();
+        } else if rhs_is_literal && !lhs_is_literal {
+            // RHS is a literal — adopt LHS type
+            rhs_val.ty = lhs_val.ty.clone();
+        } else if !lhs_is_literal && !rhs_is_literal {
+            // Both are registers with different types — cast smaller to larger
+            let lhs_bits = type_bits(&lhs_val.ty);
+            let rhs_bits = type_bits(&rhs_val.ty);
+            if lhs_bits < rhs_bits {
+                let cast_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{cast_reg} = sext {} {} to {}",
+                    lhs_val.ty, lhs_val.reg, rhs_val.ty
+                ));
+                lhs_val.reg = cast_reg;
+                lhs_val.ty = rhs_val.ty.clone();
+            } else if rhs_bits < lhs_bits {
+                let cast_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{cast_reg} = sext {} {} to {}",
+                    rhs_val.ty, rhs_val.reg, lhs_val.ty
+                ));
+                rhs_val.reg = cast_reg;
+                rhs_val.ty = lhs_val.ty.clone();
+            }
+        }
+    }
 
     let is_float = is_float_type(&lhs_val.ty);
     let is_int = is_signed_int_type_str(&lhs_val.ty);
@@ -1628,8 +1663,13 @@ fn emit_binary_op(
 }
 
 /// Emit a unary operation.
-fn emit_unary_op(ctx: &mut CodegenContext, op: UnaryOp, operand: &HirExpr) -> LlvmValue {
-    let val = emit_expr(ctx, operand, None);
+fn emit_unary_op(
+    ctx: &mut CodegenContext,
+    op: UnaryOp,
+    operand: &HirExpr,
+    expected_type: Option<&str>,
+) -> LlvmValue {
+    let val = emit_expr(ctx, operand, expected_type);
     let result_reg = ctx.fresh_reg();
 
     match op {
@@ -2334,6 +2374,26 @@ fn primitive_to_llvm(p: PrimitiveType) -> String {
 /// Check whether an LLVM type string represents a floating-point type.
 fn is_float_type(ty: &str) -> bool {
     matches!(ty, "float" | "double" | "half" | "bfloat")
+}
+
+/// Check if a register name is a literal constant (number, not a %register).
+fn is_literal_reg(reg: &str) -> bool {
+    !reg.starts_with('%') && !reg.starts_with('@')
+}
+
+/// Get the bit width of an integer type string.
+fn type_bits(ty: &str) -> u32 {
+    match ty {
+        "i1" => 1,
+        "i8" => 8,
+        "i16" => 16,
+        "i32" => 32,
+        "i64" => 64,
+        "i128" => 128,
+        "float" | "half" | "bfloat" => 32,
+        "double" => 64,
+        _ => 64,
+    }
 }
 
 /// Try to evaluate a `@const` function call with all-literal arguments at compile time.
