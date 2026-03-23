@@ -103,6 +103,7 @@ dependencies = [
  "axiom-parser",
  "clap",
  "miette",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
