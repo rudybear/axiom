@@ -35,6 +35,7 @@
 //! validate_proposal(&proposal, &surfaces).expect("valid proposal");
 //! ```
 
+pub mod benchmark;
 pub mod proposal;
 pub mod surface;
 
