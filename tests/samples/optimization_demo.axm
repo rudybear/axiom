@@ -1,0 +1,96 @@
+@module optimization_demo;
+@intent("Demonstrate @strategy with ?holes for AI-driven optimization exploration");
+@constraint { correctness: "deterministic" };
+@target { cpu.simd };
+
+// A simple compute kernel with tunable parameters.
+// The ?holes represent values that an AI optimizer can explore.
+@pure
+@complexity O(n^2)
+@vectorizable(i, j)
+fn matrix_sum(n: i32) -> i32 {
+    @strategy {
+        unroll: ?unroll_factor
+    }
+
+    let total: i32 = 0;
+    for i: i32 in range(0, n) {
+        for j: i32 in range(0, n) {
+            total = total + (i + 1) * (j + 1);
+        }
+    }
+    return total;
+}
+
+// Another kernel with a different optimization surface.
+@pure
+@complexity O(n)
+fn weighted_sum(arr: array[i32, 100], n: i32) -> i32 {
+    @strategy {
+        unroll: ?unroll_inner
+    }
+
+    let sum: i32 = 0;
+    for i: i32 in range(0, n) {
+        sum = sum + arr[i] * (i + 1);
+    }
+    return sum;
+}
+
+// A triple-nested loop with full tiling strategy.
+@pure
+@complexity O(n^3)
+@vectorizable(i, j, k)
+fn triple_loop(n: i32) -> i64 {
+    @strategy {
+        tiling: { I: ?tile_i, J: ?tile_j, K: ?tile_k }
+        unroll: ?unroll_triple
+    }
+
+    let sum: i64 = 0;
+    for i: i32 in range(0, n) {
+        for j: i32 in range(0, n) {
+            for k: i32 in range(0, n) {
+                sum = sum + widen(i + j + k);
+            }
+        }
+    }
+    return sum;
+}
+
+// Optimization log showing what an AI agent might explore.
+// v1: unroll_factor=1, unroll_inner=1, tile_i=1, tile_j=1, tile_k=1, unroll_triple=1
+//     metrics: baseline timing
+// v2: unroll_factor=4, unroll_inner=4, tile_i=16, tile_j=16, tile_k=16, unroll_triple=2
+//     metrics: 2x speedup from unrolling and tiling
+
+@transfer {
+    source_agent: "demo-writer"
+    target_agent: "any-optimizer"
+    context: "Three kernels with optimization surfaces. Explore ?holes to find optimal values."
+    confidence: { correctness: 1.0, optimality: 0.2 }
+}
+
+fn main() -> i32 {
+    // Test matrix_sum.
+    let r1: i32 = matrix_sum(50);
+    print("matrix_sum(50):");
+    print_i32(r1);
+
+    // Test weighted_sum.
+    let arr: array[i32, 100] = array_zeros[i32, 100];
+    for i: i32 in range(0, 20) {
+        arr[i] = i * 2 + 1;
+    }
+    let r2: i32 = weighted_sum(arr, 20);
+    print("weighted_sum(20 elements):");
+    print_i32(r2);
+
+    // Test triple_loop (small n to keep output manageable).
+    let r3: i64 = triple_loop(20);
+    print("triple_loop(20):");
+    print_i64(r3);
+
+    print("Optimization demo complete.");
+    return 0;
+}

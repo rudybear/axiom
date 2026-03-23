@@ -1,0 +1,123 @@
+@module annotation_showcase;
+@intent("Demonstrate all supported annotation types in AXIOM");
+@constraint { correctness: "verified" };
+@target { cpu.simd };
+
+// @pure — marks a function as side-effect free.
+@pure
+fn pure_add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+// @const — marks a function as compile-time evaluable.
+@const
+fn const_square(x: i32) -> i32 {
+    return x * x;
+}
+
+// @complexity — documents algorithmic complexity.
+@pure
+@complexity O(n)
+fn linear_sum(n: i32) -> i32 {
+    let sum: i32 = 0;
+    for i: i32 in range(0, n) {
+        sum = sum + i;
+    }
+    return sum;
+}
+
+// @inline — controls inlining behavior.
+@inline(always)
+@pure
+fn always_inlined(x: i32) -> i32 {
+    return x * 2;
+}
+
+// @vectorizable — marks a function or loop as safe to vectorize.
+@pure
+@vectorizable(i)
+@complexity O(n)
+fn dot_product(a: array[i32, 100], b: array[i32, 100], n: i32) -> i32 {
+    let sum: i32 = 0;
+    for i: i32 in range(0, n) {
+        sum = sum + a[i] * b[i];
+    }
+    return sum;
+}
+
+// @export — makes a function visible for FFI.
+@export
+fn exported_func(x: i32) -> i32 {
+    return x + 100;
+}
+
+// @strategy with ?holes — optimization surface for AI exploration.
+@pure
+@complexity O(n^2)
+fn optimizable_sum(n: i32) -> i32 {
+    @strategy {
+        unroll: ?unroll_factor
+    }
+
+    let sum: i32 = 0;
+    for i: i32 in range(0, n) {
+        for j: i32 in range(0, n) {
+            sum = sum + i * j;
+        }
+    }
+    return sum;
+}
+
+// @transfer — inter-agent communication metadata.
+@transfer {
+    source_agent: "agent-writer"
+    target_agent: "agent-optimizer"
+    context: "Initial implementation. All functions verified correct."
+    confidence: { correctness: 0.99, optimality: 0.3 }
+}
+
+fn main() -> i32 {
+    // Test @pure function.
+    let r1: i32 = pure_add(10, 20);
+    print("pure_add(10, 20):");
+    print_i32(r1);
+
+    // Test @const function.
+    let r2: i32 = const_square(7);
+    print("const_square(7):");
+    print_i32(r2);
+
+    // Test @complexity O(n) function.
+    let r3: i32 = linear_sum(100);
+    print("linear_sum(100):");
+    print_i32(r3);
+
+    // Test @inline(always) function.
+    let r4: i32 = always_inlined(21);
+    print("always_inlined(21):");
+    print_i32(r4);
+
+    // Test @vectorizable function.
+    let a: array[i32, 100] = array_zeros[i32, 100];
+    let b: array[i32, 100] = array_zeros[i32, 100];
+    for i: i32 in range(0, 10) {
+        a[i] = i;
+        b[i] = i;
+    }
+    let r5: i32 = dot_product(a, b, 10);
+    print("dot_product([0..9], [0..9], 10):");
+    print_i32(r5);
+
+    // Test @export function.
+    let r6: i32 = exported_func(42);
+    print("exported_func(42):");
+    print_i32(r6);
+
+    // Test @strategy function.
+    let r7: i32 = optimizable_sum(10);
+    print("optimizable_sum(10):");
+    print_i32(r7);
+
+    print("All annotation tests complete.");
+    return 0;
+}

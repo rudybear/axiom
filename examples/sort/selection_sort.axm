@@ -1,0 +1,48 @@
+@module selection_sort;
+@intent("Selection sort on a fixed-size integer array");
+
+// Repeatedly find the minimum element from the unsorted region
+// and swap it into the next sorted position.
+@pure
+@complexity O(n^2)
+fn selection_sort(arr: array[i32, 100], n: i32) -> i32 {
+    for i: i32 in range(0, n - 1) {
+        let min_idx: i32 = i;
+        for j: i32 in range(i + 1, n) {
+            if arr[j] < arr[min_idx] {
+                min_idx = j;
+            }
+        }
+        // Swap arr[i] and arr[min_idx].
+        if min_idx != i {
+            let tmp: i32 = arr[i];
+            arr[i] = arr[min_idx];
+            arr[min_idx] = tmp;
+        }
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    let arr: array[i32, 100] = array_zeros[i32, 100];
+    let n: i32 = 25;
+
+    // Fill with descending values.
+    for i: i32 in range(0, n) {
+        arr[i] = n - i;
+    }
+
+    print("Before sort:");
+    for i: i32 in range(0, n) {
+        print_i32(arr[i]);
+    }
+
+    let ignored: i32 = selection_sort(arr, n);
+
+    print("After sort:");
+    for i: i32 in range(0, n) {
+        print_i32(arr[i]);
+    }
+
+    return 0;
+}

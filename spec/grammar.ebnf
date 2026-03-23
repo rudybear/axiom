@@ -1,0 +1,272 @@
+(* ================================================================== *)
+(* AXIOM Language — Formal EBNF Grammar                               *)
+(* Version: 0.1 (matches implemented parser as of 2026-03-23)        *)
+(* Source of truth: crates/axiom-parser/src/parser.rs                 *)
+(* ================================================================== *)
+
+(* ── Top-level ─────────────────────────────────────────────────────── *)
+
+Module          = { ModuleAnnotation } { Item } ;
+
+ModuleAnnotation = Annotation ";" ;
+
+Item            = { Annotation [ ";" ] }
+                  ( Function
+                  | ExternFunction
+                  | StructDef
+                  | TypeAlias
+                  | ImportDecl ) ;
+
+(* ── Functions ─────────────────────────────────────────────────────── *)
+
+Function        = "fn" IDENT "(" [ ParamList ] ")" [ "->" TypeExpr ]
+                  { Annotation } Block ;
+
+ExternFunction  = "extern" "fn" IDENT "(" [ ParamList ] ")"
+                  [ "->" TypeExpr ] ";" ;
+
+ParamList       = Param { "," Param } ;
+
+Param           = IDENT ":" TypeExpr { Annotation } ;
+
+(* ── Structs ───────────────────────────────────────────────────────── *)
+
+StructDef       = "struct" IDENT "{" [ FieldList ] "}" ;
+
+FieldList       = StructField { "," StructField } ;
+
+StructField     = IDENT ":" TypeExpr { Annotation } ;
+
+(* ── Type aliases ──────────────────────────────────────────────────── *)
+
+TypeAlias       = "type" IDENT "=" TypeExpr ";" ;
+
+(* ── Imports ───────────────────────────────────────────────────────── *)
+
+ImportDecl      = "import" ImportPath [ "as" IDENT ] ";" ;
+
+ImportPath      = IDENT { "::" IDENT } ;
+
+(* ── Type expressions ──────────────────────────────────────────────── *)
+
+TypeExpr        = PrimitiveType
+                | TensorType
+                | ArrayType
+                | SliceType
+                | PtrType
+                | FnType
+                | TupleType
+                | NamedType ;
+
+PrimitiveType   = "i8" | "i16" | "i32" | "i64" | "i128"
+                | "u8" | "u16" | "u32" | "u64" | "u128"
+                | "f16" | "bf16" | "f32" | "f64"
+                | "bool" ;
+
+TensorType      = "tensor" "[" TypeExpr { "," DimExpr } "]" ;
+
+ArrayType       = "array" "[" TypeExpr "," Expr "]" ;
+
+SliceType       = "slice" "[" TypeExpr "]" ;
+
+PtrType         = "ptr" "[" TypeExpr "]" ;
+
+FnType          = "fn" "(" [ TypeExpr { "," TypeExpr } ] ")" "->" TypeExpr ;
+
+TupleType       = "(" TypeExpr "," TypeExpr { "," TypeExpr } ")" ;
+
+NamedType       = IDENT ;
+
+DimExpr         = INT_LITERAL | IDENT | OPT_HOLE ;
+
+(* ── Annotations ───────────────────────────────────────────────────── *)
+
+Annotation      = "@" ANNOTATION_NAME [ AnnotationArgs ] ;
+
+AnnotationArgs  = "(" AnnotationArgList ")"
+                | "{" AnnotationKVList "}"
+                | (* some annotations have special syntax — see below *) ;
+
+(* Built-in annotation forms (parser special-cases): *)
+(*   @pure                                             — no args          *)
+(*   @const                                            — no args          *)
+(*   @export                                           — no args          *)
+(*   @module IDENT                                     — bare ident       *)
+(*   @inline "(" ( "always" | "never" | "hint" ) ")"  — enum arg         *)
+(*   @intent "(" STRING_LITERAL ")"                    — string arg       *)
+(*   @complexity <tokens until ; or fn or { or @>      — freeform text    *)
+(*   @constraint "{" AnnotationKVList "}"              — key-value block  *)
+(*   @target "{" TargetList "}"                        — dotted idents    *)
+(*   @strategy "{" StrategyEntryList "}"               — strategy block   *)
+(*   @transfer "{" AnnotationKVList "}"                — key-value block  *)
+(*   @vectorizable "(" IdentList ")"                   — ident list       *)
+(*   @parallel "(" IdentList ")"                       — ident list       *)
+(*   @layout "(" LayoutKind ")"                        — enum arg         *)
+(*   @align "(" INT_LITERAL ")"                        — integer arg      *)
+(*   @<other> [ "(" AnnotationArgList ")" | "{" AnnotationKVList "}" ]    *)
+
+AnnotationArgList = AnnotationValue { "," AnnotationValue } ;
+
+AnnotationKVList  = { IDENT ":" AnnotationValue [ "," ] } ;
+
+AnnotationValue   = STRING_LITERAL
+                  | INT_LITERAL
+                  | FLOAT_LITERAL
+                  | BOOL_LITERAL
+                  | IDENT
+                  | "{" AnnotationKVList "}"
+                  | "[" [ AnnotationValue { "," AnnotationValue } ] "]" ;
+
+IdentList       = IDENT { "," IDENT } ;
+
+TargetList      = DottedIdent { "," DottedIdent } ;
+
+DottedIdent     = IDENT { "." IDENT } ;
+
+LayoutKind      = "row_major" | "col_major" | IDENT ;
+
+(* ── Strategy blocks ───────────────────────────────────────────────── *)
+
+StrategyEntryList = { StrategyEntry } ;
+
+StrategyEntry   = IDENT ":" StrategyValue ;
+
+StrategyValue   = OPT_HOLE
+                | "{" { IDENT ":" StrategyValue [ "," ] } "}"
+                | AnnotationValue ;
+
+(* ── Blocks and Statements ─────────────────────────────────────────── *)
+
+Block           = "{" { BlockAnnotation | Statement } "}" ;
+
+BlockAnnotation = Annotation [ ";" ] ;
+
+Statement       = LetStmt
+                | ReturnStmt
+                | IfStmt
+                | ForStmt
+                | WhileStmt
+                | AssignOrExprStmt ;
+
+LetStmt         = "let" [ "mut" ] IDENT ":" TypeExpr "=" Expr ";" ;
+
+ReturnStmt      = "return" Expr ";" ;
+
+IfStmt          = "if" Expr Block [ "else" Block ] ;
+
+ForStmt         = "for" IDENT ":" TypeExpr "in" Expr Block ;
+
+WhileStmt       = "while" Expr Block ;
+
+AssignOrExprStmt = Expr [ "=" Expr ] ";" ;
+
+(* ── Expressions (Pratt parser — precedence climbing) ──────────────── *)
+(*                                                                       *)
+(* Binding power table (lower number = weaker binding):                  *)
+(*                                                                       *)
+(*   1/2    or             (left-assoc)                                  *)
+(*   3/4    and            (left-assoc)                                  *)
+(*   5/6    == != < > <= >=  (left-assoc)                                *)
+(*   7/8    + - +% +| -% -| (left-assoc)                                *)
+(*   9/10   * / % *%       (left-assoc)                                  *)
+(*   11     unary - not    (prefix)                                      *)
+(*   13     () [] .        (postfix: call, index, field/method)          *)
+(*                                                                       *)
+
+Expr            = PrefixExpr { InfixOp PrefixExpr }  (* precedence climbing *) ;
+
+PrefixExpr      = UnaryOp PrefixExpr
+                | PostfixExpr ;
+
+PostfixExpr     = PrimaryExpr { PostfixOp } ;
+
+PrimaryExpr     = INT_LITERAL
+                | FLOAT_LITERAL
+                | STRING_LITERAL
+                | BOOL_LITERAL
+                | IDENT
+                | OPT_HOLE
+                | "(" Expr ")"
+                | "widen" CallArgs
+                | "narrow" CallArgs
+                | "truncate" CallArgs
+                | "array_zeros" "[" TypeExpr "," Expr "]"
+                | TypeKeywordAsIdent ;
+
+CallArgs        = "(" [ Expr { "," Expr } ] ")" ;
+
+PostfixOp       = CallArgs
+                | "[" [ Expr { "," Expr } ] "]"
+                | "." IDENT [ CallArgs ] ;
+
+(* ── Operators ─────────────────────────────────────────────────────── *)
+
+UnaryOp         = "-" | "not" ;
+
+InfixOp         = "+" | "-" | "*" | "/" | "%"
+                | "+%" | "+|" | "-%" | "-|" | "*%"
+                | "==" | "!=" | "<" | ">" | "<=" | ">="
+                | "and" | "or" ;
+
+(* ── Lexical tokens ────────────────────────────────────────────────── *)
+
+IDENT           = LETTER { LETTER | DIGIT | "_" } ;
+
+ANNOTATION_NAME = "@" IDENT ;            (* lexer produces Annotation token *)
+
+OPT_HOLE        = "?" IDENT ;            (* lexer produces OptHole token    *)
+
+INT_LITERAL     = [ "0x" | "0b" | "0o" ] DIGITS [ IntSuffix ] ;
+
+FLOAT_LITERAL   = DIGITS "." DIGITS [ FloatSuffix ] ;
+
+STRING_LITERAL  = '"' { CHAR } '"' ;
+
+BOOL_LITERAL    = "true" | "false" ;
+
+IntSuffix       = "i8" | "i16" | "i32" | "i64" | "i128"
+                | "u8" | "u16" | "u32" | "u64" | "u128" ;
+
+FloatSuffix     = "f16" | "bf16" | "f32" | "f64" ;
+
+(* ── Keywords (reserved, cannot be used as identifiers) ────────────── *)
+
+KEYWORD         = "fn" | "let" | "mut" | "return" | "if" | "else"
+                | "for" | "while" | "in" | "struct" | "type"
+                | "module" | "import" | "pub" | "unsafe" | "extern"
+                | "and" | "or" | "not"
+                | "widen" | "narrow" | "truncate"
+                | PrimitiveType | "tensor" | "array" | "slice" | "ptr"
+                | "true" | "false" ;
+
+(* ── Delimiters and punctuation ────────────────────────────────────── *)
+
+DELIMITER       = "(" | ")" | "[" | "]" | "{" | "}" ;
+
+PUNCTUATION     = "+" | "-" | "*" | "/" | "%" | "^"
+                | "+%" | "+|" | "-%" | "-|" | "*%"
+                | "==" | "!=" | "<" | ">" | "<=" | ">="
+                | "=" | "->" | "=>" | "." | ".."
+                | ":" | "::" | "," | ";" | "|" ;
+
+(* ── Comments ──────────────────────────────────────────────────────── *)
+
+LINE_COMMENT    = "//" { CHAR } NEWLINE ;
+
+BLOCK_COMMENT   = "/*" { CHAR } "*/" ;
+
+(* ── Whitespace (ignored) ──────────────────────────────────────────── *)
+
+WHITESPACE      = " " | "\t" | "\r" | "\n" ;
+
+(* ── Character classes ─────────────────────────────────────────────── *)
+
+LETTER          = "a" .. "z" | "A" .. "Z" | "_" ;
+
+DIGIT           = "0" .. "9" ;
+
+DIGITS          = DIGIT { DIGIT | "_" } ;
+
+CHAR            = (* any UTF-8 code point except unescaped control characters *) ;
+
+NEWLINE         = "\n" | "\r\n" ;
