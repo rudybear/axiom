@@ -15,5 +15,6 @@ axiom-codegen = { path = "../axiom-codegen" }
 axiom-optimize = { path = "../axiom-optimize" }
 clap.workspace = true
 miette = { workspace = true, features = ["fancy"] }
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
