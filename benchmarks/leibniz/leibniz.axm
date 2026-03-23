@@ -1,0 +1,19 @@
+@module leibniz;
+@intent("Leibniz Pi approximation — from github.com/niklas-heer/speed-comparison");
+
+fn main() -> i32 {
+    let rounds: i32 = 100000000;
+    let x: f64 = 1.0;
+    for i: i32 in range(2, rounds + 1) {
+        let k: i32 = i * 2 - 1;
+        let d: f64 = to_f64(k);
+        if i % 2 == 0 {
+            x = x - 1.0 / d;
+        } else {
+            x = x + 1.0 / d;
+        }
+    }
+    let pi: f64 = x * 4.0;
+    print_f64(pi);
+    return 0;
+}

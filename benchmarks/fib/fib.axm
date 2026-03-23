@@ -1,0 +1,16 @@
+@module fib;
+@intent("Recursive Fibonacci benchmark — from github.com/drujensen/fib");
+
+@pure
+fn fib(n: i64) -> i64 {
+    if n <= 1 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn main() -> i32 {
+    let result: i64 = fib(47);
+    print_i64(result);
+    return 0;
+}

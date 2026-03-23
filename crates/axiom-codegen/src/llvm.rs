@@ -1069,6 +1069,8 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "max_f64" => return emit_builtin_max_f64(ctx, args),
             "sqrt" => return emit_builtin_sqrt(ctx, args),
             "pow" => return emit_builtin_pow(ctx, args),
+            "to_f64" => return emit_builtin_to_f64(ctx, args),
+            "to_f64_i64" => return emit_builtin_to_f64_i64(ctx, args),
             _ => {}
         }
 
@@ -1540,6 +1542,56 @@ fn emit_builtin_pow(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
     ctx.emit(&format!(
         "{result_reg} = call double @llvm.pow.f64(double {}, double {})",
         base.reg, exp.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `to_f64(x: i32) -> f64` -- converts i32 to f64 via sitofp.
+fn emit_builtin_to_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "to_f64() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("i32"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = sitofp i32 {} to double",
+        val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `to_f64_i64(x: i64) -> f64` -- converts i64 to f64 via sitofp.
+fn emit_builtin_to_f64_i64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "to_f64_i64() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("i64"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = sitofp i64 {} to double",
+        val.reg
     ));
     LlvmValue {
         reg: result_reg,
@@ -3164,5 +3216,195 @@ mod tests {
             "should call printf: {ir}"
         );
         assert!(ir.contains("ret i32 0"), "main should return 0: {ir}");
+    }
+
+    // -----------------------------------------------------------------------
+    // to_f64 / to_f64_i64 conversion builtin tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_to_f64() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "x".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: int_lit(42),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "y".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: call("to_f64", vec![ident("x")]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("sitofp i32"),
+            "should have sitofp i32: {ir}"
+        );
+        assert!(
+            ir.contains("to double"),
+            "should convert to double: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_to_f64_i64() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "x".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: int_lit(100),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "y".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: call("to_f64_i64", vec![ident("x")]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("sitofp i64"),
+            "should have sitofp i64: {ir}"
+        );
+        assert!(
+            ir.contains("to double"),
+            "should convert to double: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Benchmark program integration tests
+    // -----------------------------------------------------------------------
+
+    /// Integration test: recursive fibonacci benchmark compiles through the
+    /// full pipeline (parse -> HIR -> LLVM IR).
+    #[test]
+    fn test_benchmark_fib() {
+        let source = std::fs::read_to_string("../../benchmarks/fib/fib.axm")
+            .expect("should read fib.axm");
+        let parse_result = axiom_parser::parse(&source);
+        assert!(
+            !parse_result.has_errors(),
+            "fib.axm should parse without errors: {:?}",
+            parse_result.errors
+        );
+        let hir_module = axiom_hir::lower(&parse_result.module)
+            .expect("fib.axm should lower to HIR");
+        let ir = codegen(&hir_module).expect("fib.axm should codegen");
+
+        // Verify recursive fib function with i64 params.
+        assert!(
+            ir.contains("define i64 @fib(i64 %n)"),
+            "should define fib with i64 param: {ir}"
+        );
+        // Verify recursive calls.
+        assert!(
+            ir.contains("call i64 @fib(i64"),
+            "should have recursive call: {ir}"
+        );
+        // Verify i64 comparison.
+        assert!(
+            ir.contains("icmp sle i64"),
+            "should have i64 comparison: {ir}"
+        );
+        // Verify i64 subtraction.
+        assert!(
+            ir.contains("sub i64"),
+            "should have i64 subtraction: {ir}"
+        );
+        // Verify i64 addition.
+        assert!(
+            ir.contains("add i64"),
+            "should have i64 addition: {ir}"
+        );
+        // Verify main calls fib(47).
+        assert!(
+            ir.contains("call i64 @fib(i64 47)"),
+            "should call fib(47): {ir}"
+        );
+    }
+
+    /// Integration test: Leibniz Pi benchmark compiles through the full
+    /// pipeline (parse -> HIR -> LLVM IR).
+    #[test]
+    fn test_benchmark_leibniz() {
+        let source = std::fs::read_to_string("../../benchmarks/leibniz/leibniz.axm")
+            .expect("should read leibniz.axm");
+        let parse_result = axiom_parser::parse(&source);
+        assert!(
+            !parse_result.has_errors(),
+            "leibniz.axm should parse without errors: {:?}",
+            parse_result.errors
+        );
+        let hir_module = axiom_hir::lower(&parse_result.module)
+            .expect("leibniz.axm should lower to HIR");
+        let ir = codegen(&hir_module).expect("leibniz.axm should codegen");
+
+        // Verify main function.
+        assert!(
+            ir.contains("define i32 @main()"),
+            "should define main: {ir}"
+        );
+        // Verify sitofp for to_f64 builtin.
+        assert!(
+            ir.contains("sitofp i32"),
+            "should have sitofp for to_f64: {ir}"
+        );
+        // Verify float division for 1.0/d.
+        assert!(
+            ir.contains("fdiv double"),
+            "should have float division: {ir}"
+        );
+        // Verify float subtraction and addition.
+        assert!(
+            ir.contains("fsub double"),
+            "should have float subtraction: {ir}"
+        );
+        assert!(
+            ir.contains("fadd double"),
+            "should have float addition: {ir}"
+        );
+        // Verify for loop structure.
+        assert!(
+            ir.contains("for.cond."),
+            "should have for loop condition: {ir}"
+        );
+        // Verify printf for f64 output.
+        assert!(
+            ir.contains("@.fmt.f64"),
+            "should have f64 format string: {ir}"
+        );
     }
 }
