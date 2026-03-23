@@ -7,6 +7,10 @@
 //!   descriptors.
 //! - **Proposal validation**: Check that a proposed set of concrete values
 //!   matches the declared types and ranges before applying them.
+//! - **Transfer protocol**: Extract and generate `@transfer` blocks for
+//!   inter-agent handoff metadata.
+//! - **Agent API**: High-level [`agent_api::AgentSession`] for AI agents to
+//!   load programs, apply proposals, track history, and export with transfer info.
 //!
 //! # Example
 //!
@@ -35,15 +39,19 @@
 //! validate_proposal(&proposal, &surfaces).expect("valid proposal");
 //! ```
 
+pub mod agent_api;
 pub mod benchmark;
 pub mod history;
 pub mod proposal;
 pub mod surface;
+pub mod transfer;
 
 // Re-export key types at the crate root for convenience.
+pub use agent_api::{AgentError, AgentSession, SessionSummary};
 pub use history::{HistoryError, OptHistory, OptRecord};
 pub use proposal::{Proposal, ValidationError, validate_proposal};
 pub use surface::{
     HoleType, OptHole, OptSurface, StrategyEntry, StrategyEntryValue, StrategyInfo, Value,
     extract_surfaces, extract_surfaces_from_hir,
 };
+pub use transfer::{Confidence, TransferError, TransferInfo, extract_transfer, generate_transfer};

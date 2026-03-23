@@ -18,7 +18,7 @@ use axiom_lexer::{Lexer, Span, Token, TokenKind};
 use crate::ast::{
     Annotation, AnnotationValue, BinOp, Block, DimExpr, Expr, Function, ImportDecl, InlineHint,
     Item, LayoutKind, Module, Param, Spanned, StrategyBlock, StrategyValue, StructDef,
-    StructField, Stmt, TypeAlias, TypeExpr, UnaryOp,
+    StructField, Stmt, TransferBlock, TypeAlias, TypeExpr, UnaryOp,
 };
 use crate::error::{span_to_source_span, ParseError, ParseResult};
 
@@ -572,6 +572,88 @@ impl<'src> Parser<'src> {
                 } else {
                     Annotation::Strategy(StrategyBlock {
                         entries: Vec::new(),
+                    })
+                }
+            }
+            "transfer" => {
+                // @transfer { source_agent: "...", target_agent: "...", ... }
+                if self.eat(&TokenKind::LBrace) {
+                    let kvs = self.parse_annotation_kv_list();
+                    self.expect(&TokenKind::RBrace, "'}'");
+                    let mut source_agent = None;
+                    let mut target_agent = None;
+                    let mut context = None;
+                    let mut open_questions = Vec::new();
+                    let mut confidence = None;
+                    for (key, val) in &kvs {
+                        match key.as_str() {
+                            "source_agent" => {
+                                if let AnnotationValue::String(s) = val {
+                                    source_agent = Some(s.clone());
+                                }
+                            }
+                            "target_agent" => {
+                                if let AnnotationValue::String(s) = val {
+                                    target_agent = Some(s.clone());
+                                }
+                            }
+                            "context" => {
+                                if let AnnotationValue::String(s) = val {
+                                    context = Some(s.clone());
+                                }
+                            }
+                            "open_questions" => {
+                                if let AnnotationValue::List(items) = val {
+                                    for item in items {
+                                        if let AnnotationValue::String(s) = item {
+                                            open_questions.push(s.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            "confidence" => {
+                                if let AnnotationValue::Map(entries) = val {
+                                    let mut correctness = 0.0;
+                                    let mut optimality = 0.0;
+                                    for (ck, cv) in entries {
+                                        match ck.as_str() {
+                                            "correctness" => {
+                                                if let AnnotationValue::Float(f) = cv {
+                                                    correctness = *f;
+                                                } else if let AnnotationValue::Int(i) = cv {
+                                                    correctness = *i as f64;
+                                                }
+                                            }
+                                            "optimality" => {
+                                                if let AnnotationValue::Float(f) = cv {
+                                                    optimality = *f;
+                                                } else if let AnnotationValue::Int(i) = cv {
+                                                    optimality = *i as f64;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    confidence = Some((correctness, optimality));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Annotation::Transfer(TransferBlock {
+                        source_agent,
+                        target_agent,
+                        context,
+                        open_questions,
+                        confidence,
+                    })
+                } else {
+                    Annotation::Transfer(TransferBlock {
+                        source_agent: None,
+                        target_agent: None,
+                        context: None,
+                        open_questions: Vec::new(),
+                        confidence: None,
                     })
                 }
             }
