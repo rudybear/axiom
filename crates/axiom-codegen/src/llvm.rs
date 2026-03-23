@@ -65,10 +65,22 @@ struct CodegenContext {
     string_literals: Vec<String>,
     /// Whether an i64 format string is needed.
     needs_printf_i64: bool,
+    /// Whether an i32 format string is needed.
+    needs_printf_i32: bool,
+    /// Whether an f64 format string is needed.
+    needs_printf_f64: bool,
     /// Whether puts is needed.
     needs_puts: bool,
     /// Whether printf is needed.
     needs_printf: bool,
+    /// Whether the `@llvm.sqrt.f64` intrinsic is needed.
+    needs_sqrt_f64: bool,
+    /// Whether the `@llvm.pow.f64` intrinsic is needed.
+    needs_pow_f64: bool,
+    /// Whether the `@llvm.abs.i32` intrinsic is needed.
+    needs_abs_i32: bool,
+    /// Whether the `@llvm.fabs.f64` intrinsic is needed.
+    needs_fabs_f64: bool,
     /// Collected errors.
     errors: Vec<CodegenError>,
     /// Whether the current basic block has been terminated (ret or br).
@@ -88,8 +100,14 @@ impl CodegenContext {
             functions: HashMap::new(),
             string_literals: Vec::new(),
             needs_printf_i64: false,
+            needs_printf_i32: false,
+            needs_printf_f64: false,
             needs_puts: false,
             needs_printf: false,
+            needs_sqrt_f64: false,
+            needs_pow_f64: false,
+            needs_abs_i32: false,
+            needs_fabs_f64: false,
             errors: Vec::new(),
             block_terminated: false,
             current_return_type: String::new(),
@@ -193,7 +211,25 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         );
     }
 
-    if !ctx.string_literals.is_empty() || ctx.needs_printf_i64 {
+    if ctx.needs_printf_i32 {
+        let _ = writeln!(
+            ctx.output,
+            "@.fmt.i32 = private unnamed_addr constant [4 x i8] c\"%d\\0A\\00\""
+        );
+    }
+
+    if ctx.needs_printf_f64 {
+        let _ = writeln!(
+            ctx.output,
+            "@.fmt.f64 = private unnamed_addr constant [4 x i8] c\"%f\\0A\\00\""
+        );
+    }
+
+    let has_globals = !ctx.string_literals.is_empty()
+        || ctx.needs_printf_i64
+        || ctx.needs_printf_i32
+        || ctx.needs_printf_f64;
+    if has_globals {
         ctx.emit_blank();
     }
 
@@ -206,6 +242,18 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     }
     if ctx.needs_printf {
         let _ = writeln!(ctx.output, "declare i32 @printf(ptr, ...)");
+    }
+    if ctx.needs_sqrt_f64 {
+        let _ = writeln!(ctx.output, "declare double @llvm.sqrt.f64(double)");
+    }
+    if ctx.needs_pow_f64 {
+        let _ = writeln!(ctx.output, "declare double @llvm.pow.f64(double, double)");
+    }
+    if ctx.needs_abs_i32 {
+        let _ = writeln!(ctx.output, "declare i32 @llvm.abs.i32(i32, i1)");
+    }
+    if ctx.needs_fabs_f64 {
+        let _ = writeln!(ctx.output, "declare double @llvm.fabs.f64(double)");
     }
 
     if !ctx.errors.is_empty() {
@@ -939,7 +987,19 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
         match name.as_str() {
             "print" => return emit_builtin_print(ctx, args),
             "print_i64" => return emit_builtin_print_i64(ctx, args),
+            "print_i32" => return emit_builtin_print_i32(ctx, args),
+            "print_f64" => return emit_builtin_print_f64(ctx, args),
             "widen" => return emit_builtin_widen(ctx, args),
+            "narrow" => return emit_builtin_narrow(ctx, args),
+            "truncate" => return emit_builtin_truncate(ctx, args),
+            "abs" => return emit_builtin_abs(ctx, args),
+            "abs_f64" => return emit_builtin_abs_f64(ctx, args),
+            "min" => return emit_builtin_min(ctx, args),
+            "min_f64" => return emit_builtin_min_f64(ctx, args),
+            "max" => return emit_builtin_max(ctx, args),
+            "max_f64" => return emit_builtin_max_f64(ctx, args),
+            "sqrt" => return emit_builtin_sqrt(ctx, args),
+            "pow" => return emit_builtin_pow(ctx, args),
             _ => {}
         }
 
@@ -1075,6 +1135,346 @@ fn emit_builtin_widen(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
     LlvmValue {
         reg: result_reg,
         ty: "i64".to_string(),
+    }
+}
+
+/// Emit built-in `print_i32(n)` -- calls C `printf("%d\n", n)`.
+fn emit_builtin_print_i32(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_printf = true;
+    ctx.needs_printf_i32 = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "print_i32() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("i32"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 (ptr, ...) @printf(ptr @.fmt.i32, i32 {})",
+        val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `print_f64(x)` -- calls C `printf("%f\n", x)`.
+fn emit_builtin_print_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_printf = true;
+    ctx.needs_printf_f64 = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "print_f64() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("double"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 (ptr, ...) @printf(ptr @.fmt.f64, double {})",
+        val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `narrow(n)` -- truncates i64 to i32.
+fn emit_builtin_narrow(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "narrow() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("i64"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = trunc i64 {} to i32",
+        val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `truncate(x)` -- converts f64 to i32 via fptosi.
+fn emit_builtin_truncate(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "truncate() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("double"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = fptosi double {} to i32",
+        val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `abs(x: i32) -> i32` -- uses `@llvm.abs.i32`.
+fn emit_builtin_abs(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_abs_i32 = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "abs() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("i32"));
+    let result_reg = ctx.fresh_reg();
+    // The second argument (i1 false) means INT_MIN is not poison.
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @llvm.abs.i32(i32 {}, i1 false)",
+        val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `abs_f64(x: f64) -> f64` -- uses `@llvm.fabs.f64`.
+fn emit_builtin_abs_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_fabs_f64 = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "abs_f64() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("double"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call double @llvm.fabs.f64(double {})",
+        val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `min(a: i32, b: i32) -> i32` -- uses icmp + select.
+fn emit_builtin_min(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "min() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], Some("i32"));
+    let b = emit_expr(ctx, &args[1], Some("i32"));
+    let cmp_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{cmp_reg} = icmp slt i32 {}, {}",
+        a.reg, b.reg
+    ));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = select i1 {cmp_reg}, i32 {}, i32 {}",
+        a.reg, b.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `min_f64(a: f64, b: f64) -> f64` -- uses fcmp + select.
+fn emit_builtin_min_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "min_f64() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], Some("double"));
+    let b = emit_expr(ctx, &args[1], Some("double"));
+    let cmp_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{cmp_reg} = fcmp olt double {}, {}",
+        a.reg, b.reg
+    ));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = select i1 {cmp_reg}, double {}, double {}",
+        a.reg, b.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `max(a: i32, b: i32) -> i32` -- uses icmp + select.
+fn emit_builtin_max(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "max() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], Some("i32"));
+    let b = emit_expr(ctx, &args[1], Some("i32"));
+    let cmp_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{cmp_reg} = icmp sgt i32 {}, {}",
+        a.reg, b.reg
+    ));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = select i1 {cmp_reg}, i32 {}, i32 {}",
+        a.reg, b.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `max_f64(a: f64, b: f64) -> f64` -- uses fcmp + select.
+fn emit_builtin_max_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "max_f64() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], Some("double"));
+    let b = emit_expr(ctx, &args[1], Some("double"));
+    let cmp_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{cmp_reg} = fcmp ogt double {}, {}",
+        a.reg, b.reg
+    ));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = select i1 {cmp_reg}, double {}, double {}",
+        a.reg, b.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `sqrt(x: f64) -> f64` -- uses `@llvm.sqrt.f64`.
+fn emit_builtin_sqrt(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_sqrt_f64 = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "sqrt() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("double"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call double @llvm.sqrt.f64(double {})",
+        val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `pow(base: f64, exp: f64) -> f64` -- uses `@llvm.pow.f64`.
+fn emit_builtin_pow(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_pow_f64 = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "pow() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let base = emit_expr(ctx, &args[0], Some("double"));
+    let exp = emit_expr(ctx, &args[1], Some("double"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call double @llvm.pow.f64(double {}, double {})",
+        base.reg, exp.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
     }
 }
 
@@ -2176,5 +2576,313 @@ mod tests {
         assert_eq!(format_float(1.5), "1.5");
         assert_eq!(format_float(42.0), "42.0");
         assert_eq!(format_float(-3.14), "-3.14");
+    }
+
+    // -----------------------------------------------------------------------
+    // Standard library built-in tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_math_builtins() {
+        // Test abs, min, max, sqrt, pow
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // abs(x: i32) -> i32
+                    stmt(HirStmtKind::Let {
+                        name: "x".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: int_lit(-5),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "a".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("abs", vec![ident("x")]),
+                        mutable: false,
+                    }),
+                    // abs_f64(x: f64) -> f64
+                    stmt(HirStmtKind::Let {
+                        name: "fx".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: float_lit(-3.14),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "fa".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: call("abs_f64", vec![ident("fx")]),
+                        mutable: false,
+                    }),
+                    // min(a: i32, b: i32) -> i32
+                    stmt(HirStmtKind::Let {
+                        name: "mn".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("min", vec![int_lit(3), int_lit(7)]),
+                        mutable: false,
+                    }),
+                    // max(a: i32, b: i32) -> i32
+                    stmt(HirStmtKind::Let {
+                        name: "mx".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("max", vec![int_lit(3), int_lit(7)]),
+                        mutable: false,
+                    }),
+                    // min_f64(a: f64, b: f64) -> f64
+                    stmt(HirStmtKind::Let {
+                        name: "fmn".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: call("min_f64", vec![float_lit(1.5), float_lit(2.5)]),
+                        mutable: false,
+                    }),
+                    // max_f64(a: f64, b: f64) -> f64
+                    stmt(HirStmtKind::Let {
+                        name: "fmx".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: call("max_f64", vec![float_lit(1.5), float_lit(2.5)]),
+                        mutable: false,
+                    }),
+                    // sqrt(x: f64) -> f64
+                    stmt(HirStmtKind::Let {
+                        name: "sq".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: call("sqrt", vec![float_lit(4.0)]),
+                        mutable: false,
+                    }),
+                    // pow(base: f64, exp: f64) -> f64
+                    stmt(HirStmtKind::Let {
+                        name: "pw".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: call("pow", vec![float_lit(2.0), float_lit(3.0)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // abs: @llvm.abs.i32
+        assert!(
+            ir.contains("call i32 @llvm.abs.i32(i32"),
+            "should call llvm.abs.i32: {ir}"
+        );
+        assert!(
+            ir.contains("declare i32 @llvm.abs.i32(i32, i1)"),
+            "should declare llvm.abs.i32: {ir}"
+        );
+
+        // abs_f64: @llvm.fabs.f64
+        assert!(
+            ir.contains("call double @llvm.fabs.f64(double"),
+            "should call llvm.fabs.f64: {ir}"
+        );
+        assert!(
+            ir.contains("declare double @llvm.fabs.f64(double)"),
+            "should declare llvm.fabs.f64: {ir}"
+        );
+
+        // min: icmp slt + select
+        assert!(
+            ir.contains("icmp slt i32"),
+            "min should use icmp slt: {ir}"
+        );
+        assert!(
+            ir.contains("select i1"),
+            "min/max should use select: {ir}"
+        );
+
+        // max: icmp sgt + select
+        assert!(
+            ir.contains("icmp sgt i32"),
+            "max should use icmp sgt: {ir}"
+        );
+
+        // min_f64: fcmp olt + select
+        assert!(
+            ir.contains("fcmp olt double"),
+            "min_f64 should use fcmp olt: {ir}"
+        );
+
+        // max_f64: fcmp ogt + select
+        assert!(
+            ir.contains("fcmp ogt double"),
+            "max_f64 should use fcmp ogt: {ir}"
+        );
+
+        // sqrt: @llvm.sqrt.f64
+        assert!(
+            ir.contains("call double @llvm.sqrt.f64(double"),
+            "should call llvm.sqrt.f64: {ir}"
+        );
+        assert!(
+            ir.contains("declare double @llvm.sqrt.f64(double)"),
+            "should declare llvm.sqrt.f64: {ir}"
+        );
+
+        // pow: @llvm.pow.f64
+        assert!(
+            ir.contains("call double @llvm.pow.f64(double"),
+            "should call llvm.pow.f64: {ir}"
+        );
+        assert!(
+            ir.contains("declare double @llvm.pow.f64(double, double)"),
+            "should declare llvm.pow.f64: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_conversion_builtins() {
+        // Test narrow, truncate
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // narrow(x: i64) -> i32
+                    stmt(HirStmtKind::Let {
+                        name: "wide".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: int_lit(42),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "narrow_val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("narrow", vec![ident("wide")]),
+                        mutable: false,
+                    }),
+                    // truncate(x: f64) -> i32
+                    stmt(HirStmtKind::Let {
+                        name: "fval".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: float_lit(3.14),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "trunc_val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("truncate", vec![ident("fval")]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // narrow: trunc i64 to i32
+        assert!(
+            ir.contains("trunc i64"),
+            "narrow should use trunc: {ir}"
+        );
+        assert!(
+            ir.contains("to i32"),
+            "narrow should truncate to i32: {ir}"
+        );
+
+        // truncate: fptosi double to i32
+        assert!(
+            ir.contains("fptosi double"),
+            "truncate should use fptosi: {ir}"
+        );
+        assert!(
+            ir.contains("to i32"),
+            "truncate should convert to i32: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_io_builtins() {
+        // Test print_f64, print_i32
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // print_i32
+                    stmt(HirStmtKind::Let {
+                        name: "x".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: int_lit(42),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("print_i32", vec![ident("x")]),
+                    }),
+                    // print_f64
+                    stmt(HirStmtKind::Let {
+                        name: "y".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: float_lit(3.14),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("print_f64", vec![ident("y")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // print_i32: format string + printf call
+        assert!(
+            ir.contains("@.fmt.i32"),
+            "should have i32 format string: {ir}"
+        );
+        assert!(
+            ir.contains("call i32 (ptr, ...) @printf(ptr @.fmt.i32, i32"),
+            "should call printf with i32 format: {ir}"
+        );
+
+        // print_f64: format string + printf call
+        assert!(
+            ir.contains("@.fmt.f64"),
+            "should have f64 format string: {ir}"
+        );
+        assert!(
+            ir.contains("call i32 (ptr, ...) @printf(ptr @.fmt.f64, double"),
+            "should call printf with f64 format: {ir}"
+        );
+
+        // Should declare printf
+        assert!(
+            ir.contains("declare i32 @printf(ptr, ...)"),
+            "should declare printf: {ir}"
+        );
     }
 }

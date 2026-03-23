@@ -1,0 +1,10 @@
+@module stdlib_test;
+fn main() -> i32 {
+    let x: i32 = -5;
+    let a: i32 = abs(x);
+    print_i32(a);
+    let y: f64 = 2.0;
+    let s: f64 = sqrt(y);
+    print_f64(s);
+    return 0;
+}
