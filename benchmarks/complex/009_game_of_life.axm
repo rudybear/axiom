@@ -1,0 +1,75 @@
+@module game_of_life;
+@intent("Conway's Game of Life on 200x200 grid, 500 generations");
+
+fn main() -> i32 {
+    let rows: i32 = 200;
+    let cols: i32 = 200;
+    let gens: i32 = 500;
+    let grid: array[i32, 40000] = array_zeros[i32, 40000];
+    let next: array[i32, 40000] = array_zeros[i32, 40000];
+
+    // Initialize with deterministic pattern using LCG
+    let seed: i64 = 123456789;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    for i: i32 in range(0, 40000) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        if seed % 3 == 0 {
+            grid[i] = 1;
+        } else {
+            grid[i] = 0;
+        }
+    }
+
+    // Run simulation
+    for gen: i32 in range(0, gens) {
+        for i: i32 in range(0, 200) {
+            for j: i32 in range(0, 200) {
+                // Count neighbors (with wrapping)
+                let count: i32 = 0;
+                let im1: i32 = (i + 199) % 200;
+                let ip1: i32 = (i + 1) % 200;
+                let jm1: i32 = (j + 199) % 200;
+                let jp1: i32 = (j + 1) % 200;
+
+                count = count + grid[im1 * 200 + jm1];
+                count = count + grid[im1 * 200 + j];
+                count = count + grid[im1 * 200 + jp1];
+                count = count + grid[i * 200 + jm1];
+                count = count + grid[i * 200 + jp1];
+                count = count + grid[ip1 * 200 + jm1];
+                count = count + grid[ip1 * 200 + j];
+                count = count + grid[ip1 * 200 + jp1];
+
+                let alive: i32 = grid[i * 200 + j];
+                if alive == 1 {
+                    if count == 2 or count == 3 {
+                        next[i * 200 + j] = 1;
+                    } else {
+                        next[i * 200 + j] = 0;
+                    }
+                } else {
+                    if count == 3 {
+                        next[i * 200 + j] = 1;
+                    } else {
+                        next[i * 200 + j] = 0;
+                    }
+                }
+            }
+        }
+        // Swap grids
+        for i: i32 in range(0, 40000) {
+            grid[i] = next[i];
+        }
+    }
+
+    // Checksum: count alive cells
+    let alive_count: i32 = 0;
+    for i: i32 in range(0, 40000) {
+        alive_count = alive_count + grid[i];
+    }
+    print_i32(alive_count);
+    return 0;
+}

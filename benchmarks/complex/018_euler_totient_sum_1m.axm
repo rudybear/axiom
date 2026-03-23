@@ -1,0 +1,36 @@
+@module euler_totient_sum_1m;
+@intent("Sum of Euler totient function for 1 to 1000000 using sieve");
+
+fn main() -> i32 {
+    let n: i32 = 1000000;
+    // phi[i] will hold euler totient of i
+    let phi: array[i32, 1000001] = array_zeros[i32, 1000001];
+
+    // Initialize phi[i] = i
+    for i: i32 in range(0, 1000001) {
+        phi[i] = i;
+    }
+
+    // Sieve-based totient computation
+    let i: i32 = 2;
+    while i <= 1000000 {
+        if phi[i] == i {
+            // i is prime
+            let j: i32 = i;
+            while j <= 1000000 {
+                phi[j] = phi[j] / i * (i - 1);
+                j = j + i;
+            }
+        }
+        i = i + 1;
+    }
+
+    // Sum totient values
+    let total: i64 = 0;
+    for i2: i32 in range(1, 1000001) {
+        total = total + widen(phi[i2]);
+    }
+
+    print_i64(total);
+    return 0;
+}

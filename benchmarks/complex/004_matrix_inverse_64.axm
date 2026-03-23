@@ -1,0 +1,78 @@
+@module matrix_inverse_64;
+@intent("Invert a 64x64 matrix via Gauss-Jordan elimination");
+
+fn main() -> i32 {
+    let n: i32 = 64;
+    // Augmented matrix [A | I] of size 64 x 128
+    let aug: array[f64, 8192] = array_zeros[f64, 8192];
+
+    // Initialize A as diagonally dominant + deterministic fill
+    for i: i32 in range(0, 64) {
+        for j: i32 in range(0, 64) {
+            let val: f64 = to_f64((i * 19 + j * 7 + 3) % 50) / 100.0;
+            aug[i * 128 + j] = val;
+            if i == j {
+                aug[i * 128 + j] = val + 64.0;
+            }
+        }
+        // Identity on right half
+        for j: i32 in range(0, 64) {
+            if i == j {
+                aug[i * 128 + 64 + j] = 1.0;
+            } else {
+                aug[i * 128 + 64 + j] = 0.0;
+            }
+        }
+    }
+
+    // Gauss-Jordan elimination
+    for col: i32 in range(0, 64) {
+        // Find pivot
+        let max_val: f64 = abs_f64(aug[col * 128 + col]);
+        let max_row: i32 = col;
+        let r: i32 = col + 1;
+        while r < 64 {
+            let v: f64 = abs_f64(aug[r * 128 + col]);
+            if v > max_val {
+                max_val = v;
+                max_row = r;
+            }
+            r = r + 1;
+        }
+
+        // Swap rows
+        if max_row != col {
+            for j: i32 in range(0, 128) {
+                let tmp: f64 = aug[col * 128 + j];
+                aug[col * 128 + j] = aug[max_row * 128 + j];
+                aug[max_row * 128 + j] = tmp;
+            }
+        }
+
+        // Scale pivot row
+        let pivot: f64 = aug[col * 128 + col];
+        for j: i32 in range(0, 128) {
+            aug[col * 128 + j] = aug[col * 128 + j] / pivot;
+        }
+
+        // Eliminate all other rows
+        for r2: i32 in range(0, 64) {
+            if r2 != col {
+                let factor: f64 = aug[r2 * 128 + col];
+                for j: i32 in range(0, 128) {
+                    aug[r2 * 128 + j] = aug[r2 * 128 + j] - factor * aug[col * 128 + j];
+                }
+            }
+        }
+    }
+
+    // Checksum: sum of inverse matrix (right half of augmented)
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, 64) {
+        for j: i32 in range(0, 64) {
+            checksum = checksum + aug[i * 128 + 64 + j];
+        }
+    }
+    print_f64(checksum);
+    return 0;
+}

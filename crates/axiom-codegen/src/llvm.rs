@@ -724,7 +724,9 @@ fn emit_let(ctx: &mut CodegenContext, name: &str, ty: &HirType, value: &HirExpr)
             }
         };
         let array_llvm = format!("[{size} x {elem_llvm}]");
-        let alloca_name = format!("%{name}");
+        let uid = ctx.next_reg;
+        ctx.next_reg += 1;
+        let alloca_name = format!("%{name}.{uid}");
         ctx.emit(&format!("{alloca_name} = alloca {array_llvm}, align 16"));
 
         // Check if the initializer is ArrayZeros — emit memset.
@@ -760,7 +762,11 @@ fn emit_let(ctx: &mut CodegenContext, name: &str, ty: &HirType, value: &HirExpr)
         }
     };
 
-    let alloca_name = format!("%{name}");
+    // Use unique suffix to avoid collisions when the same variable name
+    // appears in multiple scopes (e.g., `sum` in nested blocks).
+    let uid = ctx.next_reg;
+    ctx.next_reg += 1;
+    let alloca_name = format!("%{name}.{uid}");
     ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
 
     let val = emit_expr(ctx, value, Some(&llvm_type));
@@ -2853,7 +2859,7 @@ mod tests {
         );
 
         let ir = codegen(&m).expect("codegen should succeed");
-        assert!(ir.contains("%x = alloca i32"), "should alloca x");
+        assert!(ir.contains("alloca i32"), "should alloca x");
         assert!(ir.contains("store i32 42, ptr %x"), "should store 42");
         assert!(ir.contains("load i32, ptr %x"), "should load x");
     }
@@ -4051,11 +4057,11 @@ mod tests {
         );
         // Verify alloca for mutable counter variables.
         assert!(
-            ir.contains("%numbers = alloca i32"),
+            ir.contains("alloca i32") && ir.contains("numbers"),
             "should have numbers counter: {ir}"
         );
         assert!(
-            ir.contains("%operators = alloca i32"),
+            ir.contains("alloca i32") && ir.contains("operators"),
             "should have operators counter: {ir}"
         );
         // Verify if/else branches for counting logic.
@@ -4331,7 +4337,7 @@ mod tests {
             "should have array alloca: {ir}"
         );
         assert!(
-            ir.contains("call void @llvm.memset.p0.i64(ptr %arr, i8 0, i64 40, i1 false)"),
+            ir.contains("i8 0, i64 40, i1 false"),
             "should have memset for 10 * 4 = 40 bytes: {ir}"
         );
         assert!(
@@ -4390,7 +4396,7 @@ mod tests {
         let ir = codegen(&m).expect("codegen should succeed");
         // Should have GEP + load for index read.
         assert!(
-            ir.contains("getelementptr inbounds [10 x i32], ptr %arr, i64 0, i64"),
+            ir.contains("getelementptr inbounds [10 x i32], ptr %arr"),
             "should have GEP for array index: {ir}"
         );
         assert!(
@@ -4446,7 +4452,7 @@ mod tests {
         let ir = codegen(&m).expect("codegen should succeed");
         // Should have GEP + store for index write.
         assert!(
-            ir.contains("getelementptr inbounds [10 x i32], ptr %arr, i64 0, i64"),
+            ir.contains("getelementptr inbounds [10 x i32], ptr %arr"),
             "should have GEP for array index write: {ir}"
         );
         assert!(

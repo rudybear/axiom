@@ -1,0 +1,76 @@
+@module mergesort_100k;
+@intent("Bottom-up iterative mergesort on 100000 elements");
+
+fn main() -> i32 {
+    let n: i32 = 100000;
+    let arr: array[i32, 100000] = array_zeros[i32, 100000];
+    let tmp: array[i32, 100000] = array_zeros[i32, 100000];
+
+    // Fill with LCG pseudo-random values
+    let seed: i64 = 12345;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+    for i: i32 in range(0, 100000) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        arr[i] = narrow(seed % 1000000);
+    }
+
+    // Bottom-up merge sort
+    let width: i32 = 1;
+    while width < n {
+        let i: i32 = 0;
+        while i < n {
+            let left: i32 = i;
+            let mid: i32 = min(i + width, n);
+            let right: i32 = min(i + 2 * width, n);
+
+            // Merge arr[left..mid] and arr[mid..right] into tmp
+            let l: i32 = left;
+            let r: i32 = mid;
+            let k: i32 = left;
+            while l < mid and r < right {
+                if arr[l] <= arr[r] {
+                    tmp[k] = arr[l];
+                    l = l + 1;
+                } else {
+                    tmp[k] = arr[r];
+                    r = r + 1;
+                }
+                k = k + 1;
+            }
+            while l < mid {
+                tmp[k] = arr[l];
+                l = l + 1;
+                k = k + 1;
+            }
+            while r < right {
+                tmp[k] = arr[r];
+                r = r + 1;
+                k = k + 1;
+            }
+
+            i = i + 2 * width;
+        }
+
+        // Copy tmp back to arr
+        for j: i32 in range(0, n) {
+            arr[j] = tmp[j];
+        }
+        width = width * 2;
+    }
+
+    // Checksum
+    let checksum: i64 = 0;
+    for i: i32 in range(0, 100) {
+        checksum = checksum + widen(arr[i]);
+    }
+    for i: i32 in range(99900, 100000) {
+        checksum = checksum + widen(arr[i]);
+    }
+    for i: i32 in range(49950, 50050) {
+        checksum = checksum + widen(arr[i]);
+    }
+    print_i64(checksum);
+    return 0;
+}

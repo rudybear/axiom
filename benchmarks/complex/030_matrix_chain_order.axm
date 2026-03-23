@@ -1,0 +1,47 @@
+@module matrix_chain_order;
+@intent("Matrix chain multiplication optimization via DP, n=200 matrices");
+
+fn main() -> i32 {
+    let n: i32 = 200;
+    // Dimensions: p[0] x p[1], p[1] x p[2], ..., p[n-1] x p[n]
+    let p: array[i32, 201] = array_zeros[i32, 201];
+
+    // Initialize dimensions deterministically
+    let seed: i64 = 31415;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+    for i: i32 in range(0, 201) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        p[i] = narrow(seed % 100) + 10;
+    }
+
+    // DP table: m[i][j] = minimum cost of multiplying matrices i..j
+    // Flat: m[i * 200 + j] for i,j in 0..199
+    let m: array[i64, 40000] = array_zeros[i64, 40000];
+
+    // Fill DP table
+    // Chain length l = 2, 3, ..., n
+    let l: i32 = 2;
+    while l <= n {
+        let i: i32 = 0;
+        while i <= n - l {
+            let j: i32 = i + l - 1;
+            m[i * 200 + j] = 9999999999;
+            let k: i32 = i;
+            while k < j {
+                let cost: i64 = m[i * 200 + k] + m[(k + 1) * 200 + j] + widen(p[i]) * widen(p[k + 1]) * widen(p[j + 1]);
+                if cost < m[i * 200 + j] {
+                    m[i * 200 + j] = cost;
+                }
+                k = k + 1;
+            }
+            i = i + 1;
+        }
+        l = l + 1;
+    }
+
+    // Print minimum cost for multiplying all matrices
+    print_i64(m[0 * 200 + n - 1]);
+    return 0;
+}

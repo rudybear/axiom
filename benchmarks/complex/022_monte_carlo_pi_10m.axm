@@ -1,0 +1,25 @@
+@module monte_carlo_pi_10m;
+@intent("Monte Carlo Pi estimation with 10 million deterministic LCG points");
+
+fn main() -> i32 {
+    let n: i32 = 10000000;
+    let inside: i32 = 0;
+    let seed: i64 = 12345;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    for i: i32 in range(0, n) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let x: f64 = to_f64_i64(seed) / to_f64_i64(lcg_m);
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let y: f64 = to_f64_i64(seed) / to_f64_i64(lcg_m);
+        if x * x + y * y <= 1.0 {
+            inside = inside + 1;
+        }
+    }
+
+    let pi: f64 = 4.0 * to_f64(inside) / to_f64(n);
+    print_f64(pi);
+    return 0;
+}

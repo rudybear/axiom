@@ -1,0 +1,48 @@
+@module stencil_5point;
+@intent("5-point stencil on 1000x1000 grid, 50 iterations");
+
+fn main() -> i32 {
+    let n: i32 = 1000;
+    let iters: i32 = 50;
+    let grid: array[f64, 1000000] = array_zeros[f64, 1000000];
+    let tmp: array[f64, 1000000] = array_zeros[f64, 1000000];
+
+    // Initialize with a heat source pattern
+    for i: i32 in range(0, 1000) {
+        for j: i32 in range(0, 1000) {
+            let di: f64 = to_f64(i) - 500.0;
+            let dj: f64 = to_f64(j) - 500.0;
+            if di * di + dj * dj < 10000.0 {
+                grid[i * 1000 + j] = 100.0;
+            }
+        }
+    }
+
+    // Stencil iterations
+    for iter: i32 in range(0, iters) {
+        for i: i32 in range(1, 999) {
+            for j: i32 in range(1, 999) {
+                tmp[i * 1000 + j] = 0.2 * (
+                    grid[i * 1000 + j] +
+                    grid[(i - 1) * 1000 + j] +
+                    grid[(i + 1) * 1000 + j] +
+                    grid[i * 1000 + (j - 1)] +
+                    grid[i * 1000 + (j + 1)]
+                );
+            }
+        }
+        for i: i32 in range(1, 999) {
+            for j: i32 in range(1, 999) {
+                grid[i * 1000 + j] = tmp[i * 1000 + j];
+            }
+        }
+    }
+
+    // Checksum
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, 1000000) {
+        checksum = checksum + grid[i];
+    }
+    print_f64(checksum);
+    return 0;
+}

@@ -1,0 +1,54 @@
+@module convolution_1d;
+@intent("1D convolution of 10000-element signal with 100-element kernel");
+
+fn main() -> i32 {
+    let sig_len: i32 = 10000;
+    let kern_len: i32 = 100;
+    let out_len: i32 = 10099;
+
+    let signal: array[f64, 10000] = array_zeros[f64, 10000];
+    let kernel: array[f64, 100] = array_zeros[f64, 100];
+    let output: array[f64, 10099] = array_zeros[f64, 10099];
+
+    // Initialize signal with LCG
+    let seed: i64 = 98765;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+    for i: i32 in range(0, 10000) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        signal[i] = to_f64_i64(seed) / to_f64_i64(lcg_m) * 2.0 - 1.0;
+    }
+
+    // Initialize kernel (Gaussian-like)
+    let k_sum: f64 = 0.0;
+    for i: i32 in range(0, 100) {
+        let x: f64 = to_f64(i) - 49.5;
+        kernel[i] = pow(2.718281828, 0.0 - x * x / 200.0);
+        k_sum = k_sum + kernel[i];
+    }
+    // Normalize
+    for i: i32 in range(0, 100) {
+        kernel[i] = kernel[i] / k_sum;
+    }
+
+    // Full convolution
+    for i: i32 in range(0, 10099) {
+        let acc: f64 = 0.0;
+        for j: i32 in range(0, 100) {
+            let si: i32 = i - j;
+            if si >= 0 and si < 10000 {
+                acc = acc + signal[si] * kernel[j];
+            }
+        }
+        output[i] = acc;
+    }
+
+    // Checksum
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, 10099) {
+        checksum = checksum + output[i];
+    }
+    print_f64(checksum);
+    return 0;
+}

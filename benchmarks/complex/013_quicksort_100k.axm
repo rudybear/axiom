@@ -1,0 +1,78 @@
+@module quicksort_100k;
+@intent("Quicksort 100000 elements using explicit stack, LCG random fill");
+
+fn main() -> i32 {
+    let n: i32 = 100000;
+    let arr: array[i32, 100000] = array_zeros[i32, 100000];
+
+    // Fill with LCG pseudo-random values
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+    for i: i32 in range(0, 100000) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        arr[i] = narrow(seed % 1000000);
+    }
+
+    // Iterative quicksort using explicit stack
+    let stack_lo: array[i32, 200] = array_zeros[i32, 200];
+    let stack_hi: array[i32, 200] = array_zeros[i32, 200];
+    let top: i32 = 0;
+    stack_lo[0] = 0;
+    stack_hi[0] = n - 1;
+    top = 1;
+
+    while top > 0 {
+        top = top - 1;
+        let lo: i32 = stack_lo[top];
+        let hi: i32 = stack_hi[top];
+
+        if lo < hi {
+            // Partition (Lomuto scheme)
+            let pivot: i32 = arr[hi];
+            let i: i32 = lo - 1;
+            let j: i32 = lo;
+            while j < hi {
+                if arr[j] <= pivot {
+                    i = i + 1;
+                    let tmp: i32 = arr[i];
+                    arr[i] = arr[j];
+                    arr[j] = tmp;
+                }
+                j = j + 1;
+            }
+            i = i + 1;
+            let tmp2: i32 = arr[i];
+            arr[i] = arr[hi];
+            arr[hi] = tmp2;
+            let pi_idx: i32 = i;
+
+            // Push sub-arrays
+            if pi_idx - 1 > lo {
+                stack_lo[top] = lo;
+                stack_hi[top] = pi_idx - 1;
+                top = top + 1;
+            }
+            if pi_idx + 1 < hi {
+                stack_lo[top] = pi_idx + 1;
+                stack_hi[top] = hi;
+                top = top + 1;
+            }
+        }
+    }
+
+    // Checksum: sum of first 100 + last 100 + middle 100
+    let checksum: i64 = 0;
+    for i: i32 in range(0, 100) {
+        checksum = checksum + widen(arr[i]);
+    }
+    for i: i32 in range(99900, 100000) {
+        checksum = checksum + widen(arr[i]);
+    }
+    for i: i32 in range(49950, 50050) {
+        checksum = checksum + widen(arr[i]);
+    }
+    print_i64(checksum);
+    return 0;
+}

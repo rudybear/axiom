@@ -1,0 +1,36 @@
+@module pi_chudnovsky_terms;
+@intent("Pi via Chudnovsky-like series with 100 terms at f64 precision, repeated for timing");
+
+fn main() -> i32 {
+    // Chudnovsky: 1/pi = 12 * sum_k ((-1)^k * (6k)! / ((3k)! * (k!)^3 * 640320^(3k+3/2))) * (13591409 + 545140134*k)
+    // With f64 we only get ~15 digits, so few terms suffice. We compute iteratively and repeat for timing.
+
+    let result: f64 = 0.0;
+
+    // Repeat 500000 times to fill time
+    for rep: i32 in range(0, 500000) {
+        let sum: f64 = 0.0;
+        let Mk: f64 = 1.0;
+        let Lk: f64 = 13591409.0;
+        let Xk: f64 = 1.0;
+        let sign: f64 = 1.0;
+
+        for k: i32 in range(0, 15) {
+            sum = sum + sign * Mk * Lk / Xk;
+
+            // Update for next term
+            let k_f: f64 = to_f64(k);
+            let k1: f64 = k_f + 1.0;
+            Mk = Mk * (6.0*k_f+1.0) * (2.0*k_f+1.0) * (6.0*k_f+5.0) / (k1*k1*k1);
+            Lk = Lk + 545140134.0;
+            Xk = Xk * (0.0 - 262537412640768000.0);
+            sign = sign * (0.0 - 1.0);
+        }
+
+        let pi_inv: f64 = 12.0 * sum / 426880.0 / sqrt(10005.0);
+        result = 1.0 / pi_inv;
+    }
+
+    print_f64(result);
+    return 0;
+}

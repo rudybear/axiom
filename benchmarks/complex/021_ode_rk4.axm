@@ -1,0 +1,28 @@
+@module ode_rk4;
+@intent("Solve ODE dy/dx = -2xy with 4th-order Runge-Kutta, 1M steps");
+
+@pure
+fn f_ode(x: f64, y: f64) -> f64 {
+    // dy/dx = -2xy (solution is y = exp(-x^2))
+    return (0.0 - 2.0) * x * y;
+}
+
+fn main() -> i32 {
+    let n: i32 = 1000000;
+    let x: f64 = 0.0;
+    let y: f64 = 1.0;
+    let h: f64 = 5.0 / to_f64(n);
+
+    for i: i32 in range(0, n) {
+        let k1: f64 = h * f_ode(x, y);
+        let k2: f64 = h * f_ode(x + h / 2.0, y + k1 / 2.0);
+        let k3: f64 = h * f_ode(x + h / 2.0, y + k2 / 2.0);
+        let k4: f64 = h * f_ode(x + h, y + k3);
+        y = y + (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+        x = x + h;
+    }
+
+    // At x=5, exact solution is exp(-25) ~ 1.389e-11
+    print_f64(y);
+    return 0;
+}

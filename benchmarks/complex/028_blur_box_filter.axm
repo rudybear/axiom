@@ -1,0 +1,56 @@
+@module blur_box_filter;
+@intent("Box blur on 500x500 image (flat array), 10 passes with 5x5 kernel");
+
+fn main() -> i32 {
+    let rows: i32 = 500;
+    let cols: i32 = 500;
+    let passes: i32 = 10;
+    let img: array[f64, 250000] = array_zeros[f64, 250000];
+    let tmp: array[f64, 250000] = array_zeros[f64, 250000];
+
+    // Initialize with pattern
+    let seed: i64 = 11111;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+    for i: i32 in range(0, 250000) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        img[i] = to_f64_i64(seed) / to_f64_i64(lcg_m) * 255.0;
+    }
+
+    // Box blur passes
+    for pass: i32 in range(0, passes) {
+        // Horizontal blur (5-wide)
+        for i: i32 in range(0, 500) {
+            for j: i32 in range(2, 498) {
+                let sum: f64 = 0.0;
+                sum = sum + img[i * 500 + j - 2];
+                sum = sum + img[i * 500 + j - 1];
+                sum = sum + img[i * 500 + j];
+                sum = sum + img[i * 500 + j + 1];
+                sum = sum + img[i * 500 + j + 2];
+                tmp[i * 500 + j] = sum / 5.0;
+            }
+        }
+        // Vertical blur (5-wide)
+        for i: i32 in range(2, 498) {
+            for j: i32 in range(0, 500) {
+                let sum: f64 = 0.0;
+                sum = sum + tmp[(i - 2) * 500 + j];
+                sum = sum + tmp[(i - 1) * 500 + j];
+                sum = sum + tmp[i * 500 + j];
+                sum = sum + tmp[(i + 1) * 500 + j];
+                sum = sum + tmp[(i + 2) * 500 + j];
+                img[i * 500 + j] = sum / 5.0;
+            }
+        }
+    }
+
+    // Checksum
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, 250000) {
+        checksum = checksum + img[i];
+    }
+    print_f64(checksum);
+    return 0;
+}

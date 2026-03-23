@@ -1,0 +1,55 @@
+@module dft_naive;
+@intent("Naive Discrete Fourier Transform O(n^2) on 2048 points");
+
+fn main() -> i32 {
+    let n: i32 = 2048;
+    let pi2: f64 = 6.28318530717959;
+
+    let x_re: array[f64, 2048] = array_zeros[f64, 2048];
+    let x_im: array[f64, 2048] = array_zeros[f64, 2048];
+    let X_re: array[f64, 2048] = array_zeros[f64, 2048];
+    let X_im: array[f64, 2048] = array_zeros[f64, 2048];
+
+    // Input signal: sum of two sinusoids
+    for i: i32 in range(0, 2048) {
+        let t: f64 = to_f64(i) / 2048.0;
+        // sin approximation for two frequencies
+        let a1: f64 = pi2 * 50.0 * t;
+        let a2: f64 = pi2 * 120.0 * t;
+        // sin(a) via Taylor: a - a^3/6 + a^5/120 - a^7/5040
+        // Reduce to [-pi, pi] range first
+        let a1r: f64 = a1 - to_f64(truncate(a1 / pi2)) * pi2;
+        let a2r: f64 = a2 - to_f64(truncate(a2 / pi2)) * pi2;
+        let s1: f64 = a1r - a1r*a1r*a1r/6.0 + a1r*a1r*a1r*a1r*a1r/120.0 - a1r*a1r*a1r*a1r*a1r*a1r*a1r/5040.0;
+        let s2: f64 = a2r - a2r*a2r*a2r/6.0 + a2r*a2r*a2r*a2r*a2r/120.0 - a2r*a2r*a2r*a2r*a2r*a2r*a2r/5040.0;
+        x_re[i] = s1 + 0.5 * s2;
+        x_im[i] = 0.0;
+    }
+
+    // DFT: X[k] = sum_{n=0}^{N-1} x[n] * exp(-j*2*pi*k*n/N)
+    let n_f: f64 = to_f64(n);
+    for k: i32 in range(0, 2048) {
+        let sum_re: f64 = 0.0;
+        let sum_im: f64 = 0.0;
+        for ni: i32 in range(0, 2048) {
+            let angle: f64 = pi2 * to_f64(k) * to_f64(ni) / n_f;
+            // cos and sin approximations
+            let ar: f64 = angle - to_f64(truncate(angle / pi2)) * pi2;
+            let ar2: f64 = ar * ar;
+            let cos_a: f64 = 1.0 - ar2/2.0 + ar2*ar2/24.0 - ar2*ar2*ar2/720.0 + ar2*ar2*ar2*ar2/40320.0;
+            let sin_a: f64 = ar - ar*ar2/6.0 + ar*ar2*ar2/120.0 - ar*ar2*ar2*ar2/5040.0;
+            sum_re = sum_re + x_re[ni] * cos_a + x_im[ni] * sin_a;
+            sum_im = sum_im - x_re[ni] * sin_a + x_im[ni] * cos_a;
+        }
+        X_re[k] = sum_re;
+        X_im[k] = sum_im;
+    }
+
+    // Checksum: sum of magnitudes
+    let checksum: f64 = 0.0;
+    for k: i32 in range(0, 2048) {
+        checksum = checksum + sqrt(X_re[k] * X_re[k] + X_im[k] * X_im[k]);
+    }
+    print_f64(checksum);
+    return 0;
+}

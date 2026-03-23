@@ -12,9 +12,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "12",
-      "axm_time_ms": 3.401,
-      "c_time_ms": 3.494,
-      "ratio": 0.974
+      "axm_time_ms": 3.555,
+      "c_time_ms": 3.383,
+      "ratio": 1.051
     },
     {
       "id": "002",
@@ -22,9 +22,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "6",
-      "axm_time_ms": 3.509,
-      "c_time_ms": 3.741,
-      "ratio": 0.938
+      "axm_time_ms": 33.659,
+      "c_time_ms": 3.511,
+      "ratio": 9.586
     },
     {
       "id": "003",
@@ -32,9 +32,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "12",
-      "axm_time_ms": 3.747,
-      "c_time_ms": 3.485,
-      "ratio": 1.075
+      "axm_time_ms": 4.423,
+      "c_time_ms": 3.28,
+      "ratio": 1.348
     },
     {
       "id": "004",
@@ -42,9 +42,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "1",
-      "axm_time_ms": 3.511,
-      "c_time_ms": 4.939,
-      "ratio": 0.711
+      "axm_time_ms": 3.85,
+      "c_time_ms": 3.978,
+      "ratio": 0.968
     },
     {
       "id": "005",
@@ -52,9 +52,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "1",
-      "axm_time_ms": 3.622,
-      "c_time_ms": 4.392,
-      "ratio": 0.825
+      "axm_time_ms": 3.493,
+      "c_time_ms": 3.921,
+      "ratio": 0.891
     },
     {
       "id": "006",
@@ -62,9 +62,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "168",
-      "axm_time_ms": 3.632,
-      "c_time_ms": 5.18,
-      "ratio": 0.701
+      "axm_time_ms": 4.303,
+      "c_time_ms": 4.008,
+      "ratio": 1.074
     },
     {
       "id": "007",
@@ -72,9 +72,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "1229",
-      "axm_time_ms": 4.091,
-      "c_time_ms": 4.365,
-      "ratio": 0.937
+      "axm_time_ms": 4.665,
+      "c_time_ms": 3.465,
+      "ratio": 1.347
     },
     {
       "id": "008",
@@ -82,9 +82,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "9592",
-      "axm_time_ms": 6.675,
-      "c_time_ms": 6.859,
-      "ratio": 0.973
+      "axm_time_ms": 41.642,
+      "c_time_ms": 7.126,
+      "ratio": 5.844
     },
     {
       "id": "009",
@@ -92,9 +92,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "4",
-      "axm_time_ms": 3.983,
-      "c_time_ms": 3.267,
-      "ratio": 1.219
+      "axm_time_ms": 3.872,
+      "c_time_ms": 4.183,
+      "ratio": 0.926
     },
     {
       "id": "010",
@@ -102,9 +102,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "3044",
-      "axm_time_ms": 27.852,
-      "c_time_ms": 3.536,
-      "ratio": 7.876
+      "axm_time_ms": 4.408,
+      "c_time_ms": 3.645,
+      "ratio": 1.209
     },
     {
       "id": "011",
@@ -112,9 +112,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "111",
-      "axm_time_ms": 4.165,
-      "c_time_ms": 4.26,
-      "ratio": 0.978
+      "axm_time_ms": 3.416,
+      "c_time_ms": 5.883,
+      "ratio": 0.581
     },
     {
       "id": "012",
@@ -122,9 +122,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "178",
-      "axm_time_ms": 3.443,
-      "c_time_ms": 3.467,
-      "ratio": 0.993
+      "axm_time_ms": 4.006,
+      "c_time_ms": 4.317,
+      "ratio": 0.928
     },
     {
       "id": "013",
@@ -132,9 +132,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "178",
-      "axm_time_ms": 3.798,
-      "c_time_ms": 4.129,
-      "ratio": 0.92
+      "axm_time_ms": 4.051,
+      "c_time_ms": 4.159,
+      "ratio": 0.974
     },
     {
       "id": "014",
@@ -142,9 +142,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "28",
-      "axm_time_ms": 26.704,
-      "c_time_ms": 3.354,
-      "ratio": 7.963
+      "axm_time_ms": 3.732,
+      "c_time_ms": 3.96,
+      "ratio": 0.943
     },
     {
       "id": "015",
@@ -152,9 +152,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "601",
-      "axm_time_ms": 28.2,
-      "c_time_ms": 3.544,
-      "ratio": 7.957
+      "axm_time_ms": 3.75,
+      "c_time_ms": 3.709,
+      "ratio": 1.011
     },
     {
       "id": "016",
@@ -162,9 +162,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "102334155",
-      "axm_time_ms": 31.737,
-      "c_time_ms": 38.432,
-      "ratio": 0.826
+      "axm_time_ms": 29.804,
+      "c_time_ms": 4.132,
+      "ratio": 7.212
     },
     {
       "id": "017",
@@ -172,9 +172,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "12586269025",
-      "axm_time_ms": 3.911,
-      "c_time_ms": 4.92,
-      "ratio": 0.795
+      "axm_time_ms": 4.125,
+      "c_time_ms": 3.689,
+      "ratio": 1.118
     },
     {
       "id": "018",
@@ -182,9 +182,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "832040",
-      "axm_time_ms": 5.052,
-      "c_time_ms": 5.558,
-      "ratio": 0.909
+      "axm_time_ms": 4.967,
+      "c_time_ms": 5.261,
+      "ratio": 0.944
     },
     {
       "id": "019",
@@ -192,9 +192,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "9227465",
-      "axm_time_ms": 19.35,
-      "c_time_ms": 22.124,
-      "ratio": 0.875
+      "axm_time_ms": 18.064,
+      "c_time_ms": 20.85,
+      "ratio": 0.866
     },
     {
       "id": "020",
@@ -202,9 +202,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "479001600",
-      "axm_time_ms": 4.304,
-      "c_time_ms": 3.736,
-      "ratio": 1.152
+      "axm_time_ms": 3.857,
+      "c_time_ms": 3.448,
+      "ratio": 1.119
     },
     {
       "id": "021",
@@ -212,9 +212,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "2432902008176640000",
-      "axm_time_ms": 3.494,
-      "c_time_ms": 3.535,
-      "ratio": 0.988
+      "axm_time_ms": 5.104,
+      "c_time_ms": 5.389,
+      "ratio": 0.947
     },
     {
       "id": "022",
@@ -222,9 +222,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "1",
-      "axm_time_ms": 3.427,
-      "c_time_ms": 3.611,
-      "ratio": 0.949
+      "axm_time_ms": 3.462,
+      "c_time_ms": 4.062,
+      "ratio": 0.852
     },
     {
       "id": "023",
@@ -232,9 +232,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "4",
-      "axm_time_ms": 39.562,
-      "c_time_ms": 40.934,
-      "ratio": 0.966
+      "axm_time_ms": 39.329,
+      "c_time_ms": 40.547,
+      "ratio": 0.97
     },
     {
       "id": "024",
@@ -242,9 +242,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "14",
-      "axm_time_ms": 3.649,
-      "c_time_ms": 3.547,
-      "ratio": 1.029
+      "axm_time_ms": 3.543,
+      "c_time_ms": 3.565,
+      "ratio": 0.994
     },
     {
       "id": "025",
@@ -252,9 +252,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "6",
-      "axm_time_ms": 3.881,
-      "c_time_ms": 3.826,
-      "ratio": 1.014
+      "axm_time_ms": 3.631,
+      "c_time_ms": 3.56,
+      "ratio": 1.02
     },
     {
       "id": "026",
@@ -262,9 +262,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "45",
-      "axm_time_ms": 4.076,
-      "c_time_ms": 4.138,
-      "ratio": 0.985
+      "axm_time_ms": 4.085,
+      "c_time_ms": 3.632,
+      "ratio": 1.124
     },
     {
       "id": "027",
@@ -272,9 +272,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "36",
-      "axm_time_ms": 3.643,
-      "c_time_ms": 7.278,
-      "ratio": 0.501
+      "axm_time_ms": 5.601,
+      "c_time_ms": 30.801,
+      "ratio": 0.182
     },
     {
       "id": "028",
@@ -282,9 +282,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "338350",
-      "axm_time_ms": 4.176,
-      "c_time_ms": 4.44,
-      "ratio": 0.941
+      "axm_time_ms": 4.424,
+      "c_time_ms": 3.728,
+      "ratio": 1.186
     },
     {
       "id": "029",
@@ -292,9 +292,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "25502500",
-      "axm_time_ms": 3.854,
-      "c_time_ms": 3.832,
-      "ratio": 1.006
+      "axm_time_ms": 3.487,
+      "c_time_ms": 3.797,
+      "ratio": 0.918
     },
     {
       "id": "030",
@@ -302,9 +302,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "246",
-      "axm_time_ms": 4.447,
-      "c_time_ms": 4.501,
-      "ratio": 0.988
+      "axm_time_ms": 44.9,
+      "c_time_ms": 40.455,
+      "ratio": 1.11
     },
     {
       "id": "031",
@@ -312,9 +312,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "54321",
-      "axm_time_ms": 3.476,
-      "c_time_ms": 3.61,
-      "ratio": 0.963
+      "axm_time_ms": 5.084,
+      "c_time_ms": 3.646,
+      "ratio": 1.394
     },
     {
       "id": "032",
@@ -322,9 +322,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "108",
-      "axm_time_ms": 5.173,
-      "c_time_ms": 3.426,
-      "ratio": 1.51
+      "axm_time_ms": 3.846,
+      "c_time_ms": 4.13,
+      "ratio": 0.931
     },
     {
       "id": "033",
@@ -332,9 +332,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "1073741824",
-      "axm_time_ms": 25.125,
-      "c_time_ms": 3.368,
-      "ratio": 7.459
+      "axm_time_ms": 3.828,
+      "c_time_ms": 3.509,
+      "ratio": 1.091
     },
     {
       "id": "034",
@@ -342,9 +342,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "23",
-      "axm_time_ms": 26.993,
-      "c_time_ms": 3.835,
-      "ratio": 7.038
+      "axm_time_ms": 3.471,
+      "c_time_ms": 3.479,
+      "ratio": 0.998
     },
     {
       "id": "035",
@@ -352,9 +352,9 @@
       "category": "number_theory",
       "status": "pass",
       "output": "5050",
-      "axm_time_ms": 3.893,
-      "c_time_ms": 3.733,
-      "ratio": 1.043
+      "axm_time_ms": 3.419,
+      "c_time_ms": 3.344,
+      "ratio": 1.023
     },
     {
       "id": "036",
@@ -362,9 +362,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "3.141593",
-      "axm_time_ms": 44.716,
-      "c_time_ms": 10.777,
-      "ratio": 4.149
+      "axm_time_ms": 11.434,
+      "c_time_ms": 11.811,
+      "ratio": 0.968
     },
     {
       "id": "037",
@@ -372,9 +372,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "3.162278",
-      "axm_time_ms": 32.133,
-      "c_time_ms": 4.153,
-      "ratio": 7.737
+      "axm_time_ms": 3.681,
+      "c_time_ms": 5.524,
+      "ratio": 0.666
     },
     {
       "id": "038",
@@ -382,9 +382,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "3.000000",
-      "axm_time_ms": 3.428,
-      "c_time_ms": 3.556,
-      "ratio": 0.964
+      "axm_time_ms": 3.63,
+      "c_time_ms": 3.939,
+      "ratio": 0.922
     },
     {
       "id": "039",
@@ -392,23 +392,23 @@
       "category": "numerical",
       "status": "pass",
       "output": "2.718282",
-      "axm_time_ms": 3.955,
-      "c_time_ms": 3.82,
-      "ratio": 1.035
+      "axm_time_ms": 5.465,
+      "c_time_ms": 3.439,
+      "ratio": 1.589
     },
     {
       "id": "040",
       "name": "sine_taylor",
       "category": "numerical",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_209800_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_209800_ThreadId(1).ll:33:23:\n  \u00e2\u201d\u201a error: '%5' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    33 |   %6 = mul nsw i64 2, %5\n  \u00e2\u201d\u201a       |                       ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_251548_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_251548_ThreadId(1).ll:33:23:\n  \u00e2\u201d\u201a error: '%5' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    33 |   %6 = mul nsw i64 2, %5\n  \u00e2\u201d\u201a       |                       ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "041",
       "name": "cosine_taylor",
       "category": "numerical",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_213524_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_213524_ThreadId(1).ll:32:23:\n  \u00e2\u201d\u201a error: '%4' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    32 |   %5 = mul nsw i64 2, %4\n  \u00e2\u201d\u201a       |                       ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_217432_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_217432_ThreadId(1).ll:32:23:\n  \u00e2\u201d\u201a error: '%4' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    32 |   %5 = mul nsw i64 2, %4\n  \u00e2\u201d\u201a       |                       ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "042",
@@ -416,16 +416,16 @@
       "category": "numerical",
       "status": "pass",
       "output": "7.389056",
-      "axm_time_ms": 3.546,
-      "c_time_ms": 4.164,
-      "ratio": 0.852
+      "axm_time_ms": 3.528,
+      "c_time_ms": 3.792,
+      "ratio": 0.93
     },
     {
       "id": "043",
       "name": "ln_series",
       "category": "numerical",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_97264_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_97264_ThreadId(1).ll:38:24: error:\n  \u00e2\u201d\u201a '%10' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    38 |   %11 = mul nsw i64 2, %10\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_48364_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_48364_ThreadId(1).ll:38:24: error:\n  \u00e2\u201d\u201a '%10' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    38 |   %11 = mul nsw i64 2, %10\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "044",
@@ -433,9 +433,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "3.141592",
-      "axm_time_ms": 4.859,
-      "c_time_ms": 4.513,
-      "ratio": 1.077
+      "axm_time_ms": 5.624,
+      "c_time_ms": 6.458,
+      "ratio": 0.871
     },
     {
       "id": "045",
@@ -443,9 +443,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "0.333333",
-      "axm_time_ms": 4.002,
-      "c_time_ms": 3.864,
-      "ratio": 1.036
+      "axm_time_ms": 4.105,
+      "c_time_ms": 4.597,
+      "ratio": 0.893
     },
     {
       "id": "046",
@@ -453,9 +453,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "0.333333",
-      "axm_time_ms": 3.853,
-      "c_time_ms": 4.343,
-      "ratio": 0.887
+      "axm_time_ms": 4.25,
+      "c_time_ms": 3.757,
+      "ratio": 1.131
     },
     {
       "id": "047",
@@ -463,9 +463,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "0.333333",
-      "axm_time_ms": 4.029,
-      "c_time_ms": 4.142,
-      "ratio": 0.973
+      "axm_time_ms": 3.863,
+      "c_time_ms": 24.108,
+      "ratio": 0.16
     },
     {
       "id": "048",
@@ -473,9 +473,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "1.618034",
-      "axm_time_ms": 3.578,
-      "c_time_ms": 3.569,
-      "ratio": 1.003
+      "axm_time_ms": 3.723,
+      "c_time_ms": 40.146,
+      "ratio": 0.093
     },
     {
       "id": "049",
@@ -483,9 +483,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "0.513045",
-      "axm_time_ms": 4.539,
-      "c_time_ms": 4.207,
-      "ratio": 1.079
+      "axm_time_ms": 3.591,
+      "c_time_ms": 3.638,
+      "ratio": 0.987
     },
     {
       "id": "050",
@@ -493,9 +493,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "7.485471",
-      "axm_time_ms": 3.976,
-      "c_time_ms": 3.807,
-      "ratio": 1.044
+      "axm_time_ms": 3.668,
+      "c_time_ms": 3.907,
+      "ratio": 0.939
     },
     {
       "id": "051",
@@ -503,9 +503,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "1.644924",
-      "axm_time_ms": 4.129,
-      "c_time_ms": 3.398,
-      "ratio": 1.215
+      "axm_time_ms": 3.425,
+      "c_time_ms": 4.025,
+      "ratio": 0.851
     },
     {
       "id": "052",
@@ -513,9 +513,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "1.414214",
-      "axm_time_ms": 3.91,
-      "c_time_ms": 3.734,
-      "ratio": 1.047
+      "axm_time_ms": 40.0,
+      "c_time_ms": 35.464,
+      "ratio": 1.128
     },
     {
       "id": "053",
@@ -523,9 +523,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "1024.000000",
-      "axm_time_ms": 4.232,
-      "c_time_ms": 4.046,
-      "ratio": 1.046
+      "axm_time_ms": 3.467,
+      "c_time_ms": 3.974,
+      "ratio": 0.872
     },
     {
       "id": "054",
@@ -533,9 +533,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "1.999998",
-      "axm_time_ms": 3.71,
-      "c_time_ms": 4.309,
-      "ratio": 0.861
+      "axm_time_ms": 3.732,
+      "c_time_ms": 4.251,
+      "ratio": 0.878
     },
     {
       "id": "055",
@@ -543,9 +543,9 @@
       "category": "numerical",
       "status": "pass",
       "output": "3.141593",
-      "axm_time_ms": 3.646,
-      "c_time_ms": 3.429,
-      "ratio": 1.063
+      "axm_time_ms": 3.509,
+      "c_time_ms": 3.668,
+      "ratio": 0.957
     },
     {
       "id": "056",
@@ -553,9 +553,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "9",
-      "axm_time_ms": 4.211,
-      "c_time_ms": 3.881,
-      "ratio": 1.085
+      "axm_time_ms": 3.926,
+      "c_time_ms": 3.923,
+      "ratio": 1.001
     },
     {
       "id": "057",
@@ -563,9 +563,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "125",
-      "axm_time_ms": 3.451,
-      "c_time_ms": 3.485,
-      "ratio": 0.99
+      "axm_time_ms": 3.53,
+      "c_time_ms": 3.621,
+      "ratio": 0.975
     },
     {
       "id": "058",
@@ -573,9 +573,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "7",
-      "axm_time_ms": 4.058,
-      "c_time_ms": 38.096,
-      "ratio": 0.107
+      "axm_time_ms": 3.603,
+      "c_time_ms": 3.762,
+      "ratio": 0.958
     },
     {
       "id": "059",
@@ -583,16 +583,16 @@
       "category": "recursion",
       "status": "pass",
       "output": "91",
-      "axm_time_ms": 4.062,
-      "c_time_ms": 33.187,
-      "ratio": 0.122
+      "axm_time_ms": 3.55,
+      "c_time_ms": 4.191,
+      "ratio": 0.847
     },
     {
       "id": "060",
       "name": "towers_of_hanoi",
       "category": "recursion",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_119792_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_119792_ThreadId(1).ll:22:23:\n  \u00e2\u201d\u201a error: '%4' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    22 |   %5 = mul nsw i64 2, %4\n  \u00e2\u201d\u201a       |                       ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_149056_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_149056_ThreadId(1).ll:22:23:\n  \u00e2\u201d\u201a error: '%4' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    22 |   %5 = mul nsw i64 2, %4\n  \u00e2\u201d\u201a       |                       ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "061",
@@ -600,9 +600,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "42",
-      "axm_time_ms": 3.706,
-      "c_time_ms": 3.418,
-      "ratio": 1.084
+      "axm_time_ms": 3.737,
+      "c_time_ms": 4.638,
+      "ratio": 0.806
     },
     {
       "id": "062",
@@ -610,9 +610,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "10",
-      "axm_time_ms": 4.22,
-      "c_time_ms": 4.023,
-      "ratio": 1.049
+      "axm_time_ms": 4.497,
+      "c_time_ms": 4.165,
+      "ratio": 1.079
     },
     {
       "id": "063",
@@ -620,9 +620,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "1024",
-      "axm_time_ms": 3.441,
-      "c_time_ms": 3.55,
-      "ratio": 0.969
+      "axm_time_ms": 3.314,
+      "c_time_ms": 3.734,
+      "ratio": 0.888
     },
     {
       "id": "064",
@@ -630,9 +630,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "59049",
-      "axm_time_ms": 4.198,
-      "c_time_ms": 3.928,
-      "ratio": 1.069
+      "axm_time_ms": 4.289,
+      "c_time_ms": 4.216,
+      "ratio": 1.017
     },
     {
       "id": "065",
@@ -640,9 +640,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "1073741824",
-      "axm_time_ms": 4.646,
-      "c_time_ms": 3.664,
-      "ratio": 1.268
+      "axm_time_ms": 4.996,
+      "c_time_ms": 4.023,
+      "ratio": 1.242
     },
     {
       "id": "066",
@@ -650,9 +650,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "5050",
-      "axm_time_ms": 3.747,
-      "c_time_ms": 4.212,
-      "ratio": 0.89
+      "axm_time_ms": 3.743,
+      "c_time_ms": 3.672,
+      "ratio": 1.019
     },
     {
       "id": "067",
@@ -660,9 +660,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "1",
-      "axm_time_ms": 4.065,
-      "c_time_ms": 4.119,
-      "ratio": 0.987
+      "axm_time_ms": 5.035,
+      "c_time_ms": 3.951,
+      "ratio": 1.275
     },
     {
       "id": "068",
@@ -670,9 +670,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "2178308",
-      "axm_time_ms": 42.42,
-      "c_time_ms": 7.989,
-      "ratio": 5.31
+      "axm_time_ms": 43.787,
+      "c_time_ms": 7.797,
+      "ratio": 5.616
     },
     {
       "id": "069",
@@ -680,9 +680,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "19",
-      "axm_time_ms": 6.586,
-      "c_time_ms": 6.266,
-      "ratio": 1.051
+      "axm_time_ms": 5.916,
+      "c_time_ms": 40.433,
+      "ratio": 0.146
     },
     {
       "id": "070",
@@ -690,9 +690,9 @@
       "category": "recursion",
       "status": "pass",
       "output": "48620",
-      "axm_time_ms": 5.24,
-      "c_time_ms": 5.979,
-      "ratio": 0.876
+      "axm_time_ms": 3.403,
+      "c_time_ms": 25.711,
+      "ratio": 0.132
     },
     {
       "id": "071",
@@ -700,16 +700,16 @@
       "category": "recursion",
       "status": "pass",
       "output": "42",
-      "axm_time_ms": 4.618,
-      "c_time_ms": 3.699,
-      "ratio": 1.249
+      "axm_time_ms": 38.747,
+      "c_time_ms": 4.009,
+      "ratio": 9.666
     },
     {
       "id": "072",
       "name": "recursive_multiply",
       "category": "recursion",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_153328_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_153328_ThreadId(1).ll:37:24:\n  \u00e2\u201d\u201a error: '%11' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    37 |   %12 = sub nsw i64 0, %11\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_103876_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_103876_ThreadId(1).ll:37:24:\n  \u00e2\u201d\u201a error: '%11' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    37 |   %12 = sub nsw i64 0, %11\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "073",
@@ -717,9 +717,9 @@
       "category": "array_loop",
       "status": "pass",
       "output": "285",
-      "axm_time_ms": 3.659,
-      "c_time_ms": 3.663,
-      "ratio": 0.999
+      "axm_time_ms": 3.411,
+      "c_time_ms": 39.45,
+      "ratio": 0.086
     },
     {
       "id": "074",
@@ -727,37 +727,37 @@
       "category": "array_loop",
       "status": "pass",
       "output": "4950",
-      "axm_time_ms": 3.374,
-      "c_time_ms": 3.804,
-      "ratio": 0.887
+      "axm_time_ms": 39.416,
+      "c_time_ms": 33.307,
+      "ratio": 1.183
     },
     {
       "id": "075",
       "name": "array_reverse_sum",
       "category": "array_loop",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_218360_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_218360_ThreadId(1).ll:48:25:\n  \u00e2\u201d\u201a error: '%15' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    48 |   %16 = sub nsw i64 99, %15\n  \u00e2\u201d\u201a       |                         ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_110992_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_110992_ThreadId(1).ll:48:25:\n  \u00e2\u201d\u201a error: '%15' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    48 |   %16 = sub nsw i64 99, %15\n  \u00e2\u201d\u201a       |                         ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "076",
       "name": "bubble_sort_sum",
       "category": "array_loop",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_107508_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_107508_ThreadId(1).ll:25:24:\n  \u00e2\u201d\u201a error: '%6' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    25 |   %7 = sub nsw i64 20, %6\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_186964_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_186964_ThreadId(1).ll:25:24:\n  \u00e2\u201d\u201a error: '%6' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    25 |   %7 = sub nsw i64 20, %6\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "077",
       "name": "selection_sort_sum",
       "category": "array_loop",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_214908_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_214908_ThreadId(1).ll:25:24:\n  \u00e2\u201d\u201a error: '%6' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    25 |   %7 = sub nsw i64 20, %6\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_98464_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_98464_ThreadId(1).ll:25:24: error:\n  \u00e2\u201d\u201a '%6' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    25 |   %7 = sub nsw i64 20, %6\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "078",
       "name": "insertion_sort_sum",
       "category": "array_loop",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_116664_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_116664_ThreadId(1).ll:25:24:\n  \u00e2\u201d\u201a error: '%6' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    25 |   %7 = sub nsw i64 20, %6\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_160684_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_160684_ThreadId(1).ll:25:24:\n  \u00e2\u201d\u201a error: '%6' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    25 |   %7 = sub nsw i64 20, %6\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "079",
@@ -765,9 +765,9 @@
       "category": "array_loop",
       "status": "pass",
       "output": "2870",
-      "axm_time_ms": 3.577,
-      "c_time_ms": 3.398,
-      "ratio": 1.053
+      "axm_time_ms": 5.119,
+      "c_time_ms": 4.57,
+      "ratio": 1.12
     },
     {
       "id": "080",
@@ -775,16 +775,16 @@
       "category": "array_loop",
       "status": "pass",
       "output": "45",
-      "axm_time_ms": 3.879,
-      "c_time_ms": 3.742,
-      "ratio": 1.037
+      "axm_time_ms": 3.351,
+      "c_time_ms": 3.519,
+      "ratio": 0.952
     },
     {
       "id": "081",
       "name": "kadane_max_subarray",
       "category": "array_loop",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_151948_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_151948_ThreadId(1).ll:13:13:\n  \u00e2\u201d\u201a error: '%1' defined with type 'i64' but expected 'i32'\n  \u00e2\u201d\u201a    13 |   store i32 %1, ptr %0\n  \u00e2\u201d\u201a       |             ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_145824_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_145824_ThreadId(1).ll:13:13:\n  \u00e2\u201d\u201a error: '%1' defined with type 'i64' but expected 'i32'\n  \u00e2\u201d\u201a    13 |   store i32 %1, ptr %0\n  \u00e2\u201d\u201a       |             ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "082",
@@ -792,9 +792,9 @@
       "category": "array_loop",
       "status": "pass",
       "output": "1229",
-      "axm_time_ms": 4.13,
-      "c_time_ms": 3.621,
-      "ratio": 1.141
+      "axm_time_ms": 3.51,
+      "c_time_ms": 36.455,
+      "ratio": 0.096
     },
     {
       "id": "083",
@@ -802,9 +802,9 @@
       "category": "array_loop",
       "status": "pass",
       "output": "12345",
-      "axm_time_ms": 3.613,
-      "c_time_ms": 3.295,
-      "ratio": 1.097
+      "axm_time_ms": 4.464,
+      "c_time_ms": 4.145,
+      "ratio": 1.077
     },
     {
       "id": "084",
@@ -812,9 +812,9 @@
       "category": "array_loop",
       "status": "pass",
       "output": "12345",
-      "axm_time_ms": 38.21,
-      "c_time_ms": 36.589,
-      "ratio": 1.044
+      "axm_time_ms": 3.824,
+      "c_time_ms": 3.794,
+      "ratio": 1.008
     },
     {
       "id": "085",
@@ -822,16 +822,16 @@
       "category": "array_loop",
       "status": "pass",
       "output": "3375",
-      "axm_time_ms": 3.594,
-      "c_time_ms": 4.975,
-      "ratio": 0.722
+      "axm_time_ms": 3.845,
+      "c_time_ms": 35.112,
+      "ratio": 0.109
     },
     {
       "id": "086",
       "name": "binary_search",
       "category": "array_loop",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_181008_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_181008_ThreadId(1).ll:41:13:\n  \u00e2\u201d\u201a error: '%10' defined with type 'i64' but expected 'i32'\n  \u00e2\u201d\u201a    41 |   store i32 %10, ptr %result\n  \u00e2\u201d\u201a       |             ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_174532_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_174532_ThreadId(1).ll:41:13:\n  \u00e2\u201d\u201a error: '%10' defined with type 'i64' but expected 'i32'\n  \u00e2\u201d\u201a    41 |   store i32 %10, ptr %result\n  \u00e2\u201d\u201a       |             ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "087",
@@ -839,9 +839,9 @@
       "category": "array_loop",
       "status": "pass",
       "output": "10",
-      "axm_time_ms": 3.635,
-      "c_time_ms": 3.629,
-      "ratio": 1.002
+      "axm_time_ms": 3.762,
+      "c_time_ms": 3.339,
+      "ratio": 1.127
     },
     {
       "id": "088",
@@ -849,16 +849,16 @@
       "category": "array_loop",
       "status": "pass",
       "output": "49.500000",
-      "axm_time_ms": 3.391,
-      "c_time_ms": 3.551,
-      "ratio": 0.955
+      "axm_time_ms": 5.311,
+      "c_time_ms": 4.497,
+      "ratio": 1.181
     },
     {
       "id": "089",
       "name": "count_inversions",
       "category": "array_loop",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_182120_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_182120_ThreadId(1).ll:25:24:\n  \u00e2\u201d\u201a error: '%6' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    25 |   %7 = sub nsw i64 20, %6\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_214856_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_214856_ThreadId(1).ll:25:24:\n  \u00e2\u201d\u201a error: '%6' defined with type 'i32' but expected 'i64'\n  \u00e2\u201d\u201a    25 |   %7 = sub nsw i64 20, %6\n  \u00e2\u201d\u201a       |                        ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "090",
@@ -866,9 +866,9 @@
       "category": "array_loop",
       "status": "pass",
       "output": "99",
-      "axm_time_ms": 26.776,
-      "c_time_ms": 3.869,
-      "ratio": 6.921
+      "axm_time_ms": 3.477,
+      "c_time_ms": 3.591,
+      "ratio": 0.968
     },
     {
       "id": "091",
@@ -876,9 +876,9 @@
       "category": "array_loop",
       "status": "pass",
       "output": "20",
-      "axm_time_ms": 3.305,
-      "c_time_ms": 3.592,
-      "ratio": 0.92
+      "axm_time_ms": 3.308,
+      "c_time_ms": 3.416,
+      "ratio": 0.968
     },
     {
       "id": "092",
@@ -886,9 +886,9 @@
       "category": "array_loop",
       "status": "pass",
       "output": "650",
-      "axm_time_ms": 5.284,
-      "c_time_ms": 3.661,
-      "ratio": 1.443
+      "axm_time_ms": 3.622,
+      "c_time_ms": 4.025,
+      "ratio": 0.9
     },
     {
       "id": "093",
@@ -896,9 +896,9 @@
       "category": "array_loop",
       "status": "pass",
       "output": "4950",
-      "axm_time_ms": 3.719,
-      "c_time_ms": 3.324,
-      "ratio": 1.119
+      "axm_time_ms": 4.33,
+      "c_time_ms": 3.888,
+      "ratio": 1.114
     },
     {
       "id": "094",
@@ -906,16 +906,16 @@
       "category": "array_loop",
       "status": "pass",
       "output": "3628800",
-      "axm_time_ms": 3.506,
-      "c_time_ms": 4.299,
-      "ratio": 0.816
+      "axm_time_ms": 5.21,
+      "c_time_ms": 3.889,
+      "ratio": 1.34
     },
     {
       "id": "095",
       "name": "two_sum_brute",
       "category": "array_loop",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_160000_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_160000_ThreadId(1).ll:35:13:\n  \u00e2\u201d\u201a error: '%10' defined with type 'i64' but expected 'i32'\n  \u00e2\u201d\u201a    35 |   store i32 %10, ptr %result\n  \u00e2\u201d\u201a       |             ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_229836_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_229836_ThreadId(1).ll:35:13:\n  \u00e2\u201d\u201a error: '%10' defined with type 'i64' but expected 'i32'\n  \u00e2\u201d\u201a    35 |   store i32 %10, ptr %result\n  \u00e2\u201d\u201a       |             ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "096",
@@ -923,9 +923,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "5",
-      "axm_time_ms": 3.901,
-      "c_time_ms": 3.663,
-      "ratio": 1.065
+      "axm_time_ms": 3.453,
+      "c_time_ms": 3.605,
+      "ratio": 0.958
     },
     {
       "id": "097",
@@ -933,9 +933,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "9030",
-      "axm_time_ms": 4.082,
-      "c_time_ms": 3.361,
-      "ratio": 1.214
+      "axm_time_ms": 4.582,
+      "c_time_ms": 3.605,
+      "ratio": 1.271
     },
     {
       "id": "098",
@@ -943,9 +943,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "4",
-      "axm_time_ms": 4.432,
-      "c_time_ms": 4.052,
-      "ratio": 1.094
+      "axm_time_ms": 37.655,
+      "c_time_ms": 39.515,
+      "ratio": 0.953
     },
     {
       "id": "099",
@@ -953,9 +953,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "1.080031",
-      "axm_time_ms": 3.583,
-      "c_time_ms": 3.478,
-      "ratio": 1.03
+      "axm_time_ms": 3.946,
+      "c_time_ms": 4.083,
+      "ratio": 0.966
     },
     {
       "id": "100",
@@ -963,9 +963,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "3.142956",
-      "axm_time_ms": 38.405,
-      "c_time_ms": 5.871,
-      "ratio": 6.542
+      "axm_time_ms": 6.955,
+      "c_time_ms": 6.685,
+      "ratio": 1.04
     },
     {
       "id": "101",
@@ -973,9 +973,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "-4.397957",
-      "axm_time_ms": 3.704,
-      "c_time_ms": 3.574,
-      "ratio": 1.036
+      "axm_time_ms": 3.65,
+      "c_time_ms": 4.005,
+      "ratio": 0.911
     },
     {
       "id": "102",
@@ -983,9 +983,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "0",
-      "axm_time_ms": 3.377,
-      "c_time_ms": 3.962,
-      "ratio": 0.852
+      "axm_time_ms": 3.406,
+      "c_time_ms": 3.553,
+      "ratio": 0.958
     },
     {
       "id": "103",
@@ -993,16 +993,16 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "12.668147",
-      "axm_time_ms": 3.941,
-      "c_time_ms": 4.439,
-      "ratio": 0.888
+      "axm_time_ms": 3.804,
+      "c_time_ms": 4.233,
+      "ratio": 0.899
     },
     {
       "id": "104",
       "name": "sum_of_abs",
       "category": "pure_compute",
       "status": "compile_fail_axm",
-      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_172048_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_172048_ThreadId(1).ll:13:13:\n  \u00e2\u201d\u201a error: '%0' defined with type 'i64' but expected 'i32'\n  \u00e2\u201d\u201a    13 |   store i32 %0, ptr %i.1\n  \u00e2\u201d\u201a       |             ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
+      "error": "note: LLVM IR written to C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_190068_ThreadId(1).ll for debugging\nError:   \u00c3\u2014 clang exited with exit code: 1:\n  \u00e2\u201d\u201a C:\\Users\\rudyb\\AppData\\Local\\Temp\\axiom_190068_ThreadId(1).ll:13:13:\n  \u00e2\u201d\u201a error: '%0' defined with type 'i64' but expected 'i32'\n  \u00e2\u201d\u201a    13 |   store i32 %0, ptr %i.1\n  \u00e2\u201d\u201a       |             ^\n  \u00e2\u201d\u201a 1 error generated.\n  \u00e2\u201d\u201a"
     },
     {
       "id": "105",
@@ -1010,9 +1010,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "7",
-      "axm_time_ms": 3.446,
-      "c_time_ms": 4.471,
-      "ratio": 0.771
+      "axm_time_ms": 3.458,
+      "c_time_ms": 3.363,
+      "ratio": 1.028
     },
     {
       "id": "106",
@@ -1020,9 +1020,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "1093731792",
-      "axm_time_ms": 3.593,
-      "c_time_ms": 33.262,
-      "ratio": 0.108
+      "axm_time_ms": 3.987,
+      "c_time_ms": 3.408,
+      "ratio": 1.17
     },
     {
       "id": "107",
@@ -1030,9 +1030,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "2873",
-      "axm_time_ms": 3.51,
-      "c_time_ms": 4.18,
-      "ratio": 0.84
+      "axm_time_ms": 5.009,
+      "c_time_ms": 3.797,
+      "ratio": 1.319
     },
     {
       "id": "108",
@@ -1040,9 +1040,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "3.000000",
-      "axm_time_ms": 4.122,
-      "c_time_ms": 4.101,
-      "ratio": 1.005
+      "axm_time_ms": 3.515,
+      "c_time_ms": 3.591,
+      "ratio": 0.979
     },
     {
       "id": "109",
@@ -1050,9 +1050,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "5.000000",
-      "axm_time_ms": 3.409,
-      "c_time_ms": 3.439,
-      "ratio": 0.991
+      "axm_time_ms": 32.893,
+      "c_time_ms": 4.231,
+      "ratio": 7.774
     },
     {
       "id": "110",
@@ -1060,9 +1060,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "126998.883021",
-      "axm_time_ms": 3.663,
-      "c_time_ms": 3.473,
-      "ratio": 1.055
+      "axm_time_ms": 4.036,
+      "c_time_ms": 3.394,
+      "ratio": 1.189
     },
     {
       "id": "111",
@@ -1070,9 +1070,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "42",
-      "axm_time_ms": 4.203,
-      "c_time_ms": 3.436,
-      "ratio": 1.223
+      "axm_time_ms": 4.107,
+      "c_time_ms": 34.137,
+      "ratio": 0.12
     },
     {
       "id": "112",
@@ -1080,9 +1080,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "42",
-      "axm_time_ms": 3.605,
-      "c_time_ms": 3.417,
-      "ratio": 1.055
+      "axm_time_ms": 3.615,
+      "c_time_ms": 3.564,
+      "ratio": 1.014
     },
     {
       "id": "113",
@@ -1090,9 +1090,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "330",
-      "axm_time_ms": 4.164,
-      "c_time_ms": 4.265,
-      "ratio": 0.976
+      "axm_time_ms": 3.573,
+      "c_time_ms": 3.728,
+      "ratio": 0.958
     },
     {
       "id": "114",
@@ -1100,9 +1100,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "2.593742",
-      "axm_time_ms": 29.315,
-      "c_time_ms": 3.592,
-      "ratio": 8.16
+      "axm_time_ms": 3.657,
+      "c_time_ms": 3.441,
+      "ratio": 1.063
     },
     {
       "id": "115",
@@ -1110,9 +1110,9 @@
       "category": "pure_compute",
       "status": "pass",
       "output": "0.693147",
-      "axm_time_ms": 4.27,
-      "c_time_ms": 4.452,
-      "ratio": 0.959
+      "axm_time_ms": 4.265,
+      "c_time_ms": 4.376,
+      "ratio": 0.975
     }
   ]
 }

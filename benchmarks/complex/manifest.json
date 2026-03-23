@@ -1,0 +1,277 @@
+{
+  "suite": "complex_benchmarks",
+  "version": "1.0.0",
+  "description": "30 computationally intensive benchmark programs (0.5-10s each) with matching .axm and .c implementations",
+  "benchmarks": [
+    {
+      "id": "001",
+      "name": "matmul_256",
+      "category": "linear_algebra",
+      "description": "256x256 dense matrix multiplication using flat arrays",
+      "expected_time_seconds": "1-3",
+      "axm_file": "001_matmul_256.axm",
+      "c_file": "001_matmul_256.c"
+    },
+    {
+      "id": "002",
+      "name": "lu_decomposition",
+      "category": "linear_algebra",
+      "description": "LU decomposition of 200x200 matrix via Doolittle algorithm",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "002_lu_decomposition.axm",
+      "c_file": "002_lu_decomposition.c"
+    },
+    {
+      "id": "003",
+      "name": "gauss_elimination",
+      "category": "linear_algebra",
+      "description": "Gaussian elimination with partial pivoting on 300x301 augmented matrix",
+      "expected_time_seconds": "1-3",
+      "axm_file": "003_gauss_elimination.axm",
+      "c_file": "003_gauss_elimination.c"
+    },
+    {
+      "id": "004",
+      "name": "matrix_inverse_64",
+      "category": "linear_algebra",
+      "description": "64x64 matrix inversion via Gauss-Jordan elimination",
+      "expected_time_seconds": "0.5-1",
+      "axm_file": "004_matrix_inverse_64.axm",
+      "c_file": "004_matrix_inverse_64.c"
+    },
+    {
+      "id": "005",
+      "name": "nbody_3d_1000",
+      "category": "simulation",
+      "description": "3D N-body gravitational simulation: 100 bodies, 1000 timesteps",
+      "expected_time_seconds": "1-3",
+      "axm_file": "005_nbody_3d_1000.axm",
+      "c_file": "005_nbody_3d_1000.c"
+    },
+    {
+      "id": "006",
+      "name": "verlet_spring_system",
+      "category": "simulation",
+      "description": "Verlet integration for 500 spring-connected particles, 5000 steps",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "006_verlet_spring_system.axm",
+      "c_file": "006_verlet_spring_system.c"
+    },
+    {
+      "id": "007",
+      "name": "heat_equation_1d",
+      "category": "simulation",
+      "description": "1D heat diffusion equation, 10000 points, 5000 timesteps (FTCS)",
+      "expected_time_seconds": "1-3",
+      "axm_file": "007_heat_equation_1d.axm",
+      "c_file": "007_heat_equation_1d.c"
+    },
+    {
+      "id": "008",
+      "name": "wave_equation_1d",
+      "category": "simulation",
+      "description": "1D wave equation, 10000 points, 5000 timesteps",
+      "expected_time_seconds": "1-3",
+      "axm_file": "008_wave_equation_1d.axm",
+      "c_file": "008_wave_equation_1d.c"
+    },
+    {
+      "id": "009",
+      "name": "game_of_life",
+      "category": "simulation",
+      "description": "Conway's Game of Life on 200x200 toroidal grid, 500 generations",
+      "expected_time_seconds": "2-5",
+      "axm_file": "009_game_of_life.axm",
+      "c_file": "009_game_of_life.c"
+    },
+    {
+      "id": "010",
+      "name": "fir_filter",
+      "category": "signal_processing",
+      "description": "64-tap FIR filter applied to 100000 input samples",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "010_fir_filter.axm",
+      "c_file": "010_fir_filter.c"
+    },
+    {
+      "id": "011",
+      "name": "convolution_1d",
+      "category": "signal_processing",
+      "description": "1D convolution of 10000-element signal with 100-element kernel",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "011_convolution_1d.axm",
+      "c_file": "011_convolution_1d.c"
+    },
+    {
+      "id": "012",
+      "name": "dft_naive",
+      "category": "signal_processing",
+      "description": "Naive O(n^2) Discrete Fourier Transform on 2048 points",
+      "expected_time_seconds": "2-8",
+      "axm_file": "012_dft_naive.axm",
+      "c_file": "012_dft_naive.c"
+    },
+    {
+      "id": "013",
+      "name": "quicksort_100k",
+      "category": "sorting",
+      "description": "Iterative quicksort on 100000 LCG-generated elements",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "013_quicksort_100k.axm",
+      "c_file": "013_quicksort_100k.c"
+    },
+    {
+      "id": "014",
+      "name": "mergesort_100k",
+      "category": "sorting",
+      "description": "Bottom-up iterative mergesort on 100000 elements",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "014_mergesort_100k.axm",
+      "c_file": "014_mergesort_100k.c"
+    },
+    {
+      "id": "015",
+      "name": "heapsort_100k",
+      "category": "sorting",
+      "description": "Heapsort on 100000 LCG-generated elements",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "015_heapsort_100k.axm",
+      "c_file": "015_heapsort_100k.c"
+    },
+    {
+      "id": "016",
+      "name": "prime_sieve_10m",
+      "category": "number_theory",
+      "description": "Sieve of Eratosthenes to 1M, repeated 10 times",
+      "expected_time_seconds": "1-3",
+      "axm_file": "016_prime_sieve_10m.axm",
+      "c_file": "016_prime_sieve_10m.c"
+    },
+    {
+      "id": "017",
+      "name": "prime_factorization_heavy",
+      "category": "number_theory",
+      "description": "Trial division factorization of 1000 large numbers",
+      "expected_time_seconds": "0.5-3",
+      "axm_file": "017_prime_factorization_heavy.axm",
+      "c_file": "017_prime_factorization_heavy.c"
+    },
+    {
+      "id": "018",
+      "name": "euler_totient_sum_1m",
+      "category": "number_theory",
+      "description": "Sieve-based Euler totient sum for 1 to 1000000",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "018_euler_totient_sum_1m.axm",
+      "c_file": "018_euler_totient_sum_1m.c"
+    },
+    {
+      "id": "019",
+      "name": "collatz_max_chain",
+      "category": "number_theory",
+      "description": "Longest Collatz chain for starting values 1 to 1000000",
+      "expected_time_seconds": "1-5",
+      "axm_file": "019_collatz_max_chain.axm",
+      "c_file": "019_collatz_max_chain.c"
+    },
+    {
+      "id": "020",
+      "name": "pi_chudnovsky_terms",
+      "category": "numerical_methods",
+      "description": "Pi via Chudnovsky series (15 terms f64), repeated 500000 times",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "020_pi_chudnovsky_terms.axm",
+      "c_file": "020_pi_chudnovsky_terms.c"
+    },
+    {
+      "id": "021",
+      "name": "ode_rk4",
+      "category": "numerical_methods",
+      "description": "4th-order Runge-Kutta ODE solver, 1M steps",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "021_ode_rk4.axm",
+      "c_file": "021_ode_rk4.c"
+    },
+    {
+      "id": "022",
+      "name": "monte_carlo_pi_10m",
+      "category": "numerical_methods",
+      "description": "Monte Carlo Pi estimation with 10 million deterministic points",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "022_monte_carlo_pi_10m.axm",
+      "c_file": "022_monte_carlo_pi_10m.c"
+    },
+    {
+      "id": "023",
+      "name": "numerical_integration_adaptive",
+      "category": "numerical_methods",
+      "description": "Composite Simpson's rule on oscillatory function, 500000 panels",
+      "expected_time_seconds": "0.5-3",
+      "axm_file": "023_numerical_integration_adaptive.axm",
+      "c_file": "023_numerical_integration_adaptive.c"
+    },
+    {
+      "id": "024",
+      "name": "sha256_inspired",
+      "category": "cryptography",
+      "description": "SHA-256-inspired hash with integer arithmetic, 100000 blocks",
+      "expected_time_seconds": "1-5",
+      "axm_file": "024_sha256_inspired.axm",
+      "c_file": "024_sha256_inspired.c"
+    },
+    {
+      "id": "025",
+      "name": "lcg_period_test",
+      "category": "cryptography",
+      "description": "10M LCG random numbers with statistical analysis (mean, variance, chi-square)",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "025_lcg_period_test.axm",
+      "c_file": "025_lcg_period_test.c"
+    },
+    {
+      "id": "026",
+      "name": "jacobi_iteration",
+      "category": "stencil_grid",
+      "description": "Jacobi iteration on 500x500 grid, 100 iterations (Laplace equation)",
+      "expected_time_seconds": "2-6",
+      "axm_file": "026_jacobi_iteration.axm",
+      "c_file": "026_jacobi_iteration.c"
+    },
+    {
+      "id": "027",
+      "name": "stencil_5point",
+      "category": "stencil_grid",
+      "description": "5-point stencil on 1000x1000 grid, 50 iterations",
+      "expected_time_seconds": "2-8",
+      "axm_file": "027_stencil_5point.axm",
+      "c_file": "027_stencil_5point.c"
+    },
+    {
+      "id": "028",
+      "name": "blur_box_filter",
+      "category": "stencil_grid",
+      "description": "Separable 5-wide box blur on 500x500 image, 10 passes",
+      "expected_time_seconds": "1-3",
+      "axm_file": "028_blur_box_filter.axm",
+      "c_file": "028_blur_box_filter.c"
+    },
+    {
+      "id": "029",
+      "name": "floyd_warshall_200",
+      "category": "graph",
+      "description": "Floyd-Warshall all-pairs shortest path on 200-node graph",
+      "expected_time_seconds": "1-3",
+      "axm_file": "029_floyd_warshall_200.axm",
+      "c_file": "029_floyd_warshall_200.c"
+    },
+    {
+      "id": "030",
+      "name": "matrix_chain_order",
+      "category": "graph",
+      "description": "Matrix chain multiplication optimization via DP, n=200",
+      "expected_time_seconds": "0.5-2",
+      "axm_file": "030_matrix_chain_order.axm",
+      "c_file": "030_matrix_chain_order.c"
+    }
+  ]
+}

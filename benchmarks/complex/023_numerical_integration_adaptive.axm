@@ -1,0 +1,40 @@
+@module numerical_integration_adaptive;
+@intent("Adaptive Simpson's rule on a difficult oscillatory function, ~1M evaluations");
+
+@pure
+fn func(x: f64) -> f64 {
+    // f(x) = sin(1/x) * x^2 approximated via Taylor + polynomial
+    // Actually compute x^2 * sin_approx(100*x) for oscillation
+    let arg: f64 = 100.0 * x;
+    let pi2: f64 = 6.28318530717959;
+    let a: f64 = arg - to_f64(truncate(arg / pi2)) * pi2;
+    // sin via Taylor
+    let a2: f64 = a * a;
+    let s: f64 = a - a * a2 / 6.0 + a * a2 * a2 / 120.0 - a * a2 * a2 * a2 / 5040.0 + a * a2 * a2 * a2 * a2 / 362880.0;
+    return x * x * s;
+}
+
+@pure
+fn simpson(a: f64, b: f64) -> f64 {
+    let mid: f64 = (a + b) / 2.0;
+    return (b - a) / 6.0 * (func(a) + 4.0 * func(mid) + func(b));
+}
+
+fn main() -> i32 {
+    // Composite Simpson's with very fine subdivision
+    let a: f64 = 0.01;
+    let b: f64 = 10.0;
+    let n: i32 = 500000;
+    let h: f64 = (b - a) / to_f64(n);
+
+    let total: f64 = 0.0;
+
+    for i: i32 in range(0, n) {
+        let x0: f64 = a + to_f64(i) * h;
+        let x1: f64 = x0 + h;
+        total = total + simpson(x0, x1);
+    }
+
+    print_f64(total);
+    return 0;
+}

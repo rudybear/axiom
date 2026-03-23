@@ -1,0 +1,76 @@
+@module fir_filter;
+@intent("64-tap FIR filter applied to 100000 input samples");
+
+fn main() -> i32 {
+    let n_taps: i32 = 64;
+    let n_samples: i32 = 100000;
+
+    let coeffs: array[f64, 64] = array_zeros[f64, 64];
+    let input: array[f64, 100000] = array_zeros[f64, 100000];
+    let output: array[f64, 100000] = array_zeros[f64, 100000];
+
+    // Initialize filter coefficients (low-pass-like sinc windowed)
+    for i: i32 in range(0, 64) {
+        let x: f64 = to_f64(i) - 31.5;
+        if abs_f64(x) < 0.001 {
+            coeffs[i] = 1.0;
+        } else {
+            let pi_x: f64 = 3.14159265358979 * x / 8.0;
+            // sin approximation via Taylor series
+            let s: f64 = pi_x;
+            let term: f64 = pi_x;
+            term = term * pi_x * pi_x / 6.0 * (0.0 - 1.0);
+            s = s + term;
+            term = term * pi_x * pi_x / 20.0 * (0.0 - 1.0);
+            s = s + term;
+            term = term * pi_x * pi_x / 42.0 * (0.0 - 1.0);
+            s = s + term;
+            term = term * pi_x * pi_x / 72.0 * (0.0 - 1.0);
+            s = s + term;
+            coeffs[i] = s / pi_x;
+        }
+        // Hamming window
+        let w: f64 = 0.54 - 0.46 * pow(2.718281828, 0.0) * (1.0 - 1.0);
+        // Actually use: w = 0.54 - 0.46 * cos(2*pi*i/63)
+        let angle: f64 = 2.0 * 3.14159265358979 * to_f64(i) / 63.0;
+        // cos approx
+        let ca: f64 = 1.0;
+        let a2: f64 = angle * angle;
+        ca = ca - a2 / 2.0;
+        ca = ca + a2 * a2 / 24.0;
+        ca = ca - a2 * a2 * a2 / 720.0;
+        ca = ca + a2 * a2 * a2 * a2 / 40320.0;
+        w = 0.54 - 0.46 * ca;
+        coeffs[i] = coeffs[i] * w;
+    }
+
+    // Generate input signal (sum of sinusoids via LCG)
+    let seed: i64 = 54321;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+    for i: i32 in range(0, 100000) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        input[i] = to_f64_i64(seed) / to_f64_i64(lcg_m) * 2.0 - 1.0;
+    }
+
+    // Apply FIR filter
+    for i: i32 in range(0, 100000) {
+        let acc: f64 = 0.0;
+        for j: i32 in range(0, 64) {
+            let idx: i32 = i - j;
+            if idx >= 0 {
+                acc = acc + coeffs[j] * input[idx];
+            }
+        }
+        output[i] = acc;
+    }
+
+    // Checksum
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, 100000) {
+        checksum = checksum + output[i];
+    }
+    print_f64(checksum);
+    return 0;
+}

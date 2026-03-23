@@ -1,0 +1,49 @@
+@module jacobi_iteration;
+@intent("Jacobi iteration on 500x500 grid, 100 iterations, solving Laplace equation");
+
+fn main() -> i32 {
+    let n: i32 = 500;
+    let iters: i32 = 100;
+    let grid: array[f64, 250000] = array_zeros[f64, 250000];
+    let grid_new: array[f64, 250000] = array_zeros[f64, 250000];
+
+    // Boundary conditions: top edge = 100, rest = 0
+    for j: i32 in range(0, 500) {
+        grid[0 * 500 + j] = 100.0;
+        grid_new[0 * 500 + j] = 100.0;
+    }
+    // Left edge linearly decreasing
+    for i: i32 in range(0, 500) {
+        let val: f64 = 100.0 * (1.0 - to_f64(i) / 499.0);
+        grid[i * 500 + 0] = val;
+        grid_new[i * 500 + 0] = val;
+    }
+
+    // Jacobi iteration
+    for iter: i32 in range(0, iters) {
+        for i: i32 in range(1, 499) {
+            for j: i32 in range(1, 499) {
+                grid_new[i * 500 + j] = 0.25 * (
+                    grid[(i - 1) * 500 + j] +
+                    grid[(i + 1) * 500 + j] +
+                    grid[i * 500 + (j - 1)] +
+                    grid[i * 500 + (j + 1)]
+                );
+            }
+        }
+        // Copy back
+        for i: i32 in range(1, 499) {
+            for j: i32 in range(1, 499) {
+                grid[i * 500 + j] = grid_new[i * 500 + j];
+            }
+        }
+    }
+
+    // Checksum: sum of grid
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, 250000) {
+        checksum = checksum + grid[i];
+    }
+    print_f64(checksum);
+    return 0;
+}

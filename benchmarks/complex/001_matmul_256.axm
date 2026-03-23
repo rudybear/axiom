@@ -1,0 +1,37 @@
+@module matmul_256;
+@intent("256x256 dense matrix multiplication using flat arrays");
+
+fn main() -> i32 {
+    let n: i32 = 256;
+    let a: array[f64, 65536] = array_zeros[f64, 65536];
+    let b: array[f64, 65536] = array_zeros[f64, 65536];
+    let c: array[f64, 65536] = array_zeros[f64, 65536];
+
+    // Initialize matrices with deterministic values
+    for i: i32 in range(0, 256) {
+        for j: i32 in range(0, 256) {
+            let idx: i32 = i * 256 + j;
+            a[idx] = to_f64((i * 7 + j * 13 + 3) % 100) / 100.0;
+            b[idx] = to_f64((i * 11 + j * 5 + 7) % 100) / 100.0;
+        }
+    }
+
+    // Matrix multiply: C = A * B
+    for i: i32 in range(0, 256) {
+        for j: i32 in range(0, 256) {
+            let sum: f64 = 0.0;
+            for k: i32 in range(0, 256) {
+                sum = sum + a[i * 256 + k] * b[k * 256 + j];
+            }
+            c[i * 256 + j] = sum;
+        }
+    }
+
+    // Checksum: sum of all elements
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, 65536) {
+        checksum = checksum + c[i];
+    }
+    print_f64(checksum);
+    return 0;
+}

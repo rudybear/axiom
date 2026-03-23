@@ -1,0 +1,86 @@
+@module verlet_spring_system;
+@intent("Verlet integration for 500 particles connected by springs, 5000 steps");
+
+fn main() -> i32 {
+    let np: i32 = 500;
+    let steps: i32 = 5000;
+    let dt: f64 = 0.0005;
+    let k_spring: f64 = 100.0;
+    let rest_len: f64 = 0.1;
+    let damping: f64 = 0.999;
+
+    let x: array[f64, 500] = array_zeros[f64, 500];
+    let y: array[f64, 500] = array_zeros[f64, 500];
+    let old_x: array[f64, 500] = array_zeros[f64, 500];
+    let old_y: array[f64, 500] = array_zeros[f64, 500];
+    let fx: array[f64, 500] = array_zeros[f64, 500];
+    let fy: array[f64, 500] = array_zeros[f64, 500];
+
+    // Initialize particles in a line
+    for i: i32 in range(0, 500) {
+        x[i] = to_f64(i) * rest_len;
+        y[i] = to_f64(i % 20) * 0.01;
+        old_x[i] = x[i];
+        old_y[i] = y[i];
+    }
+
+    // Verlet integration
+    for step: i32 in range(0, steps) {
+        // Reset forces, apply gravity
+        for i: i32 in range(0, 500) {
+            fx[i] = 0.0;
+            fy[i] = 0.0 - 9.81;
+        }
+
+        // Spring forces between consecutive particles
+        for i: i32 in range(0, 499) {
+            let dx: f64 = x[i + 1] - x[i];
+            let dy: f64 = y[i + 1] - y[i];
+            let dist: f64 = sqrt(dx * dx + dy * dy + 0.0001);
+            let stretch: f64 = dist - rest_len;
+            let force: f64 = k_spring * stretch / dist;
+            let ffx: f64 = force * dx;
+            let ffy: f64 = force * dy;
+            fx[i] = fx[i] + ffx;
+            fy[i] = fy[i] + ffy;
+            fx[i + 1] = fx[i + 1] - ffx;
+            fy[i + 1] = fy[i + 1] - ffy;
+        }
+
+        // Also connect every 10th particle for stiffness
+        let i2: i32 = 0;
+        while i2 + 10 < 500 {
+            let dx: f64 = x[i2 + 10] - x[i2];
+            let dy: f64 = y[i2 + 10] - y[i2];
+            let dist: f64 = sqrt(dx * dx + dy * dy + 0.0001);
+            let rl: f64 = rest_len * 10.0;
+            let stretch: f64 = dist - rl;
+            let force: f64 = k_spring * 0.5 * stretch / dist;
+            let ffx: f64 = force * dx;
+            let ffy: f64 = force * dy;
+            fx[i2] = fx[i2] + ffx;
+            fy[i2] = fy[i2] + ffy;
+            fx[i2 + 10] = fx[i2 + 10] - ffx;
+            fy[i2 + 10] = fy[i2 + 10] - ffy;
+            i2 = i2 + 10;
+        }
+
+        // Verlet integration: x_new = 2*x - x_old + a*dt^2
+        for i3: i32 in range(1, 500) {
+            let new_x: f64 = 2.0 * x[i3] - old_x[i3] + fx[i3] * dt * dt;
+            let new_y: f64 = 2.0 * y[i3] - old_y[i3] + fy[i3] * dt * dt;
+            old_x[i3] = x[i3];
+            old_y[i3] = y[i3];
+            x[i3] = new_x * damping;
+            y[i3] = new_y * damping;
+        }
+    }
+
+    // Checksum
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, 500) {
+        checksum = checksum + x[i] + y[i];
+    }
+    print_f64(checksum);
+    return 0;
+}

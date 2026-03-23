@@ -1,0 +1,73 @@
+@module heapsort_100k;
+@intent("Heapsort on 100000 elements");
+
+@pure
+fn sift_down(arr: array[i32, 100000], start: i32, end_idx: i32) -> i32 {
+    let root: i32 = start;
+    let swaps: i32 = 0;
+    while 2 * root + 1 <= end_idx {
+        let child: i32 = 2 * root + 1;
+        let swap_idx: i32 = root;
+        if arr[swap_idx] < arr[child] {
+            swap_idx = child;
+        }
+        if child + 1 <= end_idx and arr[swap_idx] < arr[child + 1] {
+            swap_idx = child + 1;
+        }
+        if swap_idx == root {
+            return swaps;
+        }
+        let tmp: i32 = arr[root];
+        arr[root] = arr[swap_idx];
+        arr[swap_idx] = tmp;
+        root = swap_idx;
+        swaps = swaps + 1;
+    }
+    return swaps;
+}
+
+fn main() -> i32 {
+    let n: i32 = 100000;
+    let arr: array[i32, 100000] = array_zeros[i32, 100000];
+
+    // Fill with LCG
+    let seed: i64 = 67890;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+    for i: i32 in range(0, 100000) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        arr[i] = narrow(seed % 1000000);
+    }
+
+    // Build max heap
+    let start: i32 = (n - 2) / 2;
+    while start >= 0 {
+        let dummy: i32 = sift_down(arr, start, n - 1);
+        start = start - 1;
+    }
+
+    // Sort
+    let end_idx: i32 = n - 1;
+    while end_idx > 0 {
+        let tmp: i32 = arr[0];
+        arr[0] = arr[end_idx];
+        arr[end_idx] = tmp;
+        end_idx = end_idx - 1;
+        let dummy: i32 = sift_down(arr, 0, end_idx);
+    }
+
+    // Checksum
+    let checksum: i64 = 0;
+    for i: i32 in range(0, 100) {
+        checksum = checksum + widen(arr[i]);
+    }
+    for i: i32 in range(99900, 100000) {
+        checksum = checksum + widen(arr[i]);
+    }
+    for i: i32 in range(49950, 50050) {
+        checksum = checksum + widen(arr[i]);
+    }
+    print_i64(checksum);
+    return 0;
+}

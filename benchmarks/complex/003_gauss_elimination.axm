@@ -1,0 +1,77 @@
+@module gauss_elimination;
+@intent("Gaussian elimination with partial pivoting on 300x301 augmented matrix");
+
+fn main() -> i32 {
+    let n: i32 = 300;
+    // 300x301 augmented matrix (300 equations, 300 unknowns + RHS)
+    let a: array[f64, 90300] = array_zeros[f64, 90300];
+
+    // Initialize augmented matrix deterministically
+    for i: i32 in range(0, 300) {
+        for j: i32 in range(0, 301) {
+            let idx: i32 = i * 301 + j;
+            a[idx] = to_f64((i * 31 + j * 17 + 11) % 300) / 100.0;
+            if i == j {
+                a[idx] = a[idx] + 300.0;
+            }
+        }
+    }
+
+    // Forward elimination with partial pivoting
+    for col: i32 in range(0, 300) {
+        // Find pivot
+        let max_val: f64 = abs_f64(a[col * 301 + col]);
+        let max_row: i32 = col;
+        let r: i32 = col + 1;
+        while r < 300 {
+            let v: f64 = abs_f64(a[r * 301 + col]);
+            if v > max_val {
+                max_val = v;
+                max_row = r;
+            }
+            r = r + 1;
+        }
+
+        // Swap rows
+        if max_row != col {
+            for j: i32 in range(0, 301) {
+                let tmp: f64 = a[col * 301 + j];
+                a[col * 301 + j] = a[max_row * 301 + j];
+                a[max_row * 301 + j] = tmp;
+            }
+        }
+
+        // Eliminate below
+        let pivot: f64 = a[col * 301 + col];
+        let r2: i32 = col + 1;
+        while r2 < 300 {
+            let factor: f64 = a[r2 * 301 + col] / pivot;
+            for j: i32 in range(col, 301) {
+                a[r2 * 301 + j] = a[r2 * 301 + j] - factor * a[col * 301 + j];
+            }
+            r2 = r2 + 1;
+        }
+    }
+
+    // Back substitution
+    let x: array[f64, 300] = array_zeros[f64, 300];
+    let i: i32 = 299;
+    while i >= 0 {
+        let sum: f64 = a[i * 301 + 300];
+        let j: i32 = i + 1;
+        while j < 300 {
+            sum = sum - a[i * 301 + j] * x[j];
+            j = j + 1;
+        }
+        x[i] = sum / a[i * 301 + i];
+        i = i - 1;
+    }
+
+    // Checksum: sum of solution
+    let checksum: f64 = 0.0;
+    for i2: i32 in range(0, 300) {
+        checksum = checksum + x[i2];
+    }
+    print_f64(checksum);
+    return 0;
+}

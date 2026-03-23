@@ -1,0 +1,42 @@
+@module wave_equation_1d;
+@intent("1D wave equation on 10000 points, 5000 timesteps, explicit scheme");
+
+fn main() -> i32 {
+    let n: i32 = 10000;
+    let steps: i32 = 5000;
+    let c2: f64 = 0.2;
+
+    let u_prev: array[f64, 10000] = array_zeros[f64, 10000];
+    let u_curr: array[f64, 10000] = array_zeros[f64, 10000];
+    let u_next: array[f64, 10000] = array_zeros[f64, 10000];
+
+    // Initial condition: Gaussian pulse
+    for i: i32 in range(0, 10000) {
+        let x: f64 = to_f64(i) / 10000.0;
+        let center: f64 = x - 0.5;
+        u_curr[i] = pow(2.718281828, 0.0 - 500.0 * center * center);
+        u_prev[i] = u_curr[i];
+    }
+
+    // Time stepping
+    for step: i32 in range(0, steps) {
+        u_next[0] = 0.0;
+        u_next[9999] = 0.0;
+        for i: i32 in range(1, 9999) {
+            u_next[i] = 2.0 * u_curr[i] - u_prev[i] + c2 * (u_curr[i - 1] - 2.0 * u_curr[i] + u_curr[i + 1]);
+        }
+        // Rotate buffers
+        for i: i32 in range(0, 10000) {
+            u_prev[i] = u_curr[i];
+            u_curr[i] = u_next[i];
+        }
+    }
+
+    // Checksum: sum of absolute values
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, 10000) {
+        checksum = checksum + abs_f64(u_curr[i]);
+    }
+    print_f64(checksum);
+    return 0;
+}

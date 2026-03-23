@@ -1,0 +1,58 @@
+@module prime_factorization_heavy;
+@intent("Factorize 1000 large numbers via trial division");
+
+@pure
+fn count_factors(n: i64) -> i32 {
+    let x: i64 = n;
+    let count: i32 = 0;
+
+    // Factor out 2s
+    while x % 2 == 0 {
+        count = count + 1;
+        x = x / 2;
+    }
+
+    // Odd factors
+    let i: i64 = 3;
+    while i * i <= x {
+        while x % i == 0 {
+            count = count + 1;
+            x = x / i;
+        }
+        i = i + 2;
+    }
+
+    if x > 1 {
+        count = count + 1;
+    }
+    return count;
+}
+
+fn main() -> i32 {
+    let total_factors: i32 = 0;
+    let seed: i64 = 999999937;
+    let lcg_a: i64 = 6364136223846793005;
+    let lcg_c: i64 = 1442695040888963407;
+
+    for i: i32 in range(0, 1000) {
+        // Generate large numbers near 10^14
+        seed = seed * 1103515245 + 12345;
+        let hi: i64 = (seed / 65536) % 1000000;
+        if hi < 0 {
+            hi = 0 - hi;
+        }
+        seed = seed * 1103515245 + 12345;
+        let lo: i64 = (seed / 65536) % 1000000;
+        if lo < 0 {
+            lo = 0 - lo;
+        }
+        let num: i64 = hi * 1000000 + lo + 2;
+        if num < 2 {
+            num = 2;
+        }
+        total_factors = total_factors + count_factors(num);
+    }
+
+    print_i32(total_factors);
+    return 0;
+}

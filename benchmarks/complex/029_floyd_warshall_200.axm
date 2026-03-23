@@ -1,0 +1,64 @@
+@module floyd_warshall_200;
+@intent("Floyd-Warshall all-pairs shortest path on 200-node graph");
+
+fn main() -> i32 {
+    let n: i32 = 200;
+    let inf: i32 = 999999;
+    let dist: array[i32, 40000] = array_zeros[i32, 40000];
+
+    // Initialize distance matrix
+    for i: i32 in range(0, 200) {
+        for j: i32 in range(0, 200) {
+            if i == j {
+                dist[i * 200 + j] = 0;
+            } else {
+                dist[i * 200 + j] = inf;
+            }
+        }
+    }
+
+    // Add edges deterministically
+    let seed: i64 = 777;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Dense graph: ~10000 edges
+    for e: i32 in range(0, 10000) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let u: i32 = narrow(seed % 200);
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let v: i32 = narrow(seed % 200);
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let w: i32 = narrow(seed % 100) + 1;
+        if u != v {
+            if w < dist[u * 200 + v] {
+                dist[u * 200 + v] = w;
+            }
+        }
+    }
+
+    // Floyd-Warshall
+    for k: i32 in range(0, 200) {
+        for i: i32 in range(0, 200) {
+            for j: i32 in range(0, 200) {
+                let via_k: i32 = dist[i * 200 + k] + dist[k * 200 + j];
+                if via_k < dist[i * 200 + j] {
+                    dist[i * 200 + j] = via_k;
+                }
+            }
+        }
+    }
+
+    // Checksum: sum of all finite distances
+    let checksum: i64 = 0;
+    for i: i32 in range(0, 200) {
+        for j: i32 in range(0, 200) {
+            if dist[i * 200 + j] < inf {
+                checksum = checksum + widen(dist[i * 200 + j]);
+            }
+        }
+    }
+    print_i64(checksum);
+    return 0;
+}

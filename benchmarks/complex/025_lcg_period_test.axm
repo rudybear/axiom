@@ -1,0 +1,50 @@
+@module lcg_period_test;
+@intent("Generate 10M LCG random numbers, compute statistics (mean, variance, chi-square)");
+
+fn main() -> i32 {
+    let n: i32 = 10000000;
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    let sum: f64 = 0.0;
+    let sum_sq: f64 = 0.0;
+    let m_f: f64 = to_f64_i64(lcg_m);
+
+    // Histogram with 100 bins
+    let hist: array[i32, 100] = array_zeros[i32, 100];
+
+    for i: i32 in range(0, n) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let val: f64 = to_f64_i64(seed) / m_f;
+        sum = sum + val;
+        sum_sq = sum_sq + val * val;
+
+        // Bin assignment
+        let bin: i32 = truncate(val * 100.0);
+        if bin >= 100 {
+            bin = 99;
+        }
+        if bin < 0 {
+            bin = 0;
+        }
+        hist[bin] = hist[bin] + 1;
+    }
+
+    let mean: f64 = sum / to_f64(n);
+    let variance: f64 = sum_sq / to_f64(n) - mean * mean;
+
+    // Chi-square test against uniform distribution
+    let expected: f64 = to_f64(n) / 100.0;
+    let chi_sq: f64 = 0.0;
+    for i: i32 in range(0, 100) {
+        let diff: f64 = to_f64(hist[i]) - expected;
+        chi_sq = chi_sq + diff * diff / expected;
+    }
+
+    print_f64(mean);
+    print_f64(variance);
+    print_f64(chi_sq);
+    return 0;
+}
