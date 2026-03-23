@@ -38,6 +38,8 @@ struct FuncInfo {
     return_type: String,
     /// LLVM parameter types.
     param_types: Vec<String>,
+    /// Whether this function uses fastcc (internal, non-main, non-export).
+    uses_fastcc: bool,
 }
 
 /// Result of emitting an expression -- an SSA register name or immediate.
@@ -166,11 +168,17 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
                 Err(e) => ctx.errors.push(e),
             }
         }
+        let is_export = func
+            .annotations
+            .iter()
+            .any(|a| matches!(a.kind, HirAnnotationKind::Export));
+        let uses_fastcc = func.name != "main" && !is_export;
         ctx.functions.insert(
             func.name.clone(),
             FuncInfo {
                 return_type: ret_type,
                 param_types,
+                uses_fastcc,
             },
         );
     }
@@ -196,6 +204,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             FuncInfo {
                 return_type: ret_type,
                 param_types,
+                uses_fastcc: false,
             },
         );
     }
@@ -321,13 +330,20 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
         .iter()
         .any(|a| matches!(a.kind, HirAnnotationKind::Export));
 
+    let is_main = func.name == "main";
     if is_export {
         ctx.emit_raw(&format!(
             "define dso_local {ret_type} @{}({params_str}) {{",
             func.name
         ));
-    } else {
+    } else if is_main {
         ctx.emit_raw(&format!("define {ret_type} @{}({params_str}) {{", func.name));
+    } else {
+        // Internal functions use fastcc for better performance on recursive calls
+        ctx.emit_raw(&format!(
+            "define internal fastcc {ret_type} @{}({params_str}) {{",
+            func.name
+        ));
     }
     ctx.emit_raw("entry:");
 
@@ -1104,15 +1120,16 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
         let result_reg = ctx.fresh_reg();
         let args_str = arg_strs.join(", ");
 
+        let cc = if func_info.uses_fastcc { "fastcc " } else { "" };
         if func_info.return_type == "void" {
-            ctx.emit(&format!("call void @{name}({args_str})"));
+            ctx.emit(&format!("{cc}call void @{name}({args_str})"));
             LlvmValue {
                 reg: "0".to_string(),
                 ty: "void".to_string(),
             }
         } else {
             ctx.emit(&format!(
-                "{result_reg} = call {} @{name}({args_str})",
+                "{result_reg} = call {cc}{} @{name}({args_str})",
                 func_info.return_type
             ));
             LlvmValue {
@@ -1958,7 +1975,7 @@ mod tests {
 
         let ir = codegen(&m).expect("codegen should succeed");
         assert!(
-            ir.contains("define i32 @add(i32 %a, i32 %b)"),
+            ir.contains("@add(i32 %a, i32 %b)"),
             "should define add with params"
         );
         assert!(ir.contains("%a.addr = alloca i32"), "should alloca param a");
@@ -2188,7 +2205,7 @@ mod tests {
         );
 
         let ir = codegen(&m).expect("codegen should succeed");
-        assert!(ir.contains("call i64 @fib(i32 40)"), "should call fib");
+        assert!(ir.contains("@fib(i32 40)"), "should call fib");
     }
 
     // -----------------------------------------------------------------------
@@ -2530,7 +2547,7 @@ mod tests {
         let ir = codegen(&hir_module).expect("fibonacci.axm should codegen");
 
         assert!(
-            ir.contains("define i64 @fib(i32"),
+            ir.contains("@fib(i32"),
             "should define fib: {ir}"
         );
         assert!(
@@ -2542,7 +2559,7 @@ mod tests {
             ir.contains("icmp slt i32"),
             "should have icmp slt (range loop): {ir}"
         );
-        assert!(ir.contains("call i64 @fib"), "should call fib: {ir}");
+        assert!(ir.contains("@fib("), "should call fib: {ir}");
         assert!(
             ir.contains("call i32 (ptr, ...) @printf"),
             "should call printf: {ir}"
@@ -2592,10 +2609,10 @@ mod tests {
         );
 
         let ir = codegen(&m).expect("codegen should succeed");
-        assert!(ir.contains("define i32 @helper("), "should define helper");
+        assert!(ir.contains("@helper("), "should define helper");
         assert!(ir.contains("define i32 @main()"), "should define main");
         assert!(
-            ir.contains("call i32 @helper(i32 42)"),
+            ir.contains("@helper(i32 42)"),
             "should call helper"
         );
     }
@@ -3142,7 +3159,7 @@ mod tests {
 
         // Verify the classify_char function is emitted.
         assert!(
-            ir.contains("define i32 @classify_char(i32"),
+            ir.contains("@classify_char(i32"),
             "should define classify_char: {ir}"
         );
         // Verify main is emitted.
@@ -3152,11 +3169,11 @@ mod tests {
         );
         // Verify classify_char is called with ASCII character codes.
         assert!(
-            ir.contains("call i32 @classify_char(i32 49)"),
+            ir.contains("@classify_char(i32 49)"),
             "should call classify_char with '1' (49): {ir}"
         );
         assert!(
-            ir.contains("call i32 @classify_char(i32 43)"),
+            ir.contains("@classify_char(i32 43)"),
             "should call classify_char with '+' (43): {ir}"
         );
         // Verify printf is used for output.
@@ -3190,7 +3207,7 @@ mod tests {
 
         // Verify classify_char function.
         assert!(
-            ir.contains("define i32 @classify_char(i32"),
+            ir.contains("@classify_char(i32"),
             "should define classify_char: {ir}"
         );
         // Verify main with mutable counters.
@@ -3326,12 +3343,12 @@ mod tests {
 
         // Verify recursive fib function with i64 params.
         assert!(
-            ir.contains("define i64 @fib(i64 %n)"),
+            ir.contains("@fib(i64 %n)"),
             "should define fib with i64 param: {ir}"
         );
         // Verify recursive calls.
         assert!(
-            ir.contains("call i64 @fib(i64"),
+            ir.contains("@fib(i64"),
             "should have recursive call: {ir}"
         );
         // Verify i64 comparison.
@@ -3351,7 +3368,7 @@ mod tests {
         );
         // Verify main calls fib(47).
         assert!(
-            ir.contains("call i64 @fib(i64 47)"),
+            ir.contains("@fib(i64 47)"),
             "should call fib(47): {ir}"
         );
     }

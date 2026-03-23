@@ -1,0 +1,1 @@
+{"run_id":"run-20260322-001","milestone":"M1.1-lexer","timestamp":"2026-03-22T07:27:49Z","git_sha":"d4c5a9f7908b7883cecd6d1bf5f72f5f5c863ba3","metrics":{"cargo_build_time_ms":6781,"cargo_test_time_ms":3569,"total_loc":2213,"test_count":0,"lex_fibonacci_ms":333,"lex_matmul_ms":155}}
