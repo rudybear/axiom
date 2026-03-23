@@ -7,6 +7,7 @@ edition.workspace = true
 axiom-lexer = { path = "../axiom-lexer" }
 axiom-parser = { path = "../axiom-parser" }
 axiom-hir = { path = "../axiom-hir" }
+axiom-codegen = { path = "../axiom-codegen" }
 thiserror.workspace = true
 
 [dev-dependencies]

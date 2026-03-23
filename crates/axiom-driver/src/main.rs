@@ -32,6 +32,20 @@ enum Commands {
         /// Input .axm file
         input: String,
     },
+
+    /// Benchmark an AXIOM source file
+    Bench {
+        /// Input .axm file
+        input: String,
+
+        /// Number of warmup runs
+        #[arg(long, default_value = "3")]
+        warmup: usize,
+
+        /// Number of measurement runs
+        #[arg(long, default_value = "5")]
+        runs: usize,
+    },
 }
 
 fn main() -> miette::Result<()> {
@@ -60,6 +74,34 @@ fn main() -> miette::Result<()> {
             }
 
             Ok(())
+        }
+
+        Commands::Bench {
+            input,
+            warmup,
+            runs,
+        } => {
+            let source = std::fs::read_to_string(&input)
+                .map_err(|e| miette::miette!("Failed to read {}: {}", input, e))?;
+
+            let config = axiom_optimize::benchmark::BenchmarkConfig {
+                warmup_runs: warmup,
+                measurement_runs: runs,
+                ..Default::default()
+            };
+
+            eprintln!(
+                "Benchmarking {} ({} warmup, {} measurement runs)...",
+                input, config.warmup_runs, config.measurement_runs
+            );
+
+            match axiom_optimize::benchmark::benchmark_source(&source, &config) {
+                Ok(result) => {
+                    println!("{result}");
+                    Ok(())
+                }
+                Err(e) => Err(miette::miette!("benchmark failed: {}", e)),
+            }
         }
 
         Commands::Compile { input, output, emit } => {

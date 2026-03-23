@@ -99,6 +99,7 @@ dependencies = [
  "axiom-codegen",
  "axiom-hir",
  "axiom-lexer",
+ "axiom-optimize",
  "axiom-parser",
  "clap",
  "miette",
@@ -137,6 +138,7 @@ dependencies = [
 name = "axiom-optimize"
 version = "0.1.0"
 dependencies = [
+ "axiom-codegen",
  "axiom-hir",
  "axiom-lexer",
  "axiom-parser",
