@@ -305,6 +305,12 @@ impl fmt::Display for HirExpr {
                 }
                 write!(f, ")")
             }
+            HirExprKind::ArrayZeros {
+                element_type,
+                size,
+            } => {
+                write!(f, "array_zeros[{element_type}, {size}]")
+            }
         }
     }
 }
@@ -321,8 +327,8 @@ impl fmt::Display for HirType {
                 }
                 write!(f, "]")
             }
-            Self::Array { element, length } => {
-                write!(f, "array[{element}, {length}]")
+            Self::Array { element, size } => {
+                write!(f, "array[{element}, {size}]")
             }
             Self::Slice { element } => write!(f, "slice[{element}]"),
             Self::Ptr { element } => write!(f, "ptr[{element}]"),

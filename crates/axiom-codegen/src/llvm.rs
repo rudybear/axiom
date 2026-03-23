@@ -29,6 +29,22 @@ struct VarInfo {
     alloca_name: String,
     /// The LLVM type (e.g., `i64`).
     llvm_type: String,
+    /// For array variables: the element type and fixed size.
+    /// Local arrays have `alloca [N x T]` — the alloca IS the array pointer.
+    /// Array parameters have `alloca ptr` — the alloca stores a pointer to the array.
+    array_info: Option<ArrayVarInfo>,
+}
+
+/// Extra info for array variables, enabling correct GEP codegen.
+#[derive(Debug, Clone)]
+struct ArrayVarInfo {
+    /// LLVM element type (e.g., `i32`).
+    element_type: String,
+    /// Fixed array size.
+    size: usize,
+    /// If true, the alloca stores the array directly (`alloca [N x T]`).
+    /// If false, the alloca stores a pointer to the array (`alloca ptr`).
+    is_local: bool,
 }
 
 /// Information about a function's signature.
@@ -83,6 +99,8 @@ struct CodegenContext {
     needs_abs_i32: bool,
     /// Whether the `@llvm.fabs.f64` intrinsic is needed.
     needs_fabs_f64: bool,
+    /// Whether the `@llvm.memset.p0.i64` intrinsic is needed.
+    needs_memset: bool,
     /// Collected errors.
     errors: Vec<CodegenError>,
     /// Whether the current basic block has been terminated (ret or br).
@@ -110,6 +128,7 @@ impl CodegenContext {
             needs_pow_f64: false,
             needs_abs_i32: false,
             needs_fabs_f64: false,
+            needs_memset: false,
             errors: Vec::new(),
             block_terminated: false,
             current_return_type: String::new(),
@@ -163,7 +182,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         };
         let mut param_types = Vec::new();
         for param in &func.params {
-            match hir_type_to_llvm(&param.ty) {
+            match hir_type_to_llvm_param(&param.ty) {
                 Ok(t) => param_types.push(t),
                 Err(e) => ctx.errors.push(e),
             }
@@ -194,7 +213,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         };
         let mut param_types = Vec::new();
         for param in &ef.params {
-            match hir_type_to_llvm(&param.ty) {
+            match hir_type_to_llvm_param(&param.ty) {
                 Ok(t) => param_types.push(t),
                 Err(e) => ctx.errors.push(e),
             }
@@ -294,6 +313,12 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     if ctx.needs_fabs_f64 {
         let _ = writeln!(ctx.output, "declare double @llvm.fabs.f64(double)");
     }
+    if ctx.needs_memset {
+        let _ = writeln!(
+            ctx.output,
+            "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"
+        );
+    }
 
     if !ctx.errors.is_empty() {
         return Err(ctx.errors);
@@ -368,7 +393,7 @@ fn emit_extern_function_decl(ctx: &mut CodegenContext, ef: &HirExternFunction) {
 
     let mut param_types_str = Vec::new();
     for param in &ef.params {
-        match hir_type_to_llvm(&param.ty) {
+        match hir_type_to_llvm_param(&param.ty) {
             Ok(t) => param_types_str.push(t),
             Err(e) => ctx.errors.push(e),
         }
@@ -386,7 +411,7 @@ fn emit_extern_function_decl(ctx: &mut CodegenContext, ef: &HirExternFunction) {
 fn build_params_str(ctx: &mut CodegenContext, params: &[HirParam]) -> String {
     let mut parts = Vec::new();
     for param in params {
-        match hir_type_to_llvm(&param.ty) {
+        match hir_type_to_llvm_param(&param.ty) {
             Ok(llvm_type) => {
                 parts.push(format!("{llvm_type} %{}", param.name));
             }
@@ -399,23 +424,53 @@ fn build_params_str(ctx: &mut CodegenContext, params: &[HirParam]) -> String {
 /// Emit alloca + store for function parameters.
 fn emit_param_allocas(ctx: &mut CodegenContext, params: &[HirParam]) {
     for param in params {
-        let llvm_type = match hir_type_to_llvm(&param.ty) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
         let alloca_name = format!("%{}.addr", param.name);
-        ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
-        ctx.emit(&format!(
-            "store {llvm_type} %{}, ptr {alloca_name}",
-            param.name
-        ));
-        ctx.variables.insert(
-            param.name.clone(),
-            VarInfo {
-                alloca_name,
-                llvm_type,
-            },
-        );
+
+        // Array parameters are passed as ptr — store the pointer.
+        if let HirType::Array {
+            ref element, size, ..
+        } = param.ty
+        {
+            let elem_llvm = match hir_type_to_llvm(element) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            ctx.emit(&format!("{alloca_name} = alloca ptr"));
+            ctx.emit(&format!(
+                "store ptr %{}, ptr {alloca_name}",
+                param.name
+            ));
+            ctx.variables.insert(
+                param.name.clone(),
+                VarInfo {
+                    alloca_name,
+                    llvm_type: "ptr".to_string(),
+                    array_info: Some(ArrayVarInfo {
+                        element_type: elem_llvm,
+                        size,
+                        is_local: false,
+                    }),
+                },
+            );
+        } else {
+            let llvm_type = match hir_type_to_llvm(&param.ty) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
+            ctx.emit(&format!(
+                "store {llvm_type} %{}, ptr {alloca_name}",
+                param.name
+            ));
+            ctx.variables.insert(
+                param.name.clone(),
+                VarInfo {
+                    alloca_name,
+                    llvm_type,
+                    array_info: None,
+                },
+            );
+        }
     }
 }
 
@@ -462,6 +517,47 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
 
 /// Emit a let binding: alloca + optional store.
 fn emit_let(ctx: &mut CodegenContext, name: &str, ty: &HirType, value: &HirExpr) {
+    // Special handling for array types: alloca [N x T] + memset.
+    if let HirType::Array {
+        ref element, size, ..
+    } = ty
+    {
+        let elem_llvm = match hir_type_to_llvm(element) {
+            Ok(t) => t,
+            Err(e) => {
+                ctx.errors.push(e);
+                return;
+            }
+        };
+        let array_llvm = format!("[{size} x {elem_llvm}]");
+        let alloca_name = format!("%{name}");
+        ctx.emit(&format!("{alloca_name} = alloca {array_llvm}, align 16"));
+
+        // Check if the initializer is ArrayZeros — emit memset.
+        if matches!(value.kind, HirExprKind::ArrayZeros { .. }) {
+            let elem_size = llvm_type_size(&elem_llvm);
+            let total_bytes = elem_size * (*size as u64);
+            ctx.needs_memset = true;
+            ctx.emit(&format!(
+                "call void @llvm.memset.p0.i64(ptr {alloca_name}, i8 0, i64 {total_bytes}, i1 false)"
+            ));
+        }
+
+        ctx.variables.insert(
+            name.to_string(),
+            VarInfo {
+                alloca_name,
+                llvm_type: array_llvm,
+                array_info: Some(ArrayVarInfo {
+                    element_type: elem_llvm,
+                    size: *size,
+                    is_local: true,
+                }),
+            },
+        );
+        return;
+    }
+
     let llvm_type = match hir_type_to_llvm(ty) {
         Ok(t) => t,
         Err(e) => {
@@ -484,11 +580,12 @@ fn emit_let(ctx: &mut CodegenContext, name: &str, ty: &HirType, value: &HirExpr)
         VarInfo {
             alloca_name,
             llvm_type,
+            array_info: None,
         },
     );
 }
 
-/// Emit an assignment: store to existing alloca.
+/// Emit an assignment: store to existing alloca or array index.
 fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
     if let HirExprKind::Ident { name } = &target.kind {
         let var_info = match ctx.variables.get(name) {
@@ -505,6 +602,79 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
             "store {} {}, ptr {}",
             var_info.llvm_type, val.reg, var_info.alloca_name
         ));
+    } else if let HirExprKind::Index {
+        expr: ref arr_expr,
+        ref indices,
+    } = target.kind
+    {
+        // Array index assignment: arr[i] = val
+        if let HirExprKind::Ident { name } = &arr_expr.kind {
+            let var_info = match ctx.variables.get(name.as_str()) {
+                Some(v) => v.clone(),
+                None => {
+                    ctx.errors.push(CodegenError::UndefinedVariable {
+                        name: name.clone(),
+                    });
+                    return;
+                }
+            };
+            if let Some(ref ainfo) = var_info.array_info {
+                let elem_type = ainfo.element_type.clone();
+                let arr_size = ainfo.size;
+                let is_local = ainfo.is_local;
+
+                if indices.len() != 1 {
+                    ctx.errors.push(CodegenError::UnsupportedExpression {
+                        expr: "multi-dimensional array index".to_string(),
+                        context: "array index assignment".to_string(),
+                    });
+                    return;
+                }
+                let idx_val = emit_expr(ctx, &indices[0], Some("i64"));
+                // Ensure index is i64 for GEP.
+                let idx_i64 = if idx_val.ty != "i64" {
+                    let ext_reg = ctx.fresh_reg();
+                    ctx.emit(&format!("{ext_reg} = sext {} {} to i64", idx_val.ty, idx_val.reg));
+                    ext_reg
+                } else {
+                    idx_val.reg.clone()
+                };
+
+                let array_llvm = format!("[{arr_size} x {elem_type}]");
+                let base_ptr = if is_local {
+                    var_info.alloca_name.clone()
+                } else {
+                    // Load the pointer from the alloca.
+                    let load_reg = ctx.fresh_reg();
+                    ctx.emit(&format!(
+                        "{load_reg} = load ptr, ptr {}",
+                        var_info.alloca_name
+                    ));
+                    load_reg
+                };
+
+                let gep_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{gep_reg} = getelementptr inbounds {array_llvm}, ptr {base_ptr}, i64 0, i64 {idx_i64}"
+                ));
+
+                let rhs_val = emit_expr(ctx, value, Some(&elem_type));
+                ctx.emit(&format!(
+                    "store {elem_type} {}, ptr {gep_reg}",
+                    rhs_val.reg
+                ));
+            } else {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: "index assignment on non-array variable".to_string(),
+                    context: "assignment".to_string(),
+                });
+            }
+        } else {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: "index assignment on non-ident base".to_string(),
+                context: "assignment".to_string(),
+            });
+        }
     } else {
         ctx.errors.push(CodegenError::UnsupportedExpression {
             expr: "non-ident assignment target".to_string(),
@@ -689,6 +859,7 @@ fn emit_for(
         VarInfo {
             alloca_name: alloca_name.clone(),
             llvm_type: loop_type.clone(),
+            array_info: None,
         },
     );
 
@@ -820,6 +991,32 @@ fn emit_expr(ctx: &mut CodegenContext, expr: &HirExpr, expected_type: Option<&st
         HirExprKind::BinaryOp { op, lhs, rhs } => emit_binary_op(ctx, *op, lhs, rhs),
         HirExprKind::UnaryOp { op, operand } => emit_unary_op(ctx, *op, operand),
         HirExprKind::Call { func, args } => emit_call(ctx, func, args),
+        HirExprKind::Index {
+            expr: arr_expr,
+            indices,
+        } => emit_array_index_read(ctx, arr_expr, indices),
+        HirExprKind::ArrayZeros {
+            element_type,
+            size,
+        } => {
+            // ArrayZeros is handled at the let-binding level (emit_let).
+            // If we reach here, it means ArrayZeros was used in a non-let context.
+            // Return a dummy value — the alloca+memset was already emitted by emit_let.
+            let elem_llvm = match hir_type_to_llvm(element_type) {
+                Ok(t) => t,
+                Err(e) => {
+                    ctx.errors.push(e);
+                    return LlvmValue {
+                        reg: "0".to_string(),
+                        ty: "i32".to_string(),
+                    };
+                }
+            };
+            LlvmValue {
+                reg: "zeroinitializer".to_string(),
+                ty: format!("[{size} x {elem_llvm}]"),
+            }
+        }
         _ => {
             ctx.errors.push(CodegenError::UnsupportedExpression {
                 expr: format!("{:?}", expr.kind),
@@ -848,6 +1045,28 @@ fn emit_ident(ctx: &mut CodegenContext, name: &str) -> LlvmValue {
         }
     };
 
+    // For array variables, return the pointer to the array data (for passing to functions).
+    if let Some(ref ainfo) = var_info.array_info {
+        if ainfo.is_local {
+            // Local array: alloca IS the pointer.
+            return LlvmValue {
+                reg: var_info.alloca_name,
+                ty: "ptr".to_string(),
+            };
+        } else {
+            // Parameter array: load the stored pointer.
+            let reg = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{reg} = load ptr, ptr {}",
+                var_info.alloca_name
+            ));
+            return LlvmValue {
+                reg,
+                ty: "ptr".to_string(),
+            };
+        }
+    }
+
     let reg = ctx.fresh_reg();
     ctx.emit(&format!(
         "{reg} = load {}, ptr {}",
@@ -856,6 +1075,92 @@ fn emit_ident(ctx: &mut CodegenContext, name: &str) -> LlvmValue {
     LlvmValue {
         reg,
         ty: var_info.llvm_type,
+    }
+}
+
+/// Emit an array index read: arr[i] -> GEP + load.
+fn emit_array_index_read(
+    ctx: &mut CodegenContext,
+    arr_expr: &HirExpr,
+    indices: &[HirExpr],
+) -> LlvmValue {
+    if let HirExprKind::Ident { name } = &arr_expr.kind {
+        let var_info = match ctx.variables.get(name.as_str()) {
+            Some(v) => v.clone(),
+            None => {
+                ctx.errors.push(CodegenError::UndefinedVariable {
+                    name: name.clone(),
+                });
+                return LlvmValue {
+                    reg: "0".to_string(),
+                    ty: "i32".to_string(),
+                };
+            }
+        };
+        if let Some(ref ainfo) = var_info.array_info {
+            if indices.len() != 1 {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: "multi-dimensional array index".to_string(),
+                    context: "array index read".to_string(),
+                });
+                return LlvmValue {
+                    reg: "0".to_string(),
+                    ty: "i32".to_string(),
+                };
+            }
+            let elem_type = ainfo.element_type.clone();
+            let arr_size = ainfo.size;
+            let is_local = ainfo.is_local;
+
+            let idx_val = emit_expr(ctx, &indices[0], Some("i64"));
+            // Ensure index is i64 for GEP.
+            let idx_i64 = if idx_val.ty != "i64" {
+                let ext_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{ext_reg} = sext {} {} to i64",
+                    idx_val.ty, idx_val.reg
+                ));
+                ext_reg
+            } else {
+                idx_val.reg.clone()
+            };
+
+            let array_llvm = format!("[{arr_size} x {elem_type}]");
+            let base_ptr = if is_local {
+                var_info.alloca_name.clone()
+            } else {
+                let load_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{load_reg} = load ptr, ptr {}",
+                    var_info.alloca_name
+                ));
+                load_reg
+            };
+
+            let gep_reg = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{gep_reg} = getelementptr inbounds {array_llvm}, ptr {base_ptr}, i64 0, i64 {idx_i64}"
+            ));
+
+            let load_reg = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{load_reg} = load {elem_type}, ptr {gep_reg}"
+            ));
+
+            return LlvmValue {
+                reg: load_reg,
+                ty: elem_type,
+            };
+        }
+    }
+
+    ctx.errors.push(CodegenError::UnsupportedExpression {
+        expr: "index expression on non-array".to_string(),
+        context: "index read".to_string(),
+    });
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "i32".to_string(),
     }
 }
 
@@ -1616,6 +1921,34 @@ fn emit_builtin_to_f64_i64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVa
     }
 }
 
+/// Return the size in bytes of an LLVM primitive type string.
+fn llvm_type_size(ty: &str) -> u64 {
+    match ty {
+        "i1" => 1,
+        "i8" => 1,
+        "i16" => 2,
+        "i32" => 4,
+        "i64" => 8,
+        "i128" => 16,
+        "half" | "bfloat" => 2,
+        "float" => 4,
+        "double" => 8,
+        "ptr" => 8,
+        _ => 8, // conservative default
+    }
+}
+
+/// Convert an HIR type to the LLVM type used for function parameters.
+///
+/// Arrays are passed by pointer, so `array[T, N]` becomes `ptr`.
+fn hir_type_to_llvm_param(ty: &HirType) -> Result<String, CodegenError> {
+    if matches!(ty, HirType::Array { .. }) {
+        Ok("ptr".to_string())
+    } else {
+        hir_type_to_llvm(ty)
+    }
+}
+
 /// Convert an HIR type to its LLVM IR type string.
 fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError> {
     match ty {
@@ -1628,10 +1961,10 @@ fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError> {
             ty: "tensor".to_string(),
             context: "tensor types not yet supported".to_string(),
         }),
-        HirType::Array { .. } => Err(CodegenError::UnsupportedType {
-            ty: "array".to_string(),
-            context: "array types not yet supported".to_string(),
-        }),
+        HirType::Array { ref element, size } => {
+            let elem_llvm = hir_type_to_llvm(element)?;
+            Ok(format!("[{size} x {elem_llvm}]"))
+        }
         HirType::Slice { .. } => Err(CodegenError::UnsupportedType {
             ty: "slice".to_string(),
             context: "slice types not yet supported".to_string(),
@@ -3422,6 +3755,253 @@ mod tests {
         assert!(
             ir.contains("@.fmt.f64"),
             "should have f64 format string: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Array support tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_array_type() {
+        // Verify that array type generates the correct LLVM type string.
+        let arr_ty = HirType::Array {
+            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+            size: 100,
+        };
+        let llvm_ty = hir_type_to_llvm(&arr_ty).expect("array type should convert");
+        assert_eq!(llvm_ty, "[100 x i32]");
+
+        let arr_ty_f64 = HirType::Array {
+            element: Box::new(HirType::Primitive(PrimitiveType::F64)),
+            size: 50,
+        };
+        let llvm_ty_f64 = hir_type_to_llvm(&arr_ty_f64).expect("f64 array type should convert");
+        assert_eq!(llvm_ty_f64, "[50 x double]");
+    }
+
+    #[test]
+    fn test_array_param_type() {
+        // Verify that array params become ptr in function signatures.
+        let arr_ty = HirType::Array {
+            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+            size: 10,
+        };
+        let param_ty = hir_type_to_llvm_param(&arr_ty).expect("array param type should convert");
+        assert_eq!(param_ty, "ptr");
+    }
+
+    #[test]
+    fn test_array_alloca() {
+        // Test that array_zeros creates alloca + memset.
+        let m = module(
+            Some("arr_test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arr".to_string(),
+                        name_span: span(),
+                        ty: HirType::Array {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                            size: 10,
+                        },
+                        value: HirExpr {
+                            id: nid(0),
+                            kind: HirExprKind::ArrayZeros {
+                                element_type: HirType::Primitive(PrimitiveType::I32),
+                                size: 10,
+                            },
+                            span: span(),
+                        },
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("alloca [10 x i32]"),
+            "should have array alloca: {ir}"
+        );
+        assert!(
+            ir.contains("call void @llvm.memset.p0.i64(ptr %arr, i8 0, i64 40, i1 false)"),
+            "should have memset for 10 * 4 = 40 bytes: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"),
+            "should declare memset intrinsic: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_array_index_read() {
+        // Test array index read: arr[5].
+        let m = module(
+            Some("arr_read"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arr".to_string(),
+                        name_span: span(),
+                        ty: HirType::Array {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                            size: 10,
+                        },
+                        value: HirExpr {
+                            id: nid(0),
+                            kind: HirExprKind::ArrayZeros {
+                                element_type: HirType::Primitive(PrimitiveType::I32),
+                                size: 10,
+                            },
+                            span: span(),
+                        },
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "x".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: HirExpr {
+                            id: nid(0),
+                            kind: HirExprKind::Index {
+                                expr: Box::new(ident("arr")),
+                                indices: vec![int_lit(5)],
+                            },
+                            span: span(),
+                        },
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: ident("x"),
+                    }),
+                ]),
+            )],
+        );
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Should have GEP + load for index read.
+        assert!(
+            ir.contains("getelementptr inbounds [10 x i32], ptr %arr, i64 0, i64"),
+            "should have GEP for array index: {ir}"
+        );
+        assert!(
+            ir.contains("load i32, ptr"),
+            "should load element from GEP pointer: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_array_index_write() {
+        // Test array index write: arr[5] = 42.
+        let m = module(
+            Some("arr_write"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arr".to_string(),
+                        name_span: span(),
+                        ty: HirType::Array {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                            size: 10,
+                        },
+                        value: HirExpr {
+                            id: nid(0),
+                            kind: HirExprKind::ArrayZeros {
+                                element_type: HirType::Primitive(PrimitiveType::I32),
+                                size: 10,
+                            },
+                            span: span(),
+                        },
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Assign {
+                        target: HirExpr {
+                            id: nid(0),
+                            kind: HirExprKind::Index {
+                                expr: Box::new(ident("arr")),
+                                indices: vec![int_lit(5)],
+                            },
+                            span: span(),
+                        },
+                        value: int_lit(42),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Should have GEP + store for index write.
+        assert!(
+            ir.contains("getelementptr inbounds [10 x i32], ptr %arr, i64 0, i64"),
+            "should have GEP for array index write: {ir}"
+        );
+        assert!(
+            ir.contains("store i32 42, ptr"),
+            "should store value at GEP pointer: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_array_program() {
+        // Full array program: create, fill with squares, sum them.
+        let source = r#"
+@module array_test;
+fn main() -> i32 {
+    let arr: array[i32, 10] = array_zeros[i32, 10];
+    for i: i32 in range(0, 10) {
+        arr[i] = i * i;
+    }
+    let sum: i32 = 0;
+    for i: i32 in range(0, 10) {
+        sum = sum + arr[i];
+    }
+    print_i32(sum);
+    return 0;
+}
+"#;
+        let parse_result = axiom_parser::parse(source);
+        assert!(
+            !parse_result.has_errors(),
+            "parse should succeed: {:?}",
+            parse_result.errors
+        );
+        let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+        let ir = codegen(&hir).expect("codegen should succeed");
+
+        // Verify key patterns in the generated IR.
+        assert!(
+            ir.contains("alloca [10 x i32]"),
+            "should have array alloca: {ir}"
+        );
+        assert!(
+            ir.contains("@llvm.memset.p0.i64"),
+            "should use memset: {ir}"
+        );
+        assert!(
+            ir.contains("getelementptr inbounds [10 x i32]"),
+            "should have GEP: {ir}"
+        );
+        // Should have at least one store to array and one load from array.
+        assert!(
+            ir.contains("store i32"),
+            "should have store to array: {ir}"
+        );
+        assert!(
+            ir.contains("load i32"),
+            "should have load from array: {ir}"
         );
     }
 }

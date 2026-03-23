@@ -371,6 +371,13 @@ pub enum HirExprKind {
         /// Arguments.
         args: Vec<HirExpr>,
     },
+    /// `array_zeros[T, N]` — zero-initialized fixed-size array.
+    ArrayZeros {
+        /// Element type.
+        element_type: HirType,
+        /// Fixed array size.
+        size: usize,
+    },
 }
 
 /// Validated type reference.
@@ -392,7 +399,7 @@ pub enum HirType {
     /// Fixed-size array type.
     Array {
         element: Box<HirType>,
-        length: Box<HirExpr>,
+        size: usize,
     },
     /// Slice type (fat pointer).
     Slice {
@@ -418,13 +425,6 @@ pub enum HirType {
     Unknown(String),
 }
 
-// Manual PartialEq for HirExpr to support HirType comparison
-// (HirType::Array contains Box<HirExpr>)
-impl PartialEq for HirExpr {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
 
 /// All primitive types from the AXIOM spec.
 ///

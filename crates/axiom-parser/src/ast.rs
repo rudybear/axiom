@@ -156,6 +156,11 @@ pub enum Expr {
         method: String,
         args: Vec<Expr>,
     },
+    /// `array_zeros[T, N]` — zero-initialized fixed-size array literal.
+    ArrayZeros {
+        element_type: TypeExpr,
+        size: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]

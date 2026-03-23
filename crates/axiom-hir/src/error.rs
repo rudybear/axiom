@@ -98,6 +98,15 @@ pub enum LowerError {
         #[label("duplicate @module")]
         span: SourceSpan,
     },
+
+    /// Array size must be a non-negative integer literal.
+    #[error("array size must be a non-negative integer literal")]
+    #[diagnostic(code(axiom::hir::invalid_array_size))]
+    InvalidArraySize {
+        /// Source location of the array size expression.
+        #[label("invalid array size")]
+        span: SourceSpan,
+    },
 }
 
 /// Convert an `axiom_lexer::Span` to a `miette::SourceSpan`.
