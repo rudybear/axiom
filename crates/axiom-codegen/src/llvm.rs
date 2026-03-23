@@ -3067,4 +3067,102 @@ mod tests {
             "should define exported function with dso_local: {ir}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Self-hosting bootstrap tests (M5.1)
+    // -----------------------------------------------------------------------
+
+    /// Integration test: self-hosting lexer example compiles through the full
+    /// pipeline (parse -> HIR -> LLVM IR).
+    #[test]
+    fn test_self_host_lexer() {
+        let source = std::fs::read_to_string("../../examples/self_host/lexer.axm")
+            .expect("should read lexer.axm");
+        let parse_result = axiom_parser::parse(&source);
+        assert!(
+            !parse_result.has_errors(),
+            "lexer.axm should parse without errors: {:?}",
+            parse_result.errors
+        );
+        let hir_module =
+            axiom_hir::lower(&parse_result.module).expect("lexer.axm should lower to HIR");
+        let ir = codegen(&hir_module).expect("lexer.axm should codegen");
+
+        // Verify the classify_char function is emitted.
+        assert!(
+            ir.contains("define i32 @classify_char(i32"),
+            "should define classify_char: {ir}"
+        );
+        // Verify main is emitted.
+        assert!(
+            ir.contains("define i32 @main()"),
+            "should define main: {ir}"
+        );
+        // Verify classify_char is called with ASCII character codes.
+        assert!(
+            ir.contains("call i32 @classify_char(i32 49)"),
+            "should call classify_char with '1' (49): {ir}"
+        );
+        assert!(
+            ir.contains("call i32 @classify_char(i32 43)"),
+            "should call classify_char with '+' (43): {ir}"
+        );
+        // Verify printf is used for output.
+        assert!(
+            ir.contains("call i32 (ptr, ...) @printf"),
+            "should call printf for output: {ir}"
+        );
+        // Verify the `and` logic is compiled (digit range check: c >= 48 and c <= 57).
+        assert!(
+            ir.contains("and i1"),
+            "should have logical AND for range check: {ir}"
+        );
+        assert!(ir.contains("ret i32 0"), "main should return 0: {ir}");
+    }
+
+    /// Integration test: self-hosting token counter compiles through the full
+    /// pipeline (parse -> HIR -> LLVM IR).
+    #[test]
+    fn test_self_host_token_counter() {
+        let source = std::fs::read_to_string("../../examples/self_host/token_counter.axm")
+            .expect("should read token_counter.axm");
+        let parse_result = axiom_parser::parse(&source);
+        assert!(
+            !parse_result.has_errors(),
+            "token_counter.axm should parse without errors: {:?}",
+            parse_result.errors
+        );
+        let hir_module = axiom_hir::lower(&parse_result.module)
+            .expect("token_counter.axm should lower to HIR");
+        let ir = codegen(&hir_module).expect("token_counter.axm should codegen");
+
+        // Verify classify_char function.
+        assert!(
+            ir.contains("define i32 @classify_char(i32"),
+            "should define classify_char: {ir}"
+        );
+        // Verify main with mutable counters.
+        assert!(
+            ir.contains("define i32 @main()"),
+            "should define main: {ir}"
+        );
+        // Verify alloca for mutable counter variables.
+        assert!(
+            ir.contains("%numbers = alloca i32"),
+            "should have numbers counter: {ir}"
+        );
+        assert!(
+            ir.contains("%operators = alloca i32"),
+            "should have operators counter: {ir}"
+        );
+        // Verify if/else branches for counting logic.
+        assert!(ir.contains("then."), "should have then branches: {ir}");
+        assert!(ir.contains("else."), "should have else branches: {ir}");
+        // Verify printf calls for output.
+        assert!(
+            ir.contains("call i32 (ptr, ...) @printf"),
+            "should call printf: {ir}"
+        );
+        assert!(ir.contains("ret i32 0"), "main should return 0: {ir}");
+    }
 }
