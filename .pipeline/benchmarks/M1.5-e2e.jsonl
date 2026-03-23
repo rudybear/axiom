@@ -1,0 +1,1 @@
+{"run_id":"run-20260322-005","milestone":"M1.5-e2e","timestamp":"2026-03-22T10:08:42Z","git_sha":"4dcdbfd3b75a60160e3392bfd6f2bfa0e2954a36","metrics":{"cargo_build_time_ms":5670,"cargo_test_time_ms":5532,"total_loc":10509,"test_count":0,"lex_fibonacci_ms":182,"lex_matmul_ms":123}}

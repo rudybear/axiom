@@ -1,0 +1,32 @@
+{
+  "M1.1-lexer": {
+    "cargo_build_time_ms": 6781,
+    "cargo_test_time_ms": 3569,
+    "total_loc": 2213,
+    "test_count": 0
+  },
+  "M1.2-parser": {
+    "cargo_build_time_ms": 4736,
+    "cargo_test_time_ms": 4837,
+    "total_loc": 5104,
+    "test_count": 0
+  },
+  "M1.3-hir": {
+    "cargo_build_time_ms": 5860,
+    "cargo_test_time_ms": 4041,
+    "total_loc": 7773,
+    "test_count": 0
+  },
+  "M1.4-codegen": {
+    "cargo_build_time_ms": 5306,
+    "cargo_test_time_ms": 5429,
+    "total_loc": 10065,
+    "test_count": 0
+  },
+  "M1.5-e2e": {
+    "cargo_build_time_ms": 5670,
+    "cargo_test_time_ms": 5532,
+    "total_loc": 10509,
+    "test_count": 0
+  }
+}

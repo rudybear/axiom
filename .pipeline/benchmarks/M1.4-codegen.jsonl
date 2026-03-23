@@ -1,0 +1,1 @@
+{"run_id":"run-20260322-004","milestone":"M1.4-codegen","timestamp":"2026-03-22T08:44:56Z","git_sha":"a6bbb953f0821519b4e2e789a47afa8e2028c1dc","metrics":{"cargo_build_time_ms":5306,"cargo_test_time_ms":5429,"total_loc":10065,"test_count":0,"lex_fibonacci_ms":341,"lex_matmul_ms":125}}
