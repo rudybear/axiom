@@ -1,0 +1,72 @@
+// Multi-Agent Optimization Scenario
+//
+// This file shows what an AXIOM program looks like after passing through
+// a 3-agent optimization chain:
+//   Agent A ("Writer")         -> conservative defaults
+//   Agent B ("Optimizer")      -> CPU cache-optimized
+//   Agent C ("GPU Specialist") -> ready for GPU offload
+//
+// The @transfer block at the bottom carries the latest handoff metadata.
+// The @optimization_log comments document the chain history.
+
+@module matmul;
+@intent("Dense matrix multiplication — optimized by multi-agent chain");
+@constraint { correctness: "IEEE 754 compliant" };
+@target { cpu.simd };
+
+// --- @optimization_log ---
+// v1 by agent-writer:
+//   tiling: {M: 32, N: 32, K: 32}, order: [i, j, k], unroll: 1, prefetch: 0
+//   metrics: time_ms=100.0, gflops=2.5
+//   notes: Conservative defaults. Baseline measurement.
+//
+// v2 by agent-optimizer:
+//   tiling: {M: 64, N: 64, K: 32}, order: [i, k, j], unroll: 4, prefetch: 8
+//   metrics: time_ms=42.0, gflops=6.0
+//   notes: Reordered loops to ikj for better cache locality. 4x unroll.
+//
+// v3 by agent-optimizer:
+//   tiling: {M: 128, N: 128, K: 64}, order: [i, k, j], unroll: 8, prefetch: 4
+//   metrics: time_ms=28.0, gflops=9.0
+//   notes: Larger tiles for L2 utilization. Dual-axis parallelism on i,j.
+// --- end @optimization_log ---
+
+@pure
+@complexity O(n^3)
+@vectorizable(i, j, k)
+fn matmul(
+    a: tensor[f32, M, K] @layout(row_major) @align(64),
+    b: tensor[f32, K, N] @layout(col_major) @align(64),
+) -> tensor[f32, M, N] {
+
+    @strategy {
+        tiling:   { M: ?tile_m, N: ?tile_n, K: ?tile_k }
+        order:    ?loop_order
+        parallel: ?parallel_dims
+        unroll:   ?unroll_factor
+        prefetch: ?prefetch_distance
+    }
+
+    let result: tensor[f32, M, N] = tensor.zeros[f32, M, N];
+
+    for i: i32 in range(M) {
+        for j: i32 in range(N) {
+            let acc: f32 = 0.0;
+            for k: i32 in range(K) {
+                acc = acc + a[i, k] * b[k, j];
+            }
+            result[i, j] = acc;
+        }
+    }
+
+    return result;
+}
+
+// --- Agent Transfer ---
+@transfer {
+    source_agent: "agent-optimizer"
+    target_agent: "agent-gpu-specialist"
+    context: "CPU-optimized with ikj loop order and 128x128 tiling. Consider GPU offload for large matrices."
+    open_questions: ["For GPU: consider shared memory tiling", "Evaluate whether tensor cores can be used"]
+    confidence: { correctness: 0.99, optimality: 0.7 }
+}
