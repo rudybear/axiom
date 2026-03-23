@@ -608,7 +608,7 @@ fn annotation_valid_targets(kind: &HirAnnotationKind) -> (&str, Vec<AnnotationTa
         HirAnnotationKind::Constraint(_) => ("constraint", vec![Function, Module]),
         HirAnnotationKind::Target(_) => ("target", vec![Function, Module]),
         HirAnnotationKind::Strategy(_) => ("strategy", vec![Function, Block]),
-        HirAnnotationKind::Transfer(_) => ("transfer", vec![Function, Module]),
+        HirAnnotationKind::Transfer(_) => ("transfer", vec![Function, Module, Block]),
         HirAnnotationKind::Vectorizable(_) => ("vectorizable", vec![Function]),
         HirAnnotationKind::Parallel(_) => ("parallel", vec![Function]),
         HirAnnotationKind::Layout(_) => ("layout", vec![Param, StructField]),
