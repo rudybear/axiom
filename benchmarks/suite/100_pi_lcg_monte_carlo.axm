@@ -1,0 +1,22 @@
+@module pi_lcg_monte_carlo;
+
+fn main() -> i32 {
+    let n: i32 = 1000000;
+    let inside: i32 = 0;
+    let seed: i64 = 12345;
+    let a_lcg: i64 = 1103515245;
+    let c_lcg: i64 = 12345;
+    let m_lcg: i64 = 2147483648;
+    for i: i32 in range(0, n) {
+        seed = (a_lcg * seed + c_lcg) % m_lcg;
+        let x: f64 = to_f64_i64(seed) / to_f64_i64(m_lcg);
+        seed = (a_lcg * seed + c_lcg) % m_lcg;
+        let y: f64 = to_f64_i64(seed) / to_f64_i64(m_lcg);
+        if x * x + y * y <= 1.0 {
+            inside = inside + 1;
+        }
+    }
+    let pi: f64 = 4.0 * to_f64(inside) / to_f64(n);
+    print_f64(pi);
+    return 0;
+}

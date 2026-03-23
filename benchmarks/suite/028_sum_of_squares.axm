@@ -1,0 +1,16 @@
+@module sum_of_squares;
+
+@pure
+fn sum_squares(n: i64) -> i64 {
+    let sum: i64 = 0;
+    for i: i32 in range(1, 101) {
+        let x: i64 = widen(i);
+        sum = sum + x * x;
+    }
+    return sum;
+}
+
+fn main() -> i32 {
+    print_i64(sum_squares(100));
+    return 0;
+}

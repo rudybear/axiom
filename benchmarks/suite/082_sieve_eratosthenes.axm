@@ -1,0 +1,27 @@
+@module sieve_eratosthenes;
+
+fn main() -> i32 {
+    let sieve: array[i32, 10001] = array_zeros[i32, 10001];
+    for i: i32 in range(0, 10001) {
+        sieve[i] = 1;
+    }
+    sieve[0] = 0;
+    sieve[1] = 0;
+    let i: i32 = 2;
+    while i * i <= 10000 {
+        if sieve[i] == 1 {
+            let j: i32 = i * i;
+            while j <= 10000 {
+                sieve[j] = 0;
+                j = j + i;
+            }
+        }
+        i = i + 1;
+    }
+    let count: i32 = 0;
+    for k: i32 in range(0, 10001) {
+        count = count + sieve[k];
+    }
+    print_i32(count);
+    return 0;
+}

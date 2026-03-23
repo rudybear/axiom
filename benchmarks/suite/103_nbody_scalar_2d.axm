@@ -1,0 +1,37 @@
+@module nbody_scalar_2d;
+
+fn main() -> i32 {
+    let x0: f64 = 0.0;
+    let y0: f64 = 0.0;
+    let x1: f64 = 1.0;
+    let y1: f64 = 0.0;
+    let x2: f64 = 0.0;
+    let y2: f64 = 1.0;
+    let vx0: f64 = 0.0;
+    let vy0: f64 = 0.01;
+    let vx1: f64 = 0.0;
+    let vy1: f64 = -0.005;
+    let vx2: f64 = -0.005;
+    let vy2: f64 = 0.0;
+    let dt: f64 = 0.001;
+    for step: i32 in range(0, 1000) {
+        let dx01: f64 = x1 - x0;
+        let dy01: f64 = y1 - y0;
+        let r01_sq: f64 = dx01 * dx01 + dy01 * dy01 + 0.0001;
+        let r01: f64 = sqrt(r01_sq);
+        let f01: f64 = 1.0 / (r01_sq * r01);
+        vx0 = vx0 + f01 * dx01 * dt;
+        vy0 = vy0 + f01 * dy01 * dt;
+        vx1 = vx1 - f01 * dx01 * dt;
+        vy1 = vy1 - f01 * dy01 * dt;
+        x0 = x0 + vx0 * dt;
+        y0 = y0 + vy0 * dt;
+        x1 = x1 + vx1 * dt;
+        y1 = y1 + vy1 * dt;
+        x2 = x2 + vx2 * dt;
+        y2 = y2 + vy2 * dt;
+    }
+    let energy: f64 = 0.5 * (vx0 * vx0 + vy0 * vy0 + vx1 * vx1 + vy1 * vy1 + vx2 * vx2 + vy2 * vy2);
+    print_f64(energy);
+    return 0;
+}

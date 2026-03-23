@@ -1,0 +1,15 @@
+@module histogram;
+
+fn main() -> i32 {
+    let data: array[i32, 50] = array_zeros[i32, 50];
+    for i: i32 in range(0, 50) {
+        data[i] = i % 5;
+    }
+    let hist: array[i32, 5] = array_zeros[i32, 5];
+    for i: i32 in range(0, 50) {
+        let idx: i32 = data[i];
+        hist[idx] = hist[idx] + 1;
+    }
+    print_i32(hist[0]);
+    return 0;
+}

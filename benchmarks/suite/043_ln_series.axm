@@ -1,0 +1,19 @@
+@module ln_series;
+
+@pure
+fn ln_approx(x: f64, terms: i32) -> f64 {
+    let y: f64 = (x - 1.0) / (x + 1.0);
+    let result: f64 = 0.0;
+    let power: f64 = y;
+    for i: i32 in range(0, terms) {
+        let n: i32 = 2 * i + 1;
+        result = result + power / to_f64(n);
+        power = power * y * y;
+    }
+    return 2.0 * result;
+}
+
+fn main() -> i32 {
+    print_f64(ln_approx(2.0, 50));
+    return 0;
+}

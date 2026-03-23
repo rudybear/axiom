@@ -1,0 +1,21 @@
+@module modular_exp;
+
+@pure
+fn mod_exp(base: i64, exp: i64, modulus: i64) -> i64 {
+    let result: i64 = 1;
+    let b: i64 = base % modulus;
+    let e: i64 = exp;
+    while e > 0 {
+        if e % 2 == 1 {
+            result = result * b % modulus;
+        }
+        e = e / 2;
+        b = b * b % modulus;
+    }
+    return result;
+}
+
+fn main() -> i32 {
+    print_i64(mod_exp(7, 256, 1000));
+    return 0;
+}

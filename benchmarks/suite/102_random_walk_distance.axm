@@ -1,0 +1,31 @@
+@module random_walk_distance;
+
+fn main() -> i32 {
+    let n: i32 = 10000;
+    let seed: i64 = 42;
+    let a_lcg: i64 = 1103515245;
+    let c_lcg: i64 = 12345;
+    let m_lcg: i64 = 2147483648;
+    let x: i32 = 0;
+    let y: i32 = 0;
+    for i: i32 in range(0, n) {
+        seed = (a_lcg * seed + c_lcg) % m_lcg;
+        let dir: i32 = narrow(seed % 4);
+        if dir == 0 {
+            x = x + 1;
+        } else {
+            if dir == 1 {
+                x = x - 1;
+            } else {
+                if dir == 2 {
+                    y = y + 1;
+                } else {
+                    y = y - 1;
+                }
+            }
+        }
+    }
+    let dist: i32 = abs(x) + abs(y);
+    print_i32(dist);
+    return 0;
+}

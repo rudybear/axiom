@@ -1,0 +1,21 @@
+@module pascal_row_sum;
+
+@pure
+fn pascal(row: i32, col: i32) -> i32 {
+    if col == 0 {
+        return 1;
+    }
+    if col == row {
+        return 1;
+    }
+    return pascal(row - 1, col - 1) + pascal(row - 1, col);
+}
+
+fn main() -> i32 {
+    let sum: i32 = 0;
+    for c: i32 in range(0, 11) {
+        sum = sum + pascal(10, c);
+    }
+    print_i32(sum);
+    return 0;
+}

@@ -1,0 +1,13 @@
+@module prefix_sum;
+
+fn main() -> i32 {
+    let arr: array[i32, 10] = array_zeros[i32, 10];
+    for i: i32 in range(0, 10) {
+        arr[i] = i;
+    }
+    for i: i32 in range(1, 10) {
+        arr[i] = arr[i] + arr[i - 1];
+    }
+    print_i32(arr[9]);
+    return 0;
+}

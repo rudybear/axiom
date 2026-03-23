@@ -1,0 +1,15 @@
+@module alternating_series;
+
+fn main() -> i32 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(1, 1000001) {
+        let term: f64 = 1.0 / to_f64(i);
+        if i % 2 == 0 {
+            sum = sum - term;
+        } else {
+            sum = sum + term;
+        }
+    }
+    print_f64(sum);
+    return 0;
+}

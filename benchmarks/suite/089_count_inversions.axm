@@ -1,0 +1,18 @@
+@module count_inversions;
+
+fn main() -> i32 {
+    let arr: array[i32, 20] = array_zeros[i32, 20];
+    for i: i32 in range(0, 20) {
+        arr[i] = 20 - i;
+    }
+    let count: i32 = 0;
+    for i: i32 in range(0, 19) {
+        for j: i32 in range(i + 1, 20) {
+            if arr[i] > arr[j] {
+                count = count + 1;
+            }
+        }
+    }
+    print_i32(count);
+    return 0;
+}

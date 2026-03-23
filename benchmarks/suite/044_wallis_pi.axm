@@ -1,0 +1,13 @@
+@module wallis_pi;
+
+fn main() -> i32 {
+    let product: f64 = 1.0;
+    for i: i32 in range(1, 1000001) {
+        let n: f64 = to_f64(i);
+        let term: f64 = 4.0 * n * n / (4.0 * n * n - 1.0);
+        product = product * term;
+    }
+    let pi: f64 = 2.0 * product;
+    print_f64(pi);
+    return 0;
+}

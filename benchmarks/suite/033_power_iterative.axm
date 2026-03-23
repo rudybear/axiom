@@ -1,0 +1,15 @@
+@module power_iterative;
+
+@pure
+fn power(base: i64, exp: i32) -> i64 {
+    let result: i64 = 1;
+    for i: i32 in range(0, exp) {
+        result = result * base;
+    }
+    return result;
+}
+
+fn main() -> i32 {
+    print_i64(power(2, 30));
+    return 0;
+}

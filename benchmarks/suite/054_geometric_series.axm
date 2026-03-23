@@ -1,0 +1,12 @@
+@module geometric_series;
+
+fn main() -> i32 {
+    let sum: f64 = 0.0;
+    let term: f64 = 1.0;
+    for i: i32 in range(0, 20) {
+        sum = sum + term;
+        term = term / 2.0;
+    }
+    print_f64(sum);
+    return 0;
+}

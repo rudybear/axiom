@@ -1,0 +1,16 @@
+@module integration_midpoint;
+
+fn main() -> i32 {
+    let a: f64 = 0.0;
+    let b: f64 = 1.0;
+    let n: i32 = 1000000;
+    let dx: f64 = (b - a) / to_f64(n);
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let x: f64 = a + (to_f64(i) + 0.5) * dx;
+        sum = sum + x * x;
+    }
+    let result: f64 = sum * dx;
+    print_f64(result);
+    return 0;
+}

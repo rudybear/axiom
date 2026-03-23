@@ -1,0 +1,21 @@
+@module fibonacci_iterative_50;
+
+@pure
+fn fib(n: i32) -> i64 {
+    if n <= 1 {
+        return widen(n);
+    }
+    let a: i64 = 0;
+    let b: i64 = 1;
+    for i: i32 in range(2, n + 1) {
+        let temp: i64 = b;
+        b = a + b;
+        a = temp;
+    }
+    return b;
+}
+
+fn main() -> i32 {
+    print_i64(fib(50));
+    return 0;
+}

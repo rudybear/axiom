@@ -1,0 +1,16 @@
+@module lcg_stats;
+
+fn main() -> i32 {
+    let seed: i64 = 1;
+    let a_lcg: i64 = 1103515245;
+    let c_lcg: i64 = 12345;
+    let m_lcg: i64 = 2147483648;
+    let sum: i64 = 0;
+    for i: i32 in range(0, 1000) {
+        seed = (a_lcg * seed + c_lcg) % m_lcg;
+        sum = sum + seed;
+    }
+    let avg: i64 = sum / 1000;
+    print_i64(avg);
+    return 0;
+}

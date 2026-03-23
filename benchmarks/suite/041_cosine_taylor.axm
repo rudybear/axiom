@@ -1,0 +1,26 @@
+@module cosine_taylor;
+
+@pure
+fn cosine_taylor(x: f64, terms: i32) -> f64 {
+    let result: f64 = 0.0;
+    let power: f64 = 1.0;
+    let factorial: f64 = 1.0;
+    for i: i32 in range(0, terms) {
+        let n: i32 = 2 * i;
+        if i > 0 {
+            power = power * x * x;
+            factorial = factorial * to_f64(n - 1) * to_f64(n);
+        }
+        if i % 2 == 0 {
+            result = result + power / factorial;
+        } else {
+            result = result - power / factorial;
+        }
+    }
+    return result;
+}
+
+fn main() -> i32 {
+    print_f64(cosine_taylor(1.0, 15));
+    return 0;
+}

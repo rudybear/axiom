@@ -1,0 +1,16 @@
+@module dot_product;
+
+fn main() -> i32 {
+    let a: array[i32, 20] = array_zeros[i32, 20];
+    let b: array[i32, 20] = array_zeros[i32, 20];
+    for i: i32 in range(0, 20) {
+        a[i] = i + 1;
+        b[i] = i + 1;
+    }
+    let dot: i32 = 0;
+    for i: i32 in range(0, 20) {
+        dot = dot + a[i] * b[i];
+    }
+    print_i32(dot);
+    return 0;
+}

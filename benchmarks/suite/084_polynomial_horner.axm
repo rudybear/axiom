@@ -1,0 +1,17 @@
+@module polynomial_horner;
+
+fn main() -> i32 {
+    let coeffs: array[i32, 5] = array_zeros[i32, 5];
+    coeffs[0] = 1;
+    coeffs[1] = 2;
+    coeffs[2] = 3;
+    coeffs[3] = 4;
+    coeffs[4] = 5;
+    let x: i32 = 10;
+    let result: i32 = coeffs[0];
+    for i: i32 in range(1, 5) {
+        result = result * x + coeffs[i];
+    }
+    print_i32(result);
+    return 0;
+}

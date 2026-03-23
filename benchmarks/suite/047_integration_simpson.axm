@@ -1,0 +1,20 @@
+@module integration_simpson;
+
+fn main() -> i32 {
+    let a: f64 = 0.0;
+    let b: f64 = 1.0;
+    let n: i32 = 1000000;
+    let dx: f64 = (b - a) / to_f64(n);
+    let sum: f64 = a * a + b * b;
+    for i: i32 in range(1, n) {
+        let x: f64 = a + to_f64(i) * dx;
+        if i % 2 == 0 {
+            sum = sum + 2.0 * x * x;
+        } else {
+            sum = sum + 4.0 * x * x;
+        }
+    }
+    let result: f64 = sum * dx / 3.0;
+    print_f64(result);
+    return 0;
+}

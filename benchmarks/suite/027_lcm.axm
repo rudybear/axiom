@@ -1,0 +1,23 @@
+@module lcm;
+
+@pure
+fn gcd(a: i32, b: i32) -> i32 {
+    let x: i32 = a;
+    let y: i32 = b;
+    while y != 0 {
+        let t: i32 = y;
+        y = x % y;
+        x = t;
+    }
+    return x;
+}
+
+@pure
+fn lcm(a: i32, b: i32) -> i32 {
+    return a / gcd(a, b) * b;
+}
+
+fn main() -> i32 {
+    print_i32(lcm(12, 18));
+    return 0;
+}

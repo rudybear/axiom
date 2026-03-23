@@ -1,0 +1,10 @@
+@module harmonic_sum;
+
+fn main() -> i32 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(1, 1001) {
+        sum = sum + 1.0 / to_f64(i);
+    }
+    print_f64(sum);
+    return 0;
+}

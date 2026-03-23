@@ -1,0 +1,23 @@
+@module bubble_sort_sum;
+
+fn main() -> i32 {
+    let arr: array[i32, 20] = array_zeros[i32, 20];
+    for i: i32 in range(0, 20) {
+        arr[i] = 20 - i;
+    }
+    for i: i32 in range(0, 19) {
+        for j: i32 in range(0, 19 - i) {
+            if arr[j] > arr[j + 1] {
+                let tmp: i32 = arr[j];
+                arr[j] = arr[j + 1];
+                arr[j + 1] = tmp;
+            }
+        }
+    }
+    let sum: i32 = 0;
+    for i: i32 in range(0, 20) {
+        sum = sum + arr[i];
+    }
+    print_i32(sum);
+    return 0;
+}

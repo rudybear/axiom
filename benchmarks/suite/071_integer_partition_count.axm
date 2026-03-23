@@ -1,0 +1,20 @@
+@module integer_partition_count;
+
+@pure
+fn partitions(n: i32, k: i32) -> i32 {
+    if n == 0 {
+        return 1;
+    }
+    if n < 0 {
+        return 0;
+    }
+    if k == 0 {
+        return 0;
+    }
+    return partitions(n - k, k) + partitions(n, k - 1);
+}
+
+fn main() -> i32 {
+    print_i32(partitions(10, 10));
+    return 0;
+}

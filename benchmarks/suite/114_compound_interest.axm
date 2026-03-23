@@ -1,0 +1,13 @@
+@module compound_interest;
+
+fn main() -> i32 {
+    let principal: f64 = 1.0;
+    let rate: f64 = 0.1;
+    let years: i32 = 10;
+    let amount: f64 = principal;
+    for i: i32 in range(0, years) {
+        amount = amount * (1.0 + rate);
+    }
+    print_f64(amount);
+    return 0;
+}

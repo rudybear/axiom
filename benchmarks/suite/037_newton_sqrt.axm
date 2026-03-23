@@ -1,0 +1,15 @@
+@module newton_sqrt;
+
+@pure
+fn newton_sqrt(x: f64, iterations: i32) -> f64 {
+    let guess: f64 = x / 2.0;
+    for i: i32 in range(0, iterations) {
+        guess = (guess + x / guess) / 2.0;
+    }
+    return guess;
+}
+
+fn main() -> i32 {
+    print_f64(newton_sqrt(10.0, 20));
+    return 0;
+}

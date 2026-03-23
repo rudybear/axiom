@@ -1,0 +1,10 @@
+@module golden_ratio;
+
+fn main() -> i32 {
+    let phi: f64 = 1.0;
+    for i: i32 in range(0, 100) {
+        phi = 1.0 + 1.0 / phi;
+    }
+    print_f64(phi);
+    return 0;
+}

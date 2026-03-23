@@ -1,0 +1,18 @@
+@module catalan_recursive;
+
+@pure
+fn catalan(n: i32) -> i32 {
+    if n <= 1 {
+        return 1;
+    }
+    let sum: i32 = 0;
+    for i: i32 in range(0, n) {
+        sum = sum + catalan(i) * catalan(n - 1 - i);
+    }
+    return sum;
+}
+
+fn main() -> i32 {
+    print_i32(catalan(5));
+    return 0;
+}

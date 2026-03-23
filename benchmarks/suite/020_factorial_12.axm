@@ -1,0 +1,15 @@
+@module factorial_12;
+
+@pure
+fn factorial(n: i32) -> i64 {
+    let result: i64 = 1;
+    for i: i32 in range(2, n + 1) {
+        result = result * widen(i);
+    }
+    return result;
+}
+
+fn main() -> i32 {
+    print_i64(factorial(12));
+    return 0;
+}

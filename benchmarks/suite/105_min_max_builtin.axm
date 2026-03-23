@@ -1,0 +1,8 @@
+@module min_max_builtin;
+
+fn main() -> i32 {
+    let a: i32 = min(3, 7);
+    let b: i32 = max(3, 7);
+    print_i32(a + b - min(a, b));
+    return 0;
+}

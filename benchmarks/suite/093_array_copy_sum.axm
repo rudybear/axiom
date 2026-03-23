@@ -1,0 +1,18 @@
+@module array_copy_sum;
+
+fn main() -> i32 {
+    let src: array[i32, 100] = array_zeros[i32, 100];
+    let dst: array[i32, 100] = array_zeros[i32, 100];
+    for i: i32 in range(0, 100) {
+        src[i] = i;
+    }
+    for i: i32 in range(0, 100) {
+        dst[i] = src[i];
+    }
+    let sum: i32 = 0;
+    for i: i32 in range(0, 100) {
+        sum = sum + dst[i];
+    }
+    print_i32(sum);
+    return 0;
+}

@@ -1,0 +1,17 @@
+@module number_reverse;
+
+@pure
+fn reverse_num(n: i32) -> i32 {
+    let result: i32 = 0;
+    let x: i32 = n;
+    while x > 0 {
+        result = result * 10 + x % 10;
+        x = x / 10;
+    }
+    return result;
+}
+
+fn main() -> i32 {
+    print_i32(reverse_num(12345));
+    return 0;
+}

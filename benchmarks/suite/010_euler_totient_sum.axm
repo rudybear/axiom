@@ -1,0 +1,33 @@
+@module euler_totient_sum;
+
+@pure
+fn gcd(a: i32, b: i32) -> i32 {
+    let x: i32 = a;
+    let y: i32 = b;
+    while y != 0 {
+        let t: i32 = y;
+        y = x % y;
+        x = t;
+    }
+    return x;
+}
+
+@pure
+fn totient(n: i32) -> i32 {
+    let count: i32 = 0;
+    for i: i32 in range(1, n + 1) {
+        if gcd(i, n) == 1 {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+fn main() -> i32 {
+    let sum: i32 = 0;
+    for n: i32 in range(1, 101) {
+        sum = sum + totient(n);
+    }
+    print_i32(sum);
+    return 0;
+}

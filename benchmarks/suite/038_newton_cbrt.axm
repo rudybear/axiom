@@ -1,0 +1,15 @@
+@module newton_cbrt;
+
+@pure
+fn newton_cbrt(x: f64, iterations: i32) -> f64 {
+    let guess: f64 = x / 3.0;
+    for i: i32 in range(0, iterations) {
+        guess = (2.0 * guess + x / (guess * guess)) / 3.0;
+    }
+    return guess;
+}
+
+fn main() -> i32 {
+    print_f64(newton_cbrt(27.0, 30));
+    return 0;
+}

@@ -1,0 +1,17 @@
+@module exp_taylor;
+
+@pure
+fn exp_taylor(x: f64, terms: i32) -> f64 {
+    let result: f64 = 1.0;
+    let term: f64 = 1.0;
+    for i: i32 in range(1, terms) {
+        term = term * x / to_f64(i);
+        result = result + term;
+    }
+    return result;
+}
+
+fn main() -> i32 {
+    print_f64(exp_taylor(2.0, 25));
+    return 0;
+}

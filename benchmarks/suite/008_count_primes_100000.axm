@@ -1,0 +1,25 @@
+@module count_primes_100000;
+
+@pure
+fn is_prime(n: i32) -> i32 {
+    if n < 2 {
+        return 0;
+    }
+    let i: i32 = 2;
+    while i * i <= n {
+        if n % i == 0 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn main() -> i32 {
+    let count: i32 = 0;
+    for n: i32 in range(2, 100001) {
+        count = count + is_prime(n);
+    }
+    print_i32(count);
+    return 0;
+}

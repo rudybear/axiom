@@ -1,0 +1,16 @@
+@module integration_trapezoidal;
+
+fn main() -> i32 {
+    let a: f64 = 0.0;
+    let b: f64 = 1.0;
+    let n: i32 = 1000000;
+    let dx: f64 = (b - a) / to_f64(n);
+    let sum: f64 = a * a / 2.0 + b * b / 2.0;
+    for i: i32 in range(1, n) {
+        let x: f64 = a + to_f64(i) * dx;
+        sum = sum + x * x;
+    }
+    let result: f64 = sum * dx;
+    print_f64(result);
+    return 0;
+}

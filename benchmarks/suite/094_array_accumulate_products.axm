@@ -1,0 +1,14 @@
+@module array_accumulate_products;
+
+fn main() -> i32 {
+    let arr: array[i32, 10] = array_zeros[i32, 10];
+    for i: i32 in range(0, 10) {
+        arr[i] = i + 1;
+    }
+    let product: i32 = 1;
+    for i: i32 in range(0, 10) {
+        product = product * arr[i];
+    }
+    print_i32(product);
+    return 0;
+}

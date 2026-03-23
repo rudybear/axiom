@@ -1,0 +1,6 @@
+@module sqrt_builtin;
+
+fn main() -> i32 {
+    print_f64(sqrt(2.0));
+    return 0;
+}

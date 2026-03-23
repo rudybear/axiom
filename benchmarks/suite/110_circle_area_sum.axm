@@ -1,0 +1,12 @@
+@module circle_area_sum;
+
+fn main() -> i32 {
+    let pi: f64 = 3.14159265358979;
+    let total: f64 = 0.0;
+    for r: i32 in range(1, 50) {
+        let rf: f64 = to_f64(r);
+        total = total + pi * rf * rf;
+    }
+    print_f64(total);
+    return 0;
+}

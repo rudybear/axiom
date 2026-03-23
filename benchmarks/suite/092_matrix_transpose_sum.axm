@@ -1,0 +1,22 @@
+@module matrix_transpose_sum;
+
+fn main() -> i32 {
+    let mat: array[i32, 25] = array_zeros[i32, 25];
+    let trans: array[i32, 25] = array_zeros[i32, 25];
+    for i: i32 in range(0, 5) {
+        for j: i32 in range(0, 5) {
+            mat[i * 5 + j] = i * 5 + j + 1;
+        }
+    }
+    for i: i32 in range(0, 5) {
+        for j: i32 in range(0, 5) {
+            trans[j * 5 + i] = mat[i * 5 + j];
+        }
+    }
+    let sum: i32 = 0;
+    for i: i32 in range(0, 25) {
+        sum = sum + mat[i] + trans[i];
+    }
+    print_i32(sum);
+    return 0;
+}

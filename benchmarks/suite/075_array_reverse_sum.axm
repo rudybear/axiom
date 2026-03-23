@@ -1,0 +1,18 @@
+@module array_reverse_sum;
+
+fn main() -> i32 {
+    let arr: array[i32, 100] = array_zeros[i32, 100];
+    for i: i32 in range(0, 100) {
+        arr[i] = i;
+    }
+    let rev: array[i32, 100] = array_zeros[i32, 100];
+    for i: i32 in range(0, 100) {
+        rev[i] = arr[99 - i];
+    }
+    let sum: i32 = 0;
+    for i: i32 in range(0, 100) {
+        sum = sum + rev[i];
+    }
+    print_i32(sum);
+    return 0;
+}

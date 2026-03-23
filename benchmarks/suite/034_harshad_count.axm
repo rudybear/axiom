@@ -1,0 +1,23 @@
+@module harshad_count;
+
+@pure
+fn digit_sum(n: i32) -> i32 {
+    let sum: i32 = 0;
+    let x: i32 = n;
+    while x > 0 {
+        sum = sum + x % 10;
+        x = x / 10;
+    }
+    return sum;
+}
+
+fn main() -> i32 {
+    let count: i32 = 0;
+    for n: i32 in range(1, 51) {
+        if n % digit_sum(n) == 0 {
+            count = count + 1;
+        }
+    }
+    print_i32(count);
+    return 0;
+}

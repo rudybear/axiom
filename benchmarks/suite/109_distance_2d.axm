@@ -1,0 +1,13 @@
+@module distance_2d;
+
+fn main() -> i32 {
+    let x1: f64 = 0.0;
+    let y1: f64 = 0.0;
+    let x2: f64 = 3.0;
+    let y2: f64 = 4.0;
+    let dx: f64 = x2 - x1;
+    let dy: f64 = y2 - y1;
+    let dist: f64 = sqrt(dx * dx + dy * dy);
+    print_f64(dist);
+    return 0;
+}

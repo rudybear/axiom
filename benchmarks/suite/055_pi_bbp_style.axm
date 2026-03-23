@@ -1,0 +1,14 @@
+@module pi_bbp_style;
+
+fn main() -> i32 {
+    let pi: f64 = 0.0;
+    let sixteen_pow: f64 = 1.0;
+    for k: i32 in range(0, 20) {
+        let kf: f64 = to_f64(k);
+        let term: f64 = 4.0 / (8.0 * kf + 1.0) - 2.0 / (8.0 * kf + 4.0) - 1.0 / (8.0 * kf + 5.0) - 1.0 / (8.0 * kf + 6.0);
+        pi = pi + term / sixteen_pow;
+        sixteen_pow = sixteen_pow * 16.0;
+    }
+    print_f64(pi);
+    return 0;
+}

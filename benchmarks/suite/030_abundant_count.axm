@@ -1,0 +1,23 @@
+@module abundant_count;
+
+@pure
+fn sum_proper_divisors(n: i32) -> i32 {
+    let sum: i32 = 0;
+    for i: i32 in range(1, n) {
+        if n % i == 0 {
+            sum = sum + i;
+        }
+    }
+    return sum;
+}
+
+fn main() -> i32 {
+    let count: i32 = 0;
+    for n: i32 in range(2, 1001) {
+        if sum_proper_divisors(n) > n {
+            count = count + 1;
+        }
+    }
+    print_i32(count);
+    return 0;
+}

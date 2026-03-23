@@ -1,0 +1,25 @@
+@module selection_sort_sum;
+
+fn main() -> i32 {
+    let arr: array[i32, 20] = array_zeros[i32, 20];
+    for i: i32 in range(0, 20) {
+        arr[i] = 20 - i;
+    }
+    for i: i32 in range(0, 19) {
+        let min_idx: i32 = i;
+        for j: i32 in range(i + 1, 20) {
+            if arr[j] < arr[min_idx] {
+                min_idx = j;
+            }
+        }
+        let tmp: i32 = arr[i];
+        arr[i] = arr[min_idx];
+        arr[min_idx] = tmp;
+    }
+    let sum: i32 = 0;
+    for i: i32 in range(0, 20) {
+        sum = sum + arr[i];
+    }
+    print_i32(sum);
+    return 0;
+}

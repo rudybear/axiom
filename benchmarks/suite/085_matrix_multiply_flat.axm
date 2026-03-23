@@ -1,0 +1,29 @@
+@module matrix_multiply_flat;
+
+fn main() -> i32 {
+    let n: i32 = 5;
+    let a: array[i32, 25] = array_zeros[i32, 25];
+    let b: array[i32, 25] = array_zeros[i32, 25];
+    let c: array[i32, 25] = array_zeros[i32, 25];
+    for i: i32 in range(0, 5) {
+        for j: i32 in range(0, 5) {
+            a[i * 5 + j] = i + j + 1;
+            b[i * 5 + j] = i + j + 1;
+        }
+    }
+    for i: i32 in range(0, 5) {
+        for j: i32 in range(0, 5) {
+            let sum: i32 = 0;
+            for k: i32 in range(0, 5) {
+                sum = sum + a[i * 5 + k] * b[k * 5 + j];
+            }
+            c[i * 5 + j] = sum;
+        }
+    }
+    let total: i32 = 0;
+    for i: i32 in range(0, 25) {
+        total = total + c[i];
+    }
+    print_i32(total);
+    return 0;
+}

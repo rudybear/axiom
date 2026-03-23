@@ -1,0 +1,18 @@
+@module power_fast_recursive;
+
+@pure
+fn fast_power(base: i64, exp: i32) -> i64 {
+    if exp == 0 {
+        return 1;
+    }
+    if exp % 2 == 0 {
+        let half: i64 = fast_power(base, exp / 2);
+        return half * half;
+    }
+    return base * fast_power(base, exp - 1);
+}
+
+fn main() -> i32 {
+    print_i64(fast_power(2, 30));
+    return 0;
+}

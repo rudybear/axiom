@@ -1,0 +1,10 @@
+@module sum_of_abs;
+
+fn main() -> i32 {
+    let sum: i32 = 0;
+    for i: i32 in range(-50, 51) {
+        sum = sum + abs(i);
+    }
+    print_i32(sum);
+    return 0;
+}

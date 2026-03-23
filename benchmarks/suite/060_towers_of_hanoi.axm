@@ -1,0 +1,14 @@
+@module towers_of_hanoi;
+
+@pure
+fn hanoi_count(n: i32) -> i32 {
+    if n == 0 {
+        return 0;
+    }
+    return 2 * hanoi_count(n - 1) + 1;
+}
+
+fn main() -> i32 {
+    print_i32(hanoi_count(10));
+    return 0;
+}

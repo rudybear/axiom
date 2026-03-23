@@ -1,0 +1,24 @@
+@module mandelbrot_escape;
+
+@pure
+fn mandelbrot(cr: f64, ci: f64, max_iter: i32) -> i32 {
+    let zr: f64 = 0.0;
+    let zi: f64 = 0.0;
+    let iter: i32 = 0;
+    while iter < max_iter {
+        let zr2: f64 = zr * zr;
+        let zi2: f64 = zi * zi;
+        if zr2 + zi2 > 4.0 {
+            return iter;
+        }
+        zi = 2.0 * zr * zi + ci;
+        zr = zr2 - zi2 + cr;
+        iter = iter + 1;
+    }
+    return max_iter;
+}
+
+fn main() -> i32 {
+    print_i32(mandelbrot(0.5, 0.5, 1000));
+    return 0;
+}

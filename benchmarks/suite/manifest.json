@@ -1,0 +1,922 @@
+[
+  {
+    "id": "001",
+    "name": "gcd_basic",
+    "category": "number_theory",
+    "expected_output": "12\n",
+    "axm": "001_gcd_basic.axm",
+    "c": "001_gcd_basic.c"
+  },
+  {
+    "id": "002",
+    "name": "gcd_large",
+    "category": "number_theory",
+    "expected_output": "6\n",
+    "axm": "002_gcd_large.axm",
+    "c": "002_gcd_large.c"
+  },
+  {
+    "id": "003",
+    "name": "gcd_recursive",
+    "category": "number_theory",
+    "expected_output": "12\n",
+    "axm": "003_gcd_recursive.axm",
+    "c": "003_gcd_recursive.c"
+  },
+  {
+    "id": "004",
+    "name": "is_prime_small",
+    "category": "number_theory",
+    "expected_output": "1\n",
+    "axm": "004_is_prime_small.axm",
+    "c": "004_is_prime_small.c"
+  },
+  {
+    "id": "005",
+    "name": "is_prime_large",
+    "category": "number_theory",
+    "expected_output": "1\n",
+    "axm": "005_is_prime_large.axm",
+    "c": "005_is_prime_large.c"
+  },
+  {
+    "id": "006",
+    "name": "count_primes_1000",
+    "category": "number_theory",
+    "expected_output": "168\n",
+    "axm": "006_count_primes_1000.axm",
+    "c": "006_count_primes_1000.c"
+  },
+  {
+    "id": "007",
+    "name": "count_primes_10000",
+    "category": "number_theory",
+    "expected_output": "1229\n",
+    "axm": "007_count_primes_10000.axm",
+    "c": "007_count_primes_10000.c"
+  },
+  {
+    "id": "008",
+    "name": "count_primes_100000",
+    "category": "number_theory",
+    "expected_output": "9592\n",
+    "axm": "008_count_primes_100000.axm",
+    "c": "008_count_primes_100000.c"
+  },
+  {
+    "id": "009",
+    "name": "euler_totient",
+    "category": "number_theory",
+    "expected_output": "4\n",
+    "axm": "009_euler_totient.axm",
+    "c": "009_euler_totient.c"
+  },
+  {
+    "id": "010",
+    "name": "euler_totient_sum",
+    "category": "number_theory",
+    "expected_output": "3044\n",
+    "axm": "010_euler_totient_sum.axm",
+    "c": "010_euler_totient_sum.c"
+  },
+  {
+    "id": "011",
+    "name": "collatz_steps_27",
+    "category": "number_theory",
+    "expected_output": "111\n",
+    "axm": "011_collatz_steps_27.axm",
+    "c": "011_collatz_steps_27.c"
+  },
+  {
+    "id": "012",
+    "name": "collatz_steps_871",
+    "category": "number_theory",
+    "expected_output": "178\n",
+    "axm": "012_collatz_steps_871.axm",
+    "c": "012_collatz_steps_871.c"
+  },
+  {
+    "id": "013",
+    "name": "collatz_max_steps",
+    "category": "number_theory",
+    "expected_output": "178\n",
+    "axm": "013_collatz_max_steps.axm",
+    "c": "013_collatz_max_steps.c"
+  },
+  {
+    "id": "014",
+    "name": "sum_of_divisors",
+    "category": "number_theory",
+    "expected_output": "28\n",
+    "axm": "014_sum_of_divisors.axm",
+    "c": "014_sum_of_divisors.c"
+  },
+  {
+    "id": "015",
+    "name": "modular_exp",
+    "category": "number_theory",
+    "expected_output": "601\n",
+    "axm": "015_modular_exp.axm",
+    "c": "015_modular_exp.c"
+  },
+  {
+    "id": "016",
+    "name": "fibonacci_iterative_40",
+    "category": "number_theory",
+    "expected_output": "102334155\n",
+    "axm": "016_fibonacci_iterative_40.axm",
+    "c": "016_fibonacci_iterative_40.c"
+  },
+  {
+    "id": "017",
+    "name": "fibonacci_iterative_50",
+    "category": "number_theory",
+    "expected_output": "12586269025\n",
+    "axm": "017_fibonacci_iterative_50.axm",
+    "c": "017_fibonacci_iterative_50.c"
+  },
+  {
+    "id": "018",
+    "name": "fibonacci_recursive_30",
+    "category": "number_theory",
+    "expected_output": "832040\n",
+    "axm": "018_fibonacci_recursive_30.axm",
+    "c": "018_fibonacci_recursive_30.c"
+  },
+  {
+    "id": "019",
+    "name": "fibonacci_recursive_35",
+    "category": "number_theory",
+    "expected_output": "9227465\n",
+    "axm": "019_fibonacci_recursive_35.axm",
+    "c": "019_fibonacci_recursive_35.c"
+  },
+  {
+    "id": "020",
+    "name": "factorial_12",
+    "category": "number_theory",
+    "expected_output": "479001600\n",
+    "axm": "020_factorial_12.axm",
+    "c": "020_factorial_12.c"
+  },
+  {
+    "id": "021",
+    "name": "factorial_20",
+    "category": "number_theory",
+    "expected_output": "2432902008176640000\n",
+    "axm": "021_factorial_20.axm",
+    "c": "021_factorial_20.c"
+  },
+  {
+    "id": "022",
+    "name": "perfect_number_check",
+    "category": "number_theory",
+    "expected_output": "1\n",
+    "axm": "022_perfect_number_check.axm",
+    "c": "022_perfect_number_check.c"
+  },
+  {
+    "id": "023",
+    "name": "count_perfect_numbers",
+    "category": "number_theory",
+    "expected_output": "4\n",
+    "axm": "023_count_perfect_numbers.axm",
+    "c": "023_count_perfect_numbers.c"
+  },
+  {
+    "id": "024",
+    "name": "coprimality_test",
+    "category": "number_theory",
+    "expected_output": "14\n",
+    "axm": "024_coprimality_test.axm",
+    "c": "024_coprimality_test.c"
+  },
+  {
+    "id": "025",
+    "name": "digital_root",
+    "category": "number_theory",
+    "expected_output": "6\n",
+    "axm": "025_digital_root.axm",
+    "c": "025_digital_root.c"
+  },
+  {
+    "id": "026",
+    "name": "digit_sum",
+    "category": "number_theory",
+    "expected_output": "45\n",
+    "axm": "026_digit_sum.axm",
+    "c": "026_digit_sum.c"
+  },
+  {
+    "id": "027",
+    "name": "lcm",
+    "category": "number_theory",
+    "expected_output": "36\n",
+    "axm": "027_lcm.axm",
+    "c": "027_lcm.c"
+  },
+  {
+    "id": "028",
+    "name": "sum_of_squares",
+    "category": "number_theory",
+    "expected_output": "338350\n",
+    "axm": "028_sum_of_squares.axm",
+    "c": "028_sum_of_squares.c"
+  },
+  {
+    "id": "029",
+    "name": "sum_cubes",
+    "category": "number_theory",
+    "expected_output": "25502500\n",
+    "axm": "029_sum_cubes.axm",
+    "c": "029_sum_cubes.c"
+  },
+  {
+    "id": "030",
+    "name": "abundant_count",
+    "category": "number_theory",
+    "expected_output": "246\n",
+    "axm": "030_abundant_count.axm",
+    "c": "030_abundant_count.c"
+  },
+  {
+    "id": "031",
+    "name": "number_reverse",
+    "category": "number_theory",
+    "expected_output": "54321\n",
+    "axm": "031_number_reverse.axm",
+    "c": "031_number_reverse.c"
+  },
+  {
+    "id": "032",
+    "name": "palindrome_count",
+    "category": "number_theory",
+    "expected_output": "108\n",
+    "axm": "032_palindrome_count.axm",
+    "c": "032_palindrome_count.c"
+  },
+  {
+    "id": "033",
+    "name": "power_iterative",
+    "category": "number_theory",
+    "expected_output": "1073741824\n",
+    "axm": "033_power_iterative.axm",
+    "c": "033_power_iterative.c"
+  },
+  {
+    "id": "034",
+    "name": "harshad_count",
+    "category": "number_theory",
+    "expected_output": "23\n",
+    "axm": "034_harshad_count.axm",
+    "c": "034_harshad_count.c"
+  },
+  {
+    "id": "035",
+    "name": "triangular_number",
+    "category": "number_theory",
+    "expected_output": "5050\n",
+    "axm": "035_triangular_number.axm",
+    "c": "035_triangular_number.c"
+  },
+  {
+    "id": "036",
+    "name": "leibniz_pi",
+    "category": "numerical",
+    "expected_output": "3.141593\n",
+    "axm": "036_leibniz_pi.axm",
+    "c": "036_leibniz_pi.c"
+  },
+  {
+    "id": "037",
+    "name": "newton_sqrt",
+    "category": "numerical",
+    "expected_output": "3.162278\n",
+    "axm": "037_newton_sqrt.axm",
+    "c": "037_newton_sqrt.c"
+  },
+  {
+    "id": "038",
+    "name": "newton_cbrt",
+    "category": "numerical",
+    "expected_output": "3.000000\n",
+    "axm": "038_newton_cbrt.axm",
+    "c": "038_newton_cbrt.c"
+  },
+  {
+    "id": "039",
+    "name": "euler_number",
+    "category": "numerical",
+    "expected_output": "2.718282\n",
+    "axm": "039_euler_number.axm",
+    "c": "039_euler_number.c"
+  },
+  {
+    "id": "040",
+    "name": "sine_taylor",
+    "category": "numerical",
+    "expected_output": "0.841471\n",
+    "axm": "040_sine_taylor.axm",
+    "c": "040_sine_taylor.c"
+  },
+  {
+    "id": "041",
+    "name": "cosine_taylor",
+    "category": "numerical",
+    "expected_output": "0.540302\n",
+    "axm": "041_cosine_taylor.axm",
+    "c": "041_cosine_taylor.c"
+  },
+  {
+    "id": "042",
+    "name": "exp_taylor",
+    "category": "numerical",
+    "expected_output": "7.389056\n",
+    "axm": "042_exp_taylor.axm",
+    "c": "042_exp_taylor.c"
+  },
+  {
+    "id": "043",
+    "name": "ln_series",
+    "category": "numerical",
+    "expected_output": "0.693147\n",
+    "axm": "043_ln_series.axm",
+    "c": "043_ln_series.c"
+  },
+  {
+    "id": "044",
+    "name": "wallis_pi",
+    "category": "numerical",
+    "expected_output": "3.141592\n",
+    "axm": "044_wallis_pi.axm",
+    "c": "044_wallis_pi.c"
+  },
+  {
+    "id": "045",
+    "name": "integration_midpoint",
+    "category": "numerical",
+    "expected_output": "0.333333\n",
+    "axm": "045_integration_midpoint.axm",
+    "c": "045_integration_midpoint.c"
+  },
+  {
+    "id": "046",
+    "name": "integration_trapezoidal",
+    "category": "numerical",
+    "expected_output": "0.333333\n",
+    "axm": "046_integration_trapezoidal.axm",
+    "c": "046_integration_trapezoidal.c"
+  },
+  {
+    "id": "047",
+    "name": "integration_simpson",
+    "category": "numerical",
+    "expected_output": "0.333333\n",
+    "axm": "047_integration_simpson.axm",
+    "c": "047_integration_simpson.c"
+  },
+  {
+    "id": "048",
+    "name": "golden_ratio",
+    "category": "numerical",
+    "expected_output": "1.618034\n",
+    "axm": "048_golden_ratio.axm",
+    "c": "048_golden_ratio.c"
+  },
+  {
+    "id": "049",
+    "name": "logistic_map",
+    "category": "numerical",
+    "expected_output": "0.513045\n",
+    "axm": "049_logistic_map.axm",
+    "c": "049_logistic_map.c"
+  },
+  {
+    "id": "050",
+    "name": "harmonic_sum",
+    "category": "numerical",
+    "expected_output": "7.485471\n",
+    "axm": "050_harmonic_sum.axm",
+    "c": "050_harmonic_sum.c"
+  },
+  {
+    "id": "051",
+    "name": "basel_problem",
+    "category": "numerical",
+    "expected_output": "1.644924\n",
+    "axm": "051_basel_problem.axm",
+    "c": "051_basel_problem.c"
+  },
+  {
+    "id": "052",
+    "name": "sqrt_builtin",
+    "category": "numerical",
+    "expected_output": "1.414214\n",
+    "axm": "052_sqrt_builtin.axm",
+    "c": "052_sqrt_builtin.c"
+  },
+  {
+    "id": "053",
+    "name": "pow_builtin",
+    "category": "numerical",
+    "expected_output": "1024.000000\n",
+    "axm": "053_pow_builtin.axm",
+    "c": "053_pow_builtin.c"
+  },
+  {
+    "id": "054",
+    "name": "geometric_series",
+    "category": "numerical",
+    "expected_output": "1.999998\n",
+    "axm": "054_geometric_series.axm",
+    "c": "054_geometric_series.c"
+  },
+  {
+    "id": "055",
+    "name": "pi_bbp_style",
+    "category": "numerical",
+    "expected_output": "3.141593\n",
+    "axm": "055_pi_bbp_style.axm",
+    "c": "055_pi_bbp_style.c"
+  },
+  {
+    "id": "056",
+    "name": "ackermann_2_3",
+    "category": "recursion",
+    "expected_output": "9\n",
+    "axm": "056_ackermann_2_3.axm",
+    "c": "056_ackermann_2_3.c"
+  },
+  {
+    "id": "057",
+    "name": "ackermann_3_4",
+    "category": "recursion",
+    "expected_output": "125\n",
+    "axm": "057_ackermann_3_4.axm",
+    "c": "057_ackermann_3_4.c"
+  },
+  {
+    "id": "058",
+    "name": "tak",
+    "category": "recursion",
+    "expected_output": "7\n",
+    "axm": "058_tak.axm",
+    "c": "058_tak.c"
+  },
+  {
+    "id": "059",
+    "name": "mccarthy91",
+    "category": "recursion",
+    "expected_output": "91\n",
+    "axm": "059_mccarthy91.axm",
+    "c": "059_mccarthy91.c"
+  },
+  {
+    "id": "060",
+    "name": "towers_of_hanoi",
+    "category": "recursion",
+    "expected_output": "1023\n",
+    "axm": "060_towers_of_hanoi.axm",
+    "c": "060_towers_of_hanoi.c"
+  },
+  {
+    "id": "061",
+    "name": "catalan_recursive",
+    "category": "recursion",
+    "expected_output": "42\n",
+    "axm": "061_catalan_recursive.axm",
+    "c": "061_catalan_recursive.c"
+  },
+  {
+    "id": "062",
+    "name": "pascal_element",
+    "category": "recursion",
+    "expected_output": "10\n",
+    "axm": "062_pascal_element.axm",
+    "c": "062_pascal_element.c"
+  },
+  {
+    "id": "063",
+    "name": "pascal_row_sum",
+    "category": "recursion",
+    "expected_output": "1024\n",
+    "axm": "063_pascal_row_sum.axm",
+    "c": "063_pascal_row_sum.c"
+  },
+  {
+    "id": "064",
+    "name": "power_recursive",
+    "category": "recursion",
+    "expected_output": "59049\n",
+    "axm": "064_power_recursive.axm",
+    "c": "064_power_recursive.c"
+  },
+  {
+    "id": "065",
+    "name": "power_fast_recursive",
+    "category": "recursion",
+    "expected_output": "1073741824\n",
+    "axm": "065_power_fast_recursive.axm",
+    "c": "065_power_fast_recursive.c"
+  },
+  {
+    "id": "066",
+    "name": "sum_recursive",
+    "category": "recursion",
+    "expected_output": "5050\n",
+    "axm": "066_sum_recursive.axm",
+    "c": "066_sum_recursive.c"
+  },
+  {
+    "id": "067",
+    "name": "gcd_recursive_stress",
+    "category": "recursion",
+    "expected_output": "1\n",
+    "axm": "067_gcd_recursive_stress.axm",
+    "c": "067_gcd_recursive_stress.c"
+  },
+  {
+    "id": "068",
+    "name": "fibonacci_sum_recursive",
+    "category": "recursion",
+    "expected_output": "2178308\n",
+    "axm": "068_fibonacci_sum_recursive.axm",
+    "c": "068_fibonacci_sum_recursive.c"
+  },
+  {
+    "id": "069",
+    "name": "tree_depth",
+    "category": "recursion",
+    "expected_output": "20\n",
+    "axm": "069_tree_depth.axm",
+    "c": "069_tree_depth.c"
+  },
+  {
+    "id": "070",
+    "name": "count_paths",
+    "category": "recursion",
+    "expected_output": "48620\n",
+    "axm": "070_count_paths.axm",
+    "c": "070_count_paths.c"
+  },
+  {
+    "id": "071",
+    "name": "integer_partition_count",
+    "category": "recursion",
+    "expected_output": "42\n",
+    "axm": "071_integer_partition_count.axm",
+    "c": "071_integer_partition_count.c"
+  },
+  {
+    "id": "072",
+    "name": "recursive_multiply",
+    "category": "recursion",
+    "expected_output": "56088\n",
+    "axm": "072_recursive_multiply.axm",
+    "c": "072_recursive_multiply.c"
+  },
+  {
+    "id": "073",
+    "name": "array_sum_squares",
+    "category": "array_loop",
+    "expected_output": "285\n",
+    "axm": "073_array_sum_squares.axm",
+    "c": "073_array_sum_squares.c"
+  },
+  {
+    "id": "074",
+    "name": "array_sum_100",
+    "category": "array_loop",
+    "expected_output": "4950\n",
+    "axm": "074_array_sum_100.axm",
+    "c": "074_array_sum_100.c"
+  },
+  {
+    "id": "075",
+    "name": "array_reverse_sum",
+    "category": "array_loop",
+    "expected_output": "4950\n",
+    "axm": "075_array_reverse_sum.axm",
+    "c": "075_array_reverse_sum.c"
+  },
+  {
+    "id": "076",
+    "name": "bubble_sort_sum",
+    "category": "array_loop",
+    "expected_output": "210\n",
+    "axm": "076_bubble_sort_sum.axm",
+    "c": "076_bubble_sort_sum.c"
+  },
+  {
+    "id": "077",
+    "name": "selection_sort_sum",
+    "category": "array_loop",
+    "expected_output": "210\n",
+    "axm": "077_selection_sort_sum.axm",
+    "c": "077_selection_sort_sum.c"
+  },
+  {
+    "id": "078",
+    "name": "insertion_sort_sum",
+    "category": "array_loop",
+    "expected_output": "210\n",
+    "axm": "078_insertion_sort_sum.axm",
+    "c": "078_insertion_sort_sum.c"
+  },
+  {
+    "id": "079",
+    "name": "dot_product",
+    "category": "array_loop",
+    "expected_output": "2870\n",
+    "axm": "079_dot_product.axm",
+    "c": "079_dot_product.c"
+  },
+  {
+    "id": "080",
+    "name": "prefix_sum",
+    "category": "array_loop",
+    "expected_output": "45\n",
+    "axm": "080_prefix_sum.axm",
+    "c": "080_prefix_sum.c"
+  },
+  {
+    "id": "081",
+    "name": "kadane_max_subarray",
+    "category": "array_loop",
+    "expected_output": "6\n",
+    "axm": "081_kadane_max_subarray.axm",
+    "c": "081_kadane_max_subarray.c"
+  },
+  {
+    "id": "082",
+    "name": "sieve_eratosthenes",
+    "category": "array_loop",
+    "expected_output": "1229\n",
+    "axm": "082_sieve_eratosthenes.axm",
+    "c": "082_sieve_eratosthenes.c"
+  },
+  {
+    "id": "083",
+    "name": "polynomial_eval",
+    "category": "array_loop",
+    "expected_output": "12345\n",
+    "axm": "083_polynomial_eval.axm",
+    "c": "083_polynomial_eval.c"
+  },
+  {
+    "id": "084",
+    "name": "polynomial_horner",
+    "category": "array_loop",
+    "expected_output": "12345\n",
+    "axm": "084_polynomial_horner.axm",
+    "c": "084_polynomial_horner.c"
+  },
+  {
+    "id": "085",
+    "name": "matrix_multiply_flat",
+    "category": "array_loop",
+    "expected_output": "3375\n",
+    "axm": "085_matrix_multiply_flat.axm",
+    "c": "085_matrix_multiply_flat.c"
+  },
+  {
+    "id": "086",
+    "name": "binary_search",
+    "category": "array_loop",
+    "expected_output": "42\n",
+    "axm": "086_binary_search.axm",
+    "c": "086_binary_search.c"
+  },
+  {
+    "id": "087",
+    "name": "histogram",
+    "category": "array_loop",
+    "expected_output": "10\n",
+    "axm": "087_histogram.axm",
+    "c": "087_histogram.c"
+  },
+  {
+    "id": "088",
+    "name": "running_average",
+    "category": "array_loop",
+    "expected_output": "49.500000\n",
+    "axm": "088_running_average.axm",
+    "c": "088_running_average.c"
+  },
+  {
+    "id": "089",
+    "name": "count_inversions",
+    "category": "array_loop",
+    "expected_output": "190\n",
+    "axm": "089_count_inversions.axm",
+    "c": "089_count_inversions.c"
+  },
+  {
+    "id": "090",
+    "name": "array_min_max",
+    "category": "array_loop",
+    "expected_output": "99\n",
+    "axm": "090_array_min_max.axm",
+    "c": "090_array_min_max.c"
+  },
+  {
+    "id": "091",
+    "name": "matrix_trace",
+    "category": "array_loop",
+    "expected_output": "20\n",
+    "axm": "091_matrix_trace.axm",
+    "c": "091_matrix_trace.c"
+  },
+  {
+    "id": "092",
+    "name": "matrix_transpose_sum",
+    "category": "array_loop",
+    "expected_output": "650\n",
+    "axm": "092_matrix_transpose_sum.axm",
+    "c": "092_matrix_transpose_sum.c"
+  },
+  {
+    "id": "093",
+    "name": "array_copy_sum",
+    "category": "array_loop",
+    "expected_output": "4950\n",
+    "axm": "093_array_copy_sum.axm",
+    "c": "093_array_copy_sum.c"
+  },
+  {
+    "id": "094",
+    "name": "array_accumulate_products",
+    "category": "array_loop",
+    "expected_output": "3628800\n",
+    "axm": "094_array_accumulate_products.axm",
+    "c": "094_array_accumulate_products.c"
+  },
+  {
+    "id": "095",
+    "name": "two_sum_brute",
+    "category": "array_loop",
+    "expected_output": "7\n",
+    "axm": "095_two_sum_brute.axm",
+    "c": "095_two_sum_brute.c"
+  },
+  {
+    "id": "096",
+    "name": "mandelbrot_escape",
+    "category": "pure_compute",
+    "expected_output": "5\n",
+    "axm": "096_mandelbrot_escape.axm",
+    "c": "096_mandelbrot_escape.c"
+  },
+  {
+    "id": "097",
+    "name": "mandelbrot_grid",
+    "category": "pure_compute",
+    "expected_output": "9030\n",
+    "axm": "097_mandelbrot_grid.axm",
+    "c": "097_mandelbrot_grid.c"
+  },
+  {
+    "id": "098",
+    "name": "julia_escape",
+    "category": "pure_compute",
+    "expected_output": "4\n",
+    "axm": "098_julia_escape.axm",
+    "c": "098_julia_escape.c"
+  },
+  {
+    "id": "099",
+    "name": "henon_map",
+    "category": "pure_compute",
+    "expected_output": "1.080031\n",
+    "axm": "099_henon_map.axm",
+    "c": "099_henon_map.c"
+  },
+  {
+    "id": "100",
+    "name": "pi_lcg_monte_carlo",
+    "category": "pure_compute",
+    "expected_output": "3.142956\n",
+    "axm": "100_pi_lcg_monte_carlo.axm",
+    "c": "100_pi_lcg_monte_carlo.c"
+  },
+  {
+    "id": "101",
+    "name": "lorenz_step",
+    "category": "pure_compute",
+    "expected_output": "-4.397957\n",
+    "axm": "101_lorenz_step.axm",
+    "c": "101_lorenz_step.c"
+  },
+  {
+    "id": "102",
+    "name": "random_walk_distance",
+    "category": "pure_compute",
+    "expected_output": "0\n",
+    "axm": "102_random_walk_distance.axm",
+    "c": "102_random_walk_distance.c"
+  },
+  {
+    "id": "103",
+    "name": "nbody_scalar_2d",
+    "category": "pure_compute",
+    "expected_output": "12.668147\n",
+    "axm": "103_nbody_scalar_2d.axm",
+    "c": "103_nbody_scalar_2d.c"
+  },
+  {
+    "id": "104",
+    "name": "sum_of_abs",
+    "category": "pure_compute",
+    "expected_output": "2550\n",
+    "axm": "104_sum_of_abs.axm",
+    "c": "104_sum_of_abs.c"
+  },
+  {
+    "id": "105",
+    "name": "min_max_builtin",
+    "category": "pure_compute",
+    "expected_output": "7\n",
+    "axm": "105_min_max_builtin.axm",
+    "c": "105_min_max_builtin.c"
+  },
+  {
+    "id": "106",
+    "name": "lcg_stats",
+    "category": "pure_compute",
+    "expected_output": "1093731792\n",
+    "axm": "106_lcg_stats.axm",
+    "c": "106_lcg_stats.c"
+  },
+  {
+    "id": "107",
+    "name": "fizzbuzz_sum",
+    "category": "pure_compute",
+    "expected_output": "2873\n",
+    "axm": "107_fizzbuzz_sum.axm",
+    "c": "107_fizzbuzz_sum.c"
+  },
+  {
+    "id": "108",
+    "name": "quadratic_roots",
+    "category": "pure_compute",
+    "expected_output": "3.000000\n",
+    "axm": "108_quadratic_roots.axm",
+    "c": "108_quadratic_roots.c"
+  },
+  {
+    "id": "109",
+    "name": "distance_2d",
+    "category": "pure_compute",
+    "expected_output": "5.000000\n",
+    "axm": "109_distance_2d.axm",
+    "c": "109_distance_2d.c"
+  },
+  {
+    "id": "110",
+    "name": "circle_area_sum",
+    "category": "pure_compute",
+    "expected_output": "126998.883021\n",
+    "axm": "110_circle_area_sum.axm",
+    "c": "110_circle_area_sum.c"
+  },
+  {
+    "id": "111",
+    "name": "widen_narrow_roundtrip",
+    "category": "pure_compute",
+    "expected_output": "42\n",
+    "axm": "111_widen_narrow_roundtrip.axm",
+    "c": "111_widen_narrow_roundtrip.c"
+  },
+  {
+    "id": "112",
+    "name": "type_conversion_chain",
+    "category": "pure_compute",
+    "expected_output": "42\n",
+    "axm": "112_type_conversion_chain.axm",
+    "c": "112_type_conversion_chain.c"
+  },
+  {
+    "id": "113",
+    "name": "nested_loop_sum",
+    "category": "pure_compute",
+    "expected_output": "330\n",
+    "axm": "113_nested_loop_sum.axm",
+    "c": "113_nested_loop_sum.c"
+  },
+  {
+    "id": "114",
+    "name": "compound_interest",
+    "category": "pure_compute",
+    "expected_output": "2.593742\n",
+    "axm": "114_compound_interest.axm",
+    "c": "114_compound_interest.c"
+  },
+  {
+    "id": "115",
+    "name": "alternating_series",
+    "category": "pure_compute",
+    "expected_output": "0.693147\n",
+    "axm": "115_alternating_series.axm",
+    "c": "115_alternating_series.c"
+  }
+]

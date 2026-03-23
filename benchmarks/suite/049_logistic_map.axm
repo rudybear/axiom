@@ -1,0 +1,11 @@
+@module logistic_map;
+
+fn main() -> i32 {
+    let r: f64 = 3.2;
+    let x: f64 = 0.5;
+    for i: i32 in range(0, 1000) {
+        x = r * x * (1.0 - x);
+    }
+    print_f64(x);
+    return 0;
+}

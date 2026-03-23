@@ -1,0 +1,9 @@
+@module type_conversion_chain;
+
+fn main() -> i32 {
+    let x: i32 = 42;
+    let y: f64 = to_f64(x);
+    let z: i32 = truncate(y);
+    print_i32(z);
+    return 0;
+}

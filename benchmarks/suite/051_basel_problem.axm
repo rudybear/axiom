@@ -1,0 +1,11 @@
+@module basel_problem;
+
+fn main() -> i32 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(1, 100001) {
+        let n: f64 = to_f64(i);
+        sum = sum + 1.0 / (n * n);
+    }
+    print_f64(sum);
+    return 0;
+}

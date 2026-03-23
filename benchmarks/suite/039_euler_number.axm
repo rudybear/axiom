@@ -1,0 +1,12 @@
+@module euler_number;
+
+fn main() -> i32 {
+    let e: f64 = 1.0;
+    let factorial: f64 = 1.0;
+    for i: i32 in range(1, 21) {
+        factorial = factorial * to_f64(i);
+        e = e + 1.0 / factorial;
+    }
+    print_f64(e);
+    return 0;
+}

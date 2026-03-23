@@ -1,0 +1,12 @@
+@module nested_loop_sum;
+
+fn main() -> i32 {
+    let total: i32 = 0;
+    for i: i32 in range(0, 10) {
+        for j: i32 in range(0, i + 1) {
+            total = total + i;
+        }
+    }
+    print_i32(total);
+    return 0;
+}

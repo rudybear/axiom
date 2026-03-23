@@ -1,0 +1,9 @@
+@module widen_narrow_roundtrip;
+
+fn main() -> i32 {
+    let x: i32 = 42;
+    let y: i64 = widen(x);
+    let z: i32 = narrow(y);
+    print_i32(z);
+    return 0;
+}

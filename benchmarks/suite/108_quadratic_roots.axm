@@ -1,0 +1,11 @@
+@module quadratic_roots;
+
+fn main() -> i32 {
+    let a: f64 = 1.0;
+    let b: f64 = -5.0;
+    let c: f64 = 6.0;
+    let discriminant: f64 = b * b - 4.0 * a * c;
+    let root1: f64 = (0.0 - b + sqrt(discriminant)) / (2.0 * a);
+    print_f64(root1);
+    return 0;
+}

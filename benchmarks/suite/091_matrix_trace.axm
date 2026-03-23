@@ -1,0 +1,16 @@
+@module matrix_trace;
+
+fn main() -> i32 {
+    let mat: array[i32, 25] = array_zeros[i32, 25];
+    for i: i32 in range(0, 5) {
+        for j: i32 in range(0, 5) {
+            mat[i * 5 + j] = i + j;
+        }
+    }
+    let trace: i32 = 0;
+    for i: i32 in range(0, 5) {
+        trace = trace + mat[i * 5 + i];
+    }
+    print_i32(trace);
+    return 0;
+}

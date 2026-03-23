@@ -1,0 +1,23 @@
+@module palindrome_count;
+
+@pure
+fn reverse_num(n: i32) -> i32 {
+    let result: i32 = 0;
+    let x: i32 = n;
+    while x > 0 {
+        result = result * 10 + x % 10;
+        x = x / 10;
+    }
+    return result;
+}
+
+fn main() -> i32 {
+    let count: i32 = 0;
+    for n: i32 in range(1, 1000) {
+        if reverse_num(n) == n {
+            count = count + 1;
+        }
+    }
+    print_i32(count);
+    return 0;
+}

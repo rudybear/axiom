@@ -1,0 +1,14 @@
+@module array_sum_100;
+
+fn main() -> i32 {
+    let arr: array[i32, 100] = array_zeros[i32, 100];
+    for i: i32 in range(0, 100) {
+        arr[i] = i;
+    }
+    let sum: i32 = 0;
+    for i: i32 in range(0, 100) {
+        sum = sum + arr[i];
+    }
+    print_i32(sum);
+    return 0;
+}

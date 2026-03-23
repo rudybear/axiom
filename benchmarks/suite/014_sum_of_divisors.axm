@@ -1,0 +1,17 @@
+@module sum_of_divisors;
+
+@pure
+fn sum_divisors(n: i32) -> i32 {
+    let sum: i32 = 0;
+    for i: i32 in range(1, n + 1) {
+        if n % i == 0 {
+            sum = sum + i;
+        }
+    }
+    return sum;
+}
+
+fn main() -> i32 {
+    print_i32(sum_divisors(12));
+    return 0;
+}

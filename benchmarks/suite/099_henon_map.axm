@@ -1,0 +1,16 @@
+@module henon_map;
+
+fn main() -> i32 {
+    let a: f64 = 1.4;
+    let b: f64 = 0.3;
+    let x: f64 = 0.0;
+    let y: f64 = 0.0;
+    for i: i32 in range(0, 1000) {
+        let new_x: f64 = 1.0 - a * x * x + y;
+        let new_y: f64 = b * x;
+        x = new_x;
+        y = new_y;
+    }
+    print_f64(x);
+    return 0;
+}

@@ -1,0 +1,21 @@
+@module digital_root;
+
+@pure
+fn digital_root(n: i32) -> i32 {
+    let x: i32 = n;
+    while x >= 10 {
+        let sum: i32 = 0;
+        let tmp: i32 = x;
+        while tmp > 0 {
+            sum = sum + tmp % 10;
+            tmp = tmp / 10;
+        }
+        x = sum;
+    }
+    return x;
+}
+
+fn main() -> i32 {
+    print_i32(digital_root(942));
+    return 0;
+}

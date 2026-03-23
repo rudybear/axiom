@@ -1,0 +1,21 @@
+@module polynomial_eval;
+
+fn main() -> i32 {
+    let coeffs: array[i32, 5] = array_zeros[i32, 5];
+    coeffs[0] = 5;
+    coeffs[1] = 4;
+    coeffs[2] = 3;
+    coeffs[3] = 2;
+    coeffs[4] = 1;
+    let x: i32 = 10;
+    let result: i32 = 0;
+    for i: i32 in range(0, 5) {
+        let power: i32 = 1;
+        for j: i32 in range(0, i) {
+            power = power * x;
+        }
+        result = result + coeffs[i] * power;
+    }
+    print_i32(result);
+    return 0;
+}

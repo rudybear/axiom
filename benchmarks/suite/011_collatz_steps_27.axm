@@ -1,0 +1,21 @@
+@module collatz_steps_27;
+
+@pure
+fn collatz_steps(n: i64) -> i32 {
+    let x: i64 = n;
+    let steps: i32 = 0;
+    while x != 1 {
+        if x % 2 == 0 {
+            x = x / 2;
+        } else {
+            x = 3 * x + 1;
+        }
+        steps = steps + 1;
+    }
+    return steps;
+}
+
+fn main() -> i32 {
+    print_i32(collatz_steps(27));
+    return 0;
+}

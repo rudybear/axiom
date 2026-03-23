@@ -1,0 +1,15 @@
+@module running_average;
+
+fn main() -> i32 {
+    let arr: array[i32, 100] = array_zeros[i32, 100];
+    for i: i32 in range(0, 100) {
+        arr[i] = i;
+    }
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, 100) {
+        sum = sum + to_f64(arr[i]);
+    }
+    let avg: f64 = sum / 100.0;
+    print_f64(avg);
+    return 0;
+}

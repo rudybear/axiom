@@ -1,0 +1,17 @@
+@module pascal_element;
+
+@pure
+fn pascal(row: i32, col: i32) -> i32 {
+    if col == 0 {
+        return 1;
+    }
+    if col == row {
+        return 1;
+    }
+    return pascal(row - 1, col - 1) + pascal(row - 1, col);
+}
+
+fn main() -> i32 {
+    print_i32(pascal(5, 2));
+    return 0;
+}
