@@ -137,6 +137,10 @@ dependencies = [
 name = "axiom-optimize"
 version = "0.1.0"
 dependencies = [
+ "axiom-hir",
+ "axiom-lexer",
+ "axiom-parser",
+ "insta",
  "thiserror",
 ]
 
