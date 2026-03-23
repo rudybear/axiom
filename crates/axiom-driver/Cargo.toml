@@ -13,6 +13,7 @@ axiom-parser = { path = "../axiom-parser" }
 axiom-hir = { path = "../axiom-hir" }
 axiom-codegen = { path = "../axiom-codegen" }
 axiom-optimize = { path = "../axiom-optimize" }
+serde.workspace = true
 clap.workspace = true
 miette = { workspace = true, features = ["fancy"] }
 serde_json.workspace = true

@@ -1,6 +1,7 @@
 //! AXIOM compiler CLI driver.
 
 mod compile;
+mod mcp;
 
 use clap::{Parser, Subcommand};
 
@@ -46,6 +47,9 @@ enum Commands {
         #[arg(long, default_value = "5")]
         runs: usize,
     },
+
+    /// Start MCP server for AI agent integration
+    Mcp {},
 
     /// Run the optimization protocol on an AXIOM source file
     Optimize {
@@ -120,6 +124,12 @@ fn main() -> miette::Result<()> {
                 }
                 Err(e) => Err(miette::miette!("benchmark failed: {}", e)),
             }
+        }
+
+        Commands::Mcp {} => {
+            mcp::run_mcp_server()
+                .map_err(|e| miette::miette!("MCP server error: {e}"))?;
+            Ok(())
         }
 
         Commands::Optimize {
