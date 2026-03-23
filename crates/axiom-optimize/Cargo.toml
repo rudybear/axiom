@@ -9,6 +9,8 @@ axiom-parser = { path = "../axiom-parser" }
 axiom-hir = { path = "../axiom-hir" }
 axiom-codegen = { path = "../axiom-codegen" }
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

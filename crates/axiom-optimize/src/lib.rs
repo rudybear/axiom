@@ -36,10 +36,12 @@
 //! ```
 
 pub mod benchmark;
+pub mod history;
 pub mod proposal;
 pub mod surface;
 
 // Re-export key types at the crate root for convenience.
+pub use history::{HistoryError, OptHistory, OptRecord};
 pub use proposal::{Proposal, ValidationError, validate_proposal};
 pub use surface::{
     HoleType, OptHole, OptSurface, StrategyEntry, StrategyEntryValue, StrategyInfo, Value,
