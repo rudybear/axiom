@@ -1,0 +1,59 @@
+@module self_host_lexer;
+@intent("Simplified AXIOM lexer written in AXIOM — self-hosting proof of concept");
+
+// Token types as constants:
+// 0 = WHITESPACE (skip), 1 = NUMBER, 2 = PLUS, 3 = MINUS,
+// 4 = STAR, 5 = SLASH, 6 = UNKNOWN
+
+// Classify a single ASCII character code into a token type.
+// Since AXIOM doesn't yet have strings-as-arrays or heap allocation,
+// we work with raw ASCII codes (i32) and return an integer token type.
+@pure
+fn classify_char(c: i32) -> i32 {
+    // ASCII: '0'=48 .. '9'=57
+    if c >= 48 and c <= 57 {
+        return 1;
+    }
+    // ASCII: '+'=43
+    if c == 43 {
+        return 2;
+    }
+    // ASCII: '-'=45
+    if c == 45 {
+        return 3;
+    }
+    // ASCII: '*'=42
+    if c == 42 {
+        return 4;
+    }
+    // ASCII: '/'=47
+    if c == 47 {
+        return 5;
+    }
+    // ASCII: ' '=32
+    if c == 32 {
+        return 0;
+    }
+    return 6;
+}
+
+fn main() -> i32 {
+    // Tokenize "1 + 2 * 3" by classifying each non-whitespace character.
+    // Character codes: '1'=49, ' '=32, '+'=43, ' '=32, '2'=50,
+    //                  ' '=32, '*'=42, ' '=32, '3'=51
+
+    let t1: i32 = classify_char(49);
+    let t2: i32 = classify_char(43);
+    let t3: i32 = classify_char(50);
+    let t4: i32 = classify_char(42);
+    let t5: i32 = classify_char(51);
+
+    // Print token types: expect 1, 2, 1, 4, 1
+    print_i32(t1);
+    print_i32(t2);
+    print_i32(t3);
+    print_i32(t4);
+    print_i32(t5);
+
+    return 0;
+}

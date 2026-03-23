@@ -1,0 +1,55 @@
+@module token_counter;
+@intent("Count token types in a character sequence — self-hosting demo");
+
+// Classify an ASCII character code into a token type.
+// Returns: 1 = NUMBER, 2 = PLUS, 3 = MINUS, 4 = STAR, 5 = SLASH, 0 = other
+@pure
+fn classify_char(c: i32) -> i32 {
+    if c >= 48 and c <= 57 { return 1; }
+    if c == 43 { return 2; }
+    if c == 45 { return 3; }
+    if c == 42 { return 4; }
+    if c == 47 { return 5; }
+    return 0;
+}
+
+fn main() -> i32 {
+    // Count tokens in "1+2*3-4/5"
+    // chars: '1'=49, '+'=43, '2'=50, '*'=42, '3'=51,
+    //        '-'=45, '4'=52, '/'=47, '5'=53
+    let numbers: i32 = 0;
+    let operators: i32 = 0;
+
+    let c1: i32 = classify_char(49);
+    if c1 == 1 { numbers = numbers + 1; } else { operators = operators + 1; }
+
+    let c2: i32 = classify_char(43);
+    if c2 == 1 { numbers = numbers + 1; } else { operators = operators + 1; }
+
+    let c3: i32 = classify_char(50);
+    if c3 == 1 { numbers = numbers + 1; } else { operators = operators + 1; }
+
+    let c4: i32 = classify_char(42);
+    if c4 == 1 { numbers = numbers + 1; } else { operators = operators + 1; }
+
+    let c5: i32 = classify_char(51);
+    if c5 == 1 { numbers = numbers + 1; } else { operators = operators + 1; }
+
+    let c6: i32 = classify_char(45);
+    if c6 == 1 { numbers = numbers + 1; } else { operators = operators + 1; }
+
+    let c7: i32 = classify_char(52);
+    if c7 == 1 { numbers = numbers + 1; } else { operators = operators + 1; }
+
+    let c8: i32 = classify_char(47);
+    if c8 == 1 { numbers = numbers + 1; } else { operators = operators + 1; }
+
+    let c9: i32 = classify_char(53);
+    if c9 == 1 { numbers = numbers + 1; } else { operators = operators + 1; }
+
+    // Expected: 5 numbers, 4 operators
+    print_i32(numbers);
+    print_i32(operators);
+
+    return 0;
+}
