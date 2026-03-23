@@ -47,6 +47,12 @@ impl fmt::Display for HirModule {
             writeln!(f)?;
         }
 
+        // Extern functions
+        for ef in &self.extern_functions {
+            write!(f, "{ef}")?;
+            writeln!(f)?;
+        }
+
         // Structs
         for (i, s) in self.structs.iter().enumerate() {
             write!(f, "{s}")?;
@@ -84,6 +90,24 @@ impl fmt::Display for HirFunction {
         writeln!(f, " {{  // [node:{}]", self.id)?;
         write_block_contents(f, &self.body, 1)?;
         writeln!(f, "}}")?;
+        Ok(())
+    }
+}
+
+impl fmt::Display for HirExternFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for ann in &self.annotations {
+            writeln!(f, "{ann}")?;
+        }
+
+        write!(f, "extern fn {}(", self.name)?;
+        for (i, param) in self.params.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{param}")?;
+        }
+        writeln!(f, ") -> {};  // [node:{}]", self.return_type, self.id)?;
         Ok(())
     }
 }
@@ -452,6 +476,7 @@ impl fmt::Display for HirAnnotation {
             HirAnnotationKind::OptimizationLog(_) => {
                 write!(f, "@optimization_log {{ ... }}")
             }
+            HirAnnotationKind::Export => write!(f, "@export"),
             HirAnnotationKind::Custom(name, args) => {
                 write!(f, "@{name}")?;
                 if !args.is_empty() {

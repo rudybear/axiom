@@ -29,9 +29,19 @@ impl<T> Spanned<T> {
 #[derive(Debug, Clone)]
 pub enum Item {
     Function(Function),
+    ExternFunction(ExternFunction),
     Struct(StructDef),
     TypeAlias(TypeAlias),
     Import(ImportDecl),
+}
+
+/// External function declaration (no body).
+#[derive(Debug, Clone)]
+pub struct ExternFunction {
+    pub name: Spanned<String>,
+    pub annotations: Vec<Spanned<Annotation>>,
+    pub params: Vec<Param>,
+    pub return_type: TypeExpr,
 }
 
 /// Function definition
@@ -182,6 +192,7 @@ pub enum Annotation {
     Layout(LayoutKind),
     Align(u64),
     OptimizationLog(Vec<OptLogEntry>),
+    Export,
     Custom(String, Vec<AnnotationValue>),
 }
 
