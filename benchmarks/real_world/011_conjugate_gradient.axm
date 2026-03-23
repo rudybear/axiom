@@ -1,0 +1,156 @@
+@module conjugate_gradient;
+@intent("Conjugate gradient method solving Ax=b for 1000x1000 sparse symmetric positive-definite system");
+
+fn main() -> i32 {
+    let n: i32 = 1000;
+
+    // Build a sparse SPD matrix A as tridiagonal + diagonal dominance
+    // Store as dense band: A[i][j] is accessed via flat array A[i*n + j]
+    // But that's 1M entries -> use the structure: tridiagonal
+    // diag[i], upper[i], lower[i]
+    let diag: array[f64, 1000] = array_zeros[f64, 1000];
+    let upper: array[f64, 1000] = array_zeros[f64, 1000];
+    let lower: array[f64, 1000] = array_zeros[f64, 1000];
+
+    // Also add a wider band: A[i][i+5] and A[i][i-5]
+    let upper5: array[f64, 1000] = array_zeros[f64, 1000];
+    let lower5: array[f64, 1000] = array_zeros[f64, 1000];
+
+    // Initialize matrix (symmetric positive definite)
+    for i: i32 in range(0, n) {
+        diag[i] = 4.0 + to_f64(i % 10) * 0.1;
+        if i < n - 1 {
+            upper[i] = -1.0;
+            lower[i + 1] = -1.0;
+        }
+        if i < n - 5 {
+            upper5[i] = -0.3;
+            lower5[i + 5] = -0.3;
+        }
+    }
+
+    // Right-hand side b
+    let b: array[f64, 1000] = array_zeros[f64, 1000];
+    for i: i32 in range(0, n) {
+        b[i] = 1.0 + to_f64(i) * 0.001;
+    }
+
+    // Solution vector x (initial guess = 0)
+    let x: array[f64, 1000] = array_zeros[f64, 1000];
+
+    // r = b - A*x = b (since x=0)
+    let r: array[f64, 1000] = array_zeros[f64, 1000];
+    for i: i32 in range(0, n) {
+        r[i] = b[i];
+    }
+
+    // p = r
+    let p: array[f64, 1000] = array_zeros[f64, 1000];
+    for i: i32 in range(0, n) {
+        p[i] = r[i];
+    }
+
+    // Ap = A*p (workspace)
+    let ap: array[f64, 1000] = array_zeros[f64, 1000];
+
+    // rsold = r^T * r
+    let rsold: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        rsold = rsold + r[i] * r[i];
+    }
+
+    // CG iterations (up to n iterations or convergence)
+    let max_iter: i32 = 1000;
+    let tol: f64 = 0.0000000001;
+    let iter_count: i32 = 0;
+
+    for iter: i32 in range(0, max_iter) {
+        // Compute Ap = A * p (banded matrix-vector multiply)
+        for i: i32 in range(0, n) {
+            let val: f64 = diag[i] * p[i];
+            if i > 0 {
+                val = val + lower[i] * p[i - 1];
+            }
+            if i < n - 1 {
+                val = val + upper[i] * p[i + 1];
+            }
+            if i >= 5 {
+                val = val + lower5[i] * p[i - 5];
+            }
+            if i < n - 5 {
+                val = val + upper5[i] * p[i + 5];
+            }
+            ap[i] = val;
+        }
+
+        // alpha = rsold / (p^T * Ap)
+        let pap: f64 = 0.0;
+        for i: i32 in range(0, n) {
+            pap = pap + p[i] * ap[i];
+        }
+
+        if pap < tol and pap > 0.0 - tol {
+            iter_count = iter;
+            return 0;
+        }
+
+        let alpha: f64 = rsold / pap;
+
+        // x = x + alpha * p
+        for i: i32 in range(0, n) {
+            x[i] = x[i] + alpha * p[i];
+        }
+
+        // r = r - alpha * Ap
+        for i: i32 in range(0, n) {
+            r[i] = r[i] - alpha * ap[i];
+        }
+
+        // rsnew = r^T * r
+        let rsnew: f64 = 0.0;
+        for i: i32 in range(0, n) {
+            rsnew = rsnew + r[i] * r[i];
+        }
+
+        iter_count = iter + 1;
+
+        if rsnew < tol {
+            iter_count = iter + 1;
+            // Force exit by setting iter to max
+            iter = max_iter;
+        }
+
+        if rsnew >= tol {
+            // p = r + (rsnew / rsold) * p
+            let beta: f64 = rsnew / rsold;
+            for i: i32 in range(0, n) {
+                p[i] = r[i] + beta * p[i];
+            }
+            rsold = rsnew;
+        }
+    }
+
+    // Verify: compute ||Ax - b||
+    let residual: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let ax_i: f64 = diag[i] * x[i];
+        if i > 0 { ax_i = ax_i + lower[i] * x[i - 1]; }
+        if i < n - 1 { ax_i = ax_i + upper[i] * x[i + 1]; }
+        if i >= 5 { ax_i = ax_i + lower5[i] * x[i - 5]; }
+        if i < n - 5 { ax_i = ax_i + upper5[i] * x[i + 5]; }
+        let diff: f64 = ax_i - b[i];
+        residual = residual + diff * diff;
+    }
+    residual = sqrt(residual);
+
+    // Checksum: solution norm + residual + iter count
+    let x_norm: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        x_norm = x_norm + x[i] * x[i];
+    }
+    x_norm = sqrt(x_norm);
+
+    let checksum: f64 = x_norm * 1000.0 + residual + to_f64(iter_count);
+    print_f64(checksum);
+    return 0;
+}

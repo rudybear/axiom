@@ -1,0 +1,96 @@
+@module jpeg_dct;
+@intent("8x8 Discrete Cosine Transform on 50000 blocks, core of JPEG compression");
+
+fn main() -> i32 {
+    let nblocks: i32 = 50000;
+    let pi: f64 = 3.14159265358979;
+
+    // Precompute cosine table: cos(pi * (2*x+1) * u / 16) for x,u in 0..7
+    let cos_table: array[f64, 64] = array_zeros[f64, 64];
+    for u: i32 in range(0, 8) {
+        for x: i32 in range(0, 8) {
+            let angle: f64 = pi * to_f64(2 * x + 1) * to_f64(u) / 16.0;
+            // cos via Taylor: cos(a) = 1 - a^2/2 + a^4/24 - a^6/720 + a^8/40320
+            // Reduce angle to [-pi, pi]
+            let a: f64 = angle;
+            let twopi: f64 = 2.0 * pi;
+            a = a - to_f64(truncate(a / twopi)) * twopi;
+            if a > pi { a = a - twopi; }
+            if a < 0.0 - pi { a = a + twopi; }
+            let a2: f64 = a * a;
+            let cos_val: f64 = 1.0 - a2 / 2.0 + a2 * a2 / 24.0 - a2 * a2 * a2 / 720.0 + a2 * a2 * a2 * a2 / 40320.0;
+            cos_table[u * 8 + x] = cos_val;
+        }
+    }
+
+    // Normalization factors: C(0) = 1/sqrt(2), C(u) = 1 for u > 0
+    let c0: f64 = 1.0 / sqrt(2.0);
+
+    // Input block and DCT output
+    let block_in: array[f64, 64] = array_zeros[f64, 64];
+    let block_out: array[f64, 64] = array_zeros[f64, 64];
+
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    let total_dc: f64 = 0.0;
+    let total_energy: f64 = 0.0;
+
+    for blk: i32 in range(0, nblocks) {
+        // Generate 8x8 block of pixel data (0-255, centered at 128)
+        for i: i32 in range(0, 64) {
+            seed = (lcg_a * seed + lcg_c) % lcg_m;
+            block_in[i] = to_f64_i64(seed % 256) - 128.0;
+        }
+
+        // 2D DCT: F(u,v) = (1/4) * C(u) * C(v) * sum_{x=0}^{7} sum_{y=0}^{7} f(x,y) * cos(pi*(2x+1)*u/16) * cos(pi*(2y+1)*v/16)
+        for u: i32 in range(0, 8) {
+            for v: i32 in range(0, 8) {
+                let sum: f64 = 0.0;
+                for x: i32 in range(0, 8) {
+                    for y: i32 in range(0, 8) {
+                        sum = sum + block_in[x * 8 + y] * cos_table[u * 8 + x] * cos_table[v * 8 + y];
+                    }
+                }
+
+                let cu: f64 = 1.0;
+                let cv: f64 = 1.0;
+                if u == 0 { cu = c0; }
+                if v == 0 { cv = c0; }
+
+                block_out[u * 8 + v] = 0.25 * cu * cv * sum;
+            }
+        }
+
+        // Accumulate DC coefficient and total energy
+        total_dc = total_dc + block_out[0];
+        for i: i32 in range(0, 64) {
+            total_energy = total_energy + block_out[i] * block_out[i];
+        }
+    }
+
+    // Quantize last block using standard JPEG luminance quantization table
+    let quant: array[i32, 64] = array_zeros[i32, 64];
+    quant[0]=16; quant[1]=11; quant[2]=10; quant[3]=16; quant[4]=24; quant[5]=40; quant[6]=51; quant[7]=61;
+    quant[8]=12; quant[9]=12; quant[10]=14; quant[11]=19; quant[12]=26; quant[13]=58; quant[14]=60; quant[15]=55;
+    quant[16]=14; quant[17]=13; quant[18]=16; quant[19]=24; quant[20]=40; quant[21]=57; quant[22]=69; quant[23]=56;
+    quant[24]=14; quant[25]=17; quant[26]=22; quant[27]=29; quant[28]=51; quant[29]=87; quant[30]=80; quant[31]=62;
+    quant[32]=18; quant[33]=22; quant[34]=37; quant[35]=56; quant[36]=68; quant[37]=109; quant[38]=103; quant[39]=77;
+    quant[40]=24; quant[41]=35; quant[42]=55; quant[43]=64; quant[44]=81; quant[45]=104; quant[46]=113; quant[47]=92;
+    quant[48]=49; quant[49]=64; quant[50]=78; quant[51]=87; quant[52]=103; quant[53]=121; quant[54]=120; quant[55]=101;
+    quant[56]=72; quant[57]=92; quant[58]=95; quant[59]=98; quant[60]=112; quant[61]=100; quant[62]=103; quant[63]=99;
+
+    let nonzero_count: i32 = 0;
+    for i: i32 in range(0, 64) {
+        let quantized: i32 = truncate(block_out[i] / to_f64(quant[i]));
+        if quantized != 0 {
+            nonzero_count = nonzero_count + 1;
+        }
+    }
+
+    let checksum: f64 = total_dc + total_energy / 1000000.0 + to_f64(nonzero_count);
+    print_f64(checksum);
+    return 0;
+}

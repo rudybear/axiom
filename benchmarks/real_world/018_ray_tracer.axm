@@ -1,0 +1,184 @@
+@module ray_tracer;
+@intent("Simple ray tracer: 3 spheres, 1 light, 256x256 image with Phong shading and shadows");
+
+fn main() -> i32 {
+    let width: i32 = 256;
+    let height: i32 = 256;
+    let total: i32 = 65536;
+
+    // Image buffer (RGB as separate arrays, values 0-255)
+    let img_r: array[i32, 65536] = array_zeros[i32, 65536];
+    let img_g: array[i32, 65536] = array_zeros[i32, 65536];
+    let img_b: array[i32, 65536] = array_zeros[i32, 65536];
+
+    // Scene: 3 spheres (cx, cy, cz, radius, r, g, b)
+    let sphere_cx: array[f64, 3] = array_zeros[f64, 3];
+    let sphere_cy: array[f64, 3] = array_zeros[f64, 3];
+    let sphere_cz: array[f64, 3] = array_zeros[f64, 3];
+    let sphere_rad: array[f64, 3] = array_zeros[f64, 3];
+    let sphere_r: array[f64, 3] = array_zeros[f64, 3];
+    let sphere_g: array[f64, 3] = array_zeros[f64, 3];
+    let sphere_b: array[f64, 3] = array_zeros[f64, 3];
+    let sphere_spec: array[f64, 3] = array_zeros[f64, 3];
+
+    // Sphere 1: red, center-left
+    sphere_cx[0] = -1.5; sphere_cy[0] = 0.0; sphere_cz[0] = 5.0;
+    sphere_rad[0] = 1.0;
+    sphere_r[0] = 0.9; sphere_g[0] = 0.1; sphere_b[0] = 0.1;
+    sphere_spec[0] = 50.0;
+
+    // Sphere 2: green, center
+    sphere_cx[1] = 0.5; sphere_cy[1] = -0.5; sphere_cz[1] = 4.0;
+    sphere_rad[1] = 0.8;
+    sphere_r[1] = 0.1; sphere_g[1] = 0.9; sphere_b[1] = 0.2;
+    sphere_spec[1] = 30.0;
+
+    // Sphere 3: blue, right
+    sphere_cx[2] = 2.0; sphere_cy[2] = 0.5; sphere_cz[2] = 6.0;
+    sphere_rad[2] = 1.2;
+    sphere_r[2] = 0.2; sphere_g[2] = 0.2; sphere_b[2] = 0.9;
+    sphere_spec[2] = 80.0;
+
+    // Light position
+    let light_x: f64 = -3.0;
+    let light_y: f64 = -5.0;
+    let light_z: f64 = 2.0;
+    let light_intensity: f64 = 1.5;
+
+    // Camera at origin, looking down +z
+    let fov_scale: f64 = 1.0;
+    let ambient: f64 = 0.1;
+
+    for py: i32 in range(0, height) {
+        for px: i32 in range(0, width) {
+            // Ray direction
+            let ray_dx: f64 = (to_f64(px) - to_f64(width) / 2.0) / to_f64(width) * fov_scale;
+            let ray_dy: f64 = (to_f64(py) - to_f64(height) / 2.0) / to_f64(height) * fov_scale;
+            let ray_dz: f64 = 1.0;
+            // Normalize ray direction
+            let ray_len: f64 = sqrt(ray_dx * ray_dx + ray_dy * ray_dy + ray_dz * ray_dz);
+            ray_dx = ray_dx / ray_len;
+            ray_dy = ray_dy / ray_len;
+            ray_dz = ray_dz / ray_len;
+
+            // Find closest sphere intersection
+            let closest_t: f64 = 99999.0;
+            let hit_sphere: i32 = -1;
+
+            for s: i32 in range(0, 3) {
+                // Ray-sphere intersection: |o + t*d - c|^2 = r^2
+                let oc_x: f64 = 0.0 - sphere_cx[s];
+                let oc_y: f64 = 0.0 - sphere_cy[s];
+                let oc_z: f64 = 0.0 - sphere_cz[s];
+                let a: f64 = ray_dx * ray_dx + ray_dy * ray_dy + ray_dz * ray_dz;
+                let b: f64 = 2.0 * (oc_x * ray_dx + oc_y * ray_dy + oc_z * ray_dz);
+                let c: f64 = oc_x * oc_x + oc_y * oc_y + oc_z * oc_z - sphere_rad[s] * sphere_rad[s];
+                let disc: f64 = b * b - 4.0 * a * c;
+
+                if disc >= 0.0 {
+                    let sqrt_disc: f64 = sqrt(disc);
+                    let t1: f64 = (0.0 - b - sqrt_disc) / (2.0 * a);
+                    let t2: f64 = (0.0 - b + sqrt_disc) / (2.0 * a);
+                    let t: f64 = t1;
+                    if t < 0.001 { t = t2; }
+                    if t > 0.001 and t < closest_t {
+                        closest_t = t;
+                        hit_sphere = s;
+                    }
+                }
+            }
+
+            let fr: f64 = 0.0;
+            let fg: f64 = 0.0;
+            let fb: f64 = 0.0;
+
+            if hit_sphere >= 0 {
+                // Hit point
+                let hx: f64 = closest_t * ray_dx;
+                let hy: f64 = closest_t * ray_dy;
+                let hz: f64 = closest_t * ray_dz;
+
+                // Normal at hit point
+                let nx: f64 = (hx - sphere_cx[hit_sphere]) / sphere_rad[hit_sphere];
+                let ny: f64 = (hy - sphere_cy[hit_sphere]) / sphere_rad[hit_sphere];
+                let nz: f64 = (hz - sphere_cz[hit_sphere]) / sphere_rad[hit_sphere];
+
+                // Light direction
+                let lx: f64 = light_x - hx;
+                let ly: f64 = light_y - hy;
+                let lz: f64 = light_z - hz;
+                let l_len: f64 = sqrt(lx * lx + ly * ly + lz * lz);
+                lx = lx / l_len;
+                ly = ly / l_len;
+                lz = lz / l_len;
+
+                // Shadow ray check
+                let in_shadow: i32 = 0;
+                for s2: i32 in range(0, 3) {
+                    if s2 != hit_sphere {
+                        let soc_x: f64 = hx - sphere_cx[s2];
+                        let soc_y: f64 = hy - sphere_cy[s2];
+                        let soc_z: f64 = hz - sphere_cz[s2];
+                        let sa: f64 = lx * lx + ly * ly + lz * lz;
+                        let sb: f64 = 2.0 * (soc_x * lx + soc_y * ly + soc_z * lz);
+                        let sc: f64 = soc_x * soc_x + soc_y * soc_y + soc_z * soc_z - sphere_rad[s2] * sphere_rad[s2];
+                        let sdisc: f64 = sb * sb - 4.0 * sa * sc;
+                        if sdisc >= 0.0 {
+                            let st: f64 = (0.0 - sb - sqrt(sdisc)) / (2.0 * sa);
+                            if st > 0.001 and st < l_len {
+                                in_shadow = 1;
+                            }
+                        }
+                    }
+                }
+
+                // Diffuse (Lambertian)
+                let ndotl: f64 = nx * lx + ny * ly + nz * lz;
+                if ndotl < 0.0 { ndotl = 0.0; }
+
+                // Specular (Phong)
+                // Reflect: R = 2*(N.L)*N - L
+                let rx: f64 = 2.0 * ndotl * nx - lx;
+                let ry: f64 = 2.0 * ndotl * ny - ly;
+                let rz: f64 = 2.0 * ndotl * nz - lz;
+                // View direction (from hit point to camera)
+                let vx: f64 = 0.0 - ray_dx;
+                let vy: f64 = 0.0 - ray_dy;
+                let vz: f64 = 0.0 - ray_dz;
+                let rdotv: f64 = rx * vx + ry * vy + rz * vz;
+                if rdotv < 0.0 { rdotv = 0.0; }
+                let spec: f64 = pow(rdotv, sphere_spec[hit_sphere]);
+
+                let shadow_factor: f64 = 1.0;
+                if in_shadow == 1 { shadow_factor = 0.0; }
+
+                fr = sphere_r[hit_sphere] * (ambient + shadow_factor * light_intensity * ndotl) + shadow_factor * spec * 0.5;
+                fg = sphere_g[hit_sphere] * (ambient + shadow_factor * light_intensity * ndotl) + shadow_factor * spec * 0.5;
+                fb = sphere_b[hit_sphere] * (ambient + shadow_factor * light_intensity * ndotl) + shadow_factor * spec * 0.5;
+
+                if fr > 1.0 { fr = 1.0; }
+                if fg > 1.0 { fg = 1.0; }
+                if fb > 1.0 { fb = 1.0; }
+            }
+
+            let idx: i32 = py * width + px;
+            img_r[idx] = truncate(fr * 255.0);
+            img_g[idx] = truncate(fg * 255.0);
+            img_b[idx] = truncate(fb * 255.0);
+        }
+    }
+
+    // Checksum
+    let r_sum: i64 = 0;
+    let g_sum: i64 = 0;
+    let b_sum: i64 = 0;
+    for i: i32 in range(0, total) {
+        r_sum = r_sum + widen(img_r[i]);
+        g_sum = g_sum + widen(img_g[i]);
+        b_sum = b_sum + widen(img_b[i]);
+    }
+
+    let checksum: i64 = r_sum * 10000 + g_sum * 100 + b_sum;
+    print_i64(checksum);
+    return 0;
+}

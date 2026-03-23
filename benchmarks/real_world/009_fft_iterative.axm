@@ -1,0 +1,102 @@
+@module fft_iterative;
+@intent("Cooley-Tukey iterative FFT on 8192 complex numbers with bit-reversal permutation");
+
+fn main() -> i32 {
+    let n: i32 = 8192;
+    let pi2: f64 = 6.28318530717959;
+    let pi: f64 = 3.14159265358979;
+
+    let re: array[f64, 8192] = array_zeros[f64, 8192];
+    let im: array[f64, 8192] = array_zeros[f64, 8192];
+
+    // Generate input signal: sum of sinusoids
+    for i: i32 in range(0, n) {
+        let t: f64 = to_f64(i) / to_f64(n);
+        let a1: f64 = pi2 * 100.0 * t;
+        let a2: f64 = pi2 * 250.0 * t;
+        // sin via Taylor (reduce to [-pi,pi] first)
+        let a1r: f64 = a1 - to_f64(truncate(a1 / pi2)) * pi2;
+        if a1r > pi { a1r = a1r - pi2; }
+        if a1r < 0.0 - pi { a1r = a1r + pi2; }
+        let a2r: f64 = a2 - to_f64(truncate(a2 / pi2)) * pi2;
+        if a2r > pi { a2r = a2r - pi2; }
+        if a2r < 0.0 - pi { a2r = a2r + pi2; }
+
+        let a1_3: f64 = a1r * a1r * a1r;
+        let a1_5: f64 = a1_3 * a1r * a1r;
+        let a1_7: f64 = a1_5 * a1r * a1r;
+        let s1: f64 = a1r - a1_3 / 6.0 + a1_5 / 120.0 - a1_7 / 5040.0;
+
+        let a2_3: f64 = a2r * a2r * a2r;
+        let a2_5: f64 = a2_3 * a2r * a2r;
+        let a2_7: f64 = a2_5 * a2r * a2r;
+        let s2: f64 = a2r - a2_3 / 6.0 + a2_5 / 120.0 - a2_7 / 5040.0;
+
+        re[i] = s1 + 0.5 * s2;
+        im[i] = 0.0;
+    }
+
+    // Bit-reversal permutation
+    // For n=8192=2^13, we need 13-bit reversal
+    let log_n: i32 = 13;
+    for i: i32 in range(0, n) {
+        // Reverse bits of i (13 bits)
+        let rev: i32 = 0;
+        let tmp: i32 = i;
+        for b: i32 in range(0, log_n) {
+            rev = rev * 2 + tmp % 2;
+            tmp = tmp / 2;
+        }
+        if rev > i {
+            let tmp_re: f64 = re[i];
+            let tmp_im: f64 = im[i];
+            re[i] = re[rev];
+            im[i] = im[rev];
+            re[rev] = tmp_re;
+            im[rev] = tmp_im;
+        }
+    }
+
+    // Cooley-Tukey butterfly operations
+    let stage_size: i32 = 2;
+    while stage_size <= n {
+        let half: i32 = stage_size / 2;
+        let angle_step: f64 = 0.0 - pi2 / to_f64(stage_size);
+
+        let group: i32 = 0;
+        while group < n {
+            for k: i32 in range(0, half) {
+                let angle: f64 = angle_step * to_f64(k);
+                // cos and sin via Taylor
+                let ar: f64 = angle - to_f64(truncate(angle / pi2)) * pi2;
+                if ar > pi { ar = ar - pi2; }
+                if ar < 0.0 - pi { ar = ar + pi2; }
+                let ar2: f64 = ar * ar;
+                let cos_a: f64 = 1.0 - ar2 / 2.0 + ar2 * ar2 / 24.0 - ar2 * ar2 * ar2 / 720.0 + ar2 * ar2 * ar2 * ar2 / 40320.0;
+                let sin_a: f64 = ar - ar * ar2 / 6.0 + ar * ar2 * ar2 / 120.0 - ar * ar2 * ar2 * ar2 / 5040.0;
+
+                let even_idx: i32 = group + k;
+                let odd_idx: i32 = group + k + half;
+
+                // Butterfly: even +/- (twiddle * odd)
+                let tr: f64 = cos_a * re[odd_idx] - sin_a * im[odd_idx];
+                let ti: f64 = sin_a * re[odd_idx] + cos_a * im[odd_idx];
+
+                re[odd_idx] = re[even_idx] - tr;
+                im[odd_idx] = im[even_idx] - ti;
+                re[even_idx] = re[even_idx] + tr;
+                im[even_idx] = im[even_idx] + ti;
+            }
+            group = group + stage_size;
+        }
+        stage_size = stage_size * 2;
+    }
+
+    // Checksum: sum of magnitudes
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        checksum = checksum + sqrt(re[i] * re[i] + im[i] * im[i]);
+    }
+    print_f64(checksum);
+    return 0;
+}

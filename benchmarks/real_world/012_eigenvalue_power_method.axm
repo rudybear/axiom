@@ -1,0 +1,91 @@
+@module eigenvalue_power_method;
+@intent("Find dominant eigenvalue of 500x500 matrix via power iteration, 200 iterations");
+
+fn main() -> i32 {
+    let n: i32 = 500;
+    let n_sq: i32 = 250000;
+
+    // Store matrix as flat array: A[i*n + j]
+    let A: array[f64, 250000] = array_zeros[f64, 250000];
+    let v: array[f64, 500] = array_zeros[f64, 500];
+    let w: array[f64, 500] = array_zeros[f64, 500];
+
+    // LCG for matrix generation
+    let seed: i64 = 12345;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Generate symmetric matrix A: A[i][j] = A[j][i]
+    for i: i32 in range(0, n) {
+        for j: i32 in range(i, n) {
+            seed = (lcg_a * seed + lcg_c) % lcg_m;
+            let val: f64 = to_f64_i64(seed) / to_f64_i64(lcg_m) * 2.0 - 1.0;
+            A[i * n + j] = val;
+            A[j * n + i] = val;
+        }
+        // Make diagonally dominant
+        A[i * n + i] = A[i * n + i] + to_f64(n) * 0.5;
+    }
+
+    // Initial vector v = [1, 1, ..., 1] / sqrt(n)
+    let inv_sqrt_n: f64 = 1.0 / sqrt(to_f64(n));
+    for i: i32 in range(0, n) {
+        v[i] = inv_sqrt_n;
+    }
+
+    let eigenvalue: f64 = 0.0;
+
+    // Power iteration: 200 iterations
+    for iter: i32 in range(0, 200) {
+        // w = A * v
+        for i: i32 in range(0, n) {
+            let sum: f64 = 0.0;
+            for j: i32 in range(0, n) {
+                sum = sum + A[i * n + j] * v[j];
+            }
+            w[i] = sum;
+        }
+
+        // Compute eigenvalue estimate: v^T * w (Rayleigh quotient numerator)
+        eigenvalue = 0.0;
+        for i: i32 in range(0, n) {
+            eigenvalue = eigenvalue + v[i] * w[i];
+        }
+
+        // Normalize w -> v
+        let norm: f64 = 0.0;
+        for i: i32 in range(0, n) {
+            norm = norm + w[i] * w[i];
+        }
+        norm = sqrt(norm);
+
+        if norm > 0.0000001 {
+            for i: i32 in range(0, n) {
+                v[i] = w[i] / norm;
+            }
+        }
+    }
+
+    // Verify: compute ||Av - lambda*v||
+    let residual: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let av_i: f64 = 0.0;
+        for j: i32 in range(0, n) {
+            av_i = av_i + A[i * n + j] * v[j];
+        }
+        let diff: f64 = av_i - eigenvalue * v[i];
+        residual = residual + diff * diff;
+    }
+    residual = sqrt(residual);
+
+    // Eigenvector checksum
+    let v_sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        v_sum = v_sum + v[i] * to_f64(i + 1);
+    }
+
+    let checksum: f64 = eigenvalue * 100.0 + residual + v_sum;
+    print_f64(checksum);
+    return 0;
+}

@@ -1,0 +1,105 @@
+@module run_length_encode;
+@intent("RLE encode/decode 500000 pseudo-random bytes with varying repetition patterns");
+
+fn main() -> i32 {
+    let data_size: i32 = 500000;
+
+    // Generate data with runs of varying lengths
+    let data: array[i32, 500000] = array_zeros[i32, 500000];
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    let i: i32 = 0;
+    while i < data_size {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let val: i32 = narrow(seed % 256);
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        // Run length: biased toward short runs
+        let run_len: i32 = 1;
+        let r: i64 = seed % 100;
+        if r < 40 { run_len = 1; }
+        if r >= 40 and r < 60 { run_len = narrow(seed % 5) + 2; }
+        if r >= 60 and r < 80 { run_len = narrow(seed % 20) + 5; }
+        if r >= 80 and r < 95 { run_len = narrow(seed % 100) + 10; }
+        if r >= 95 { run_len = narrow(seed % 255) + 50; }
+
+        let j: i32 = 0;
+        while j < run_len and i < data_size {
+            data[i] = val;
+            i = i + 1;
+            j = j + 1;
+        }
+    }
+
+    // RLE Encode: output pairs (value, count)
+    let enc_val: array[i32, 500000] = array_zeros[i32, 500000];
+    let enc_cnt: array[i32, 500000] = array_zeros[i32, 500000];
+    let enc_size: i32 = 0;
+
+    let pos: i32 = 0;
+    while pos < data_size {
+        let val: i32 = data[pos];
+        let count: i32 = 1;
+        while pos + count < data_size and data[pos + count] == val and count < 255 {
+            count = count + 1;
+        }
+        enc_val[enc_size] = val;
+        enc_cnt[enc_size] = count;
+        enc_size = enc_size + 1;
+        pos = pos + count;
+    }
+
+    // RLE Decode: reconstruct from encoded data
+    let decoded: array[i32, 500000] = array_zeros[i32, 500000];
+    let dec_pos: i32 = 0;
+    for ei: i32 in range(0, enc_size) {
+        let val: i32 = enc_val[ei];
+        let count: i32 = enc_cnt[ei];
+        let j: i32 = 0;
+        while j < count and dec_pos < data_size {
+            decoded[dec_pos] = val;
+            dec_pos = dec_pos + 1;
+            j = j + 1;
+        }
+    }
+
+    // Verify decode matches original
+    let errors: i32 = 0;
+    for idx: i32 in range(0, data_size) {
+        if decoded[idx] != data[idx] {
+            errors = errors + 1;
+        }
+    }
+
+    // Compute statistics
+    let max_run: i32 = 0;
+    let total_run: i64 = 0;
+    for ei: i32 in range(0, enc_size) {
+        if enc_cnt[ei] > max_run {
+            max_run = enc_cnt[ei];
+        }
+        total_run = total_run + widen(enc_cnt[ei]);
+    }
+
+    // Compression ratio: original=data_size bytes, compressed=enc_size*2 bytes
+    let compressed_size: i32 = enc_size * 2;
+
+    // Histogram of run lengths
+    let hist: array[i32, 256] = array_zeros[i32, 256];
+    for ei: i32 in range(0, enc_size) {
+        let bin: i32 = enc_cnt[ei];
+        if bin > 255 { bin = 255; }
+        hist[bin] = hist[bin] + 1;
+    }
+
+    let hist_sum: i64 = 0;
+    for h: i32 in range(0, 256) {
+        hist_sum = hist_sum + widen(hist[h]) * widen(h);
+    }
+
+    let checksum: i64 = widen(enc_size) * 10000 + widen(compressed_size) * 100 + total_run + widen(max_run) * 1000 + widen(errors) + hist_sum;
+    print_i64(checksum);
+    return 0;
+}

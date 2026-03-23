@@ -1,0 +1,95 @@
+@module sparse_matrix_multiply;
+@intent("Compressed Sparse Row (CSR) matrix-vector multiply, 5000x5000 with ~100000 non-zeros, 20 iterations");
+
+fn main() -> i32 {
+    let n: i32 = 5000;
+    let nnz_target: i32 = 100000;
+
+    // CSR format arrays
+    let values: array[f64, 100000] = array_zeros[f64, 100000];
+    let col_idx: array[i32, 100000] = array_zeros[i32, 100000];
+    let row_ptr: array[i32, 5001] = array_zeros[i32, 5001];
+
+    // Dense vector and result
+    let x: array[f64, 5000] = array_zeros[f64, 5000];
+    let y: array[f64, 5000] = array_zeros[f64, 5000];
+
+    // LCG for generating sparse matrix
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Generate CSR structure: ~20 non-zeros per row on average
+    let nnz: i32 = 0;
+    let nnz_per_row: i32 = nnz_target / n;
+
+    for i: i32 in range(0, n) {
+        row_ptr[i] = nnz;
+
+        // Diagonal element (ensure non-singular)
+        if nnz < 100000 {
+            values[nnz] = to_f64(i + 1) * 0.01 + 2.0;
+            col_idx[nnz] = i;
+            nnz = nnz + 1;
+        }
+
+        // Off-diagonal elements
+        let elems: i32 = 0;
+        while elems < nnz_per_row - 1 and nnz < 100000 {
+            seed = (lcg_a * seed + lcg_c) % lcg_m;
+            let col: i32 = narrow(seed % widen(n));
+            if col != i {
+                seed = (lcg_a * seed + lcg_c) % lcg_m;
+                let val: f64 = to_f64_i64(seed) / to_f64_i64(lcg_m) * 2.0 - 1.0;
+                values[nnz] = val;
+                col_idx[nnz] = col;
+                nnz = nnz + 1;
+            }
+            elems = elems + 1;
+        }
+    }
+    row_ptr[n] = nnz;
+
+    // Initialize vector x
+    for i: i32 in range(0, n) {
+        x[i] = 1.0 / to_f64(i + 1);
+    }
+
+    // Perform 20 matrix-vector multiplications: y = A*x, then x = y (power iteration-like)
+    for iter: i32 in range(0, 20) {
+        // y = A * x
+        for i: i32 in range(0, n) {
+            let sum: f64 = 0.0;
+            let start: i32 = row_ptr[i];
+            let end: i32 = row_ptr[i + 1];
+            let j: i32 = start;
+            while j < end {
+                sum = sum + values[j] * x[col_idx[j]];
+                j = j + 1;
+            }
+            y[i] = sum;
+        }
+
+        // Normalize y and copy to x
+        let norm: f64 = 0.0;
+        for i: i32 in range(0, n) {
+            norm = norm + y[i] * y[i];
+        }
+        norm = sqrt(norm);
+        if norm > 0.0000001 {
+            for i: i32 in range(0, n) {
+                x[i] = y[i] / norm;
+            }
+        }
+    }
+
+    // Checksum
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        checksum = checksum + x[i] * to_f64(i + 1);
+    }
+    checksum = checksum + to_f64(nnz);
+    print_f64(checksum);
+    return 0;
+}

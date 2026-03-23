@@ -1,0 +1,122 @@
+@module median_filter_3x3;
+@intent("3x3 median filter on 512x512 image using sorting network for 9 elements");
+
+fn main() -> i32 {
+    let width: i32 = 512;
+    let height: i32 = 512;
+    let total: i32 = 262144;
+
+    let image: array[i32, 262144] = array_zeros[i32, 262144];
+    let output: array[i32, 262144] = array_zeros[i32, 262144];
+
+    // Generate noisy image
+    let seed: i64 = 54321;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    for i: i32 in range(0, total) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        // Base gradient + salt-and-pepper noise
+        let y: i32 = i / width;
+        let x: i32 = i % width;
+        let base: i32 = (x + y) / 4;
+        if base > 255 { base = 255; }
+        let noise: i64 = seed % 100;
+        if noise < 5 {
+            image[i] = 0;
+        }
+        if noise >= 5 and noise < 10 {
+            image[i] = 255;
+        }
+        if noise >= 10 {
+            image[i] = base;
+        }
+    }
+
+    // Apply 3x3 median filter using optimal sorting network for 9 elements
+    // Sorting network: series of compare-and-swap operations
+    let window: array[i32, 9] = array_zeros[i32, 9];
+
+    for y: i32 in range(1, height - 1) {
+        for x: i32 in range(1, width - 1) {
+            // Gather 3x3 neighborhood
+            window[0] = image[(y - 1) * width + (x - 1)];
+            window[1] = image[(y - 1) * width + x];
+            window[2] = image[(y - 1) * width + (x + 1)];
+            window[3] = image[y * width + (x - 1)];
+            window[4] = image[y * width + x];
+            window[5] = image[y * width + (x + 1)];
+            window[6] = image[(y + 1) * width + (x - 1)];
+            window[7] = image[(y + 1) * width + x];
+            window[8] = image[(y + 1) * width + (x + 1)];
+
+            // Optimal 9-element sorting network (25 compare-and-swaps)
+            // We only need the median (element 4 after sorting)
+            // Using Bose-Nelson sorting network
+            // Compare-and-swap macro: if w[a] > w[b], swap
+            let t: i32 = 0;
+
+            // Layer 1
+            if window[0] > window[1] { t = window[0]; window[0] = window[1]; window[1] = t; }
+            if window[3] > window[4] { t = window[3]; window[3] = window[4]; window[4] = t; }
+            if window[6] > window[7] { t = window[6]; window[6] = window[7]; window[7] = t; }
+            if window[1] > window[2] { t = window[1]; window[1] = window[2]; window[2] = t; }
+            if window[4] > window[5] { t = window[4]; window[4] = window[5]; window[5] = t; }
+            if window[7] > window[8] { t = window[7]; window[7] = window[8]; window[8] = t; }
+
+            // Layer 2
+            if window[0] > window[1] { t = window[0]; window[0] = window[1]; window[1] = t; }
+            if window[3] > window[4] { t = window[3]; window[3] = window[4]; window[4] = t; }
+            if window[6] > window[7] { t = window[6]; window[6] = window[7]; window[7] = t; }
+
+            // Layer 3: merge rows
+            if window[0] > window[3] { t = window[0]; window[0] = window[3]; window[3] = t; }
+            if window[1] > window[4] { t = window[1]; window[1] = window[4]; window[4] = t; }
+            if window[2] > window[5] { t = window[2]; window[2] = window[5]; window[5] = t; }
+            if window[3] > window[6] { t = window[3]; window[3] = window[6]; window[6] = t; }
+            if window[4] > window[7] { t = window[4]; window[4] = window[7]; window[7] = t; }
+            if window[5] > window[8] { t = window[5]; window[5] = window[8]; window[8] = t; }
+
+            // Layer 4
+            if window[1] > window[3] { t = window[1]; window[1] = window[3]; window[3] = t; }
+            if window[2] > window[6] { t = window[2]; window[2] = window[6]; window[6] = t; }
+            if window[2] > window[3] { t = window[2]; window[2] = window[3]; window[3] = t; }
+            if window[5] > window[7] { t = window[5]; window[5] = window[7]; window[7] = t; }
+
+            // Layer 5
+            if window[4] > window[6] { t = window[4]; window[4] = window[6]; window[6] = t; }
+            if window[3] > window[4] { t = window[3]; window[3] = window[4]; window[4] = t; }
+            if window[4] > window[5] { t = window[4]; window[4] = window[5]; window[5] = t; }
+            if window[5] > window[6] { t = window[5]; window[5] = window[6]; window[6] = t; }
+
+            // Median is window[4]
+            output[y * width + x] = window[4];
+        }
+    }
+
+    // Copy border pixels
+    for x: i32 in range(0, width) {
+        output[x] = image[x];
+        output[(height - 1) * width + x] = image[(height - 1) * width + x];
+    }
+    for y: i32 in range(0, height) {
+        output[y * width] = image[y * width];
+        output[y * width + width - 1] = image[y * width + width - 1];
+    }
+
+    // Checksum
+    let checksum: i64 = 0;
+    for i: i32 in range(0, total) {
+        checksum = checksum + widen(output[i]);
+    }
+    // Also check noise removal quality
+    let diff_sum: i64 = 0;
+    for i: i32 in range(0, total) {
+        let d: i32 = output[i] - image[i];
+        diff_sum = diff_sum + widen(abs(d));
+    }
+    checksum = checksum * 100 + diff_sum;
+    print_i64(checksum);
+    return 0;
+}

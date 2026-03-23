@@ -1,0 +1,121 @@
+@module lz77_compress;
+@intent("LZ77 compression: sliding window 4096 bytes, lookahead 18 bytes, process 100000 bytes");
+
+fn main() -> i32 {
+    let data_size: i32 = 100000;
+    let window_size: i32 = 4096;
+    let lookahead_size: i32 = 18;
+
+    // Generate semi-compressible data (with some repetition)
+    let data: array[i32, 100000] = array_zeros[i32, 100000];
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    for i: i32 in range(0, data_size) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let r: i64 = seed % 100;
+        if r < 30 {
+            // Repeated pattern: copy from earlier
+            let copy_dist: i32 = narrow((seed / 100) % 50) + 1;
+            if i >= copy_dist {
+                data[i] = data[i - copy_dist];
+            }
+            if i < copy_dist {
+                data[i] = narrow(seed % 256);
+            }
+        }
+        if r >= 30 and r < 60 {
+            // Low-entropy: limited alphabet
+            data[i] = narrow(seed % 16);
+        }
+        if r >= 60 {
+            // Random byte
+            data[i] = narrow(seed % 256);
+        }
+    }
+
+    // LZ77 compression
+    // Output: array of (offset, length, next_char) triples
+    let out_offset: array[i32, 100000] = array_zeros[i32, 100000];
+    let out_length: array[i32, 100000] = array_zeros[i32, 100000];
+    let out_char: array[i32, 100000] = array_zeros[i32, 100000];
+    let out_count: i32 = 0;
+
+    let pos: i32 = 0;
+    while pos < data_size {
+        let best_offset: i32 = 0;
+        let best_length: i32 = 0;
+
+        // Search for longest match in sliding window
+        let search_start: i32 = pos - window_size;
+        if search_start < 0 { search_start = 0; }
+
+        let si: i32 = search_start;
+        while si < pos {
+            let match_len: i32 = 0;
+            let max_match: i32 = lookahead_size;
+            if pos + max_match > data_size {
+                max_match = data_size - pos;
+            }
+
+            while match_len < max_match and data[si + match_len] == data[pos + match_len] {
+                match_len = match_len + 1;
+                // Handle wrapping in source (can match past si into pos area)
+                if si + match_len >= pos {
+                    // match wraps
+                    match_len = match_len;
+                }
+            }
+
+            if match_len > best_length {
+                best_length = match_len;
+                best_offset = pos - si;
+            }
+            si = si + 1;
+        }
+
+        // Output triple
+        if out_count < 100000 {
+            out_offset[out_count] = best_offset;
+            out_length[out_count] = best_length;
+            if pos + best_length < data_size {
+                out_char[out_count] = data[pos + best_length];
+            }
+            if pos + best_length >= data_size {
+                out_char[out_count] = 0;
+            }
+            out_count = out_count + 1;
+        }
+
+        pos = pos + best_length + 1;
+    }
+
+    // Compute compression statistics
+    let literal_count: i32 = 0;
+    let match_count: i32 = 0;
+    let total_match_len: i64 = 0;
+    let max_match_len: i32 = 0;
+
+    for i: i32 in range(0, out_count) {
+        if out_length[i] == 0 {
+            literal_count = literal_count + 1;
+        }
+        if out_length[i] > 0 {
+            match_count = match_count + 1;
+            total_match_len = total_match_len + widen(out_length[i]);
+            if out_length[i] > max_match_len {
+                max_match_len = out_length[i];
+            }
+        }
+    }
+
+    // Estimate compressed size: literals=9 bits, matches=log2(window)+log2(lookahead)+9 bits
+    let compressed_bits: i64 = widen(literal_count) * 9 + widen(match_count) * (12 + 5 + 9);
+    let original_bits: i64 = widen(data_size) * 8;
+
+    let checksum: i64 = widen(out_count) * 10000 + compressed_bits + total_match_len * 100 + widen(max_match_len);
+    print_i64(checksum);
+    return 0;
+}

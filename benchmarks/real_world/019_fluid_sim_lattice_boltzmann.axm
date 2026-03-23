@@ -1,0 +1,218 @@
+@module fluid_sim_lattice_boltzmann;
+@intent("2D Lattice Boltzmann D2Q9 simulation on 200x100 grid, 500 timesteps");
+
+fn main() -> i32 {
+    let nx: i32 = 200;
+    let ny: i32 = 100;
+    let total: i32 = 20000;
+    let nsteps: i32 = 500;
+
+    // D2Q9 velocities: ex = {0,1,0,-1,0,1,-1,-1,1}
+    //                  ey = {0,0,1,0,-1,1,1,-1,-1}
+    let ex: array[i32, 9] = array_zeros[i32, 9];
+    let ey: array[i32, 9] = array_zeros[i32, 9];
+    ex[0]=0; ex[1]=1; ex[2]=0; ex[3]=-1; ex[4]=0; ex[5]=1; ex[6]=-1; ex[7]=-1; ex[8]=1;
+    ey[0]=0; ey[1]=0; ey[2]=1; ey[3]=0; ey[4]=-1; ey[5]=1; ey[6]=1; ey[7]=-1; ey[8]=-1;
+
+    // D2Q9 weights
+    let w: array[f64, 9] = array_zeros[f64, 9];
+    w[0] = 4.0 / 9.0;
+    w[1] = 1.0 / 9.0; w[2] = 1.0 / 9.0; w[3] = 1.0 / 9.0; w[4] = 1.0 / 9.0;
+    w[5] = 1.0 / 36.0; w[6] = 1.0 / 36.0; w[7] = 1.0 / 36.0; w[8] = 1.0 / 36.0;
+
+    // Opposite direction for bounce-back
+    let opp: array[i32, 9] = array_zeros[i32, 9];
+    opp[0]=0; opp[1]=3; opp[2]=4; opp[3]=1; opp[4]=2; opp[5]=7; opp[6]=8; opp[7]=5; opp[8]=6;
+
+    // Distribution functions: f[k][y*nx+x] stored as 9 arrays
+    let f0: array[f64, 20000] = array_zeros[f64, 20000];
+    let f1: array[f64, 20000] = array_zeros[f64, 20000];
+    let f2: array[f64, 20000] = array_zeros[f64, 20000];
+    let f3: array[f64, 20000] = array_zeros[f64, 20000];
+    let f4: array[f64, 20000] = array_zeros[f64, 20000];
+    let f5: array[f64, 20000] = array_zeros[f64, 20000];
+    let f6: array[f64, 20000] = array_zeros[f64, 20000];
+    let f7: array[f64, 20000] = array_zeros[f64, 20000];
+    let f8: array[f64, 20000] = array_zeros[f64, 20000];
+
+    // Temporary post-streaming distributions
+    let g0: array[f64, 20000] = array_zeros[f64, 20000];
+    let g1: array[f64, 20000] = array_zeros[f64, 20000];
+    let g2: array[f64, 20000] = array_zeros[f64, 20000];
+    let g3: array[f64, 20000] = array_zeros[f64, 20000];
+    let g4: array[f64, 20000] = array_zeros[f64, 20000];
+    let g5: array[f64, 20000] = array_zeros[f64, 20000];
+    let g6: array[f64, 20000] = array_zeros[f64, 20000];
+    let g7: array[f64, 20000] = array_zeros[f64, 20000];
+    let g8: array[f64, 20000] = array_zeros[f64, 20000];
+
+    // Macroscopic fields
+    let rho: array[f64, 20000] = array_zeros[f64, 20000];
+    let ux: array[f64, 20000] = array_zeros[f64, 20000];
+    let uy: array[f64, 20000] = array_zeros[f64, 20000];
+
+    // Obstacle: cylinder at (nx/4, ny/2)
+    let obstacle: array[i32, 20000] = array_zeros[i32, 20000];
+    let obs_cx: i32 = nx / 4;
+    let obs_cy: i32 = ny / 2;
+    let obs_r2: i32 = 100;
+    for y: i32 in range(0, ny) {
+        for x: i32 in range(0, nx) {
+            let dx: i32 = x - obs_cx;
+            let dy: i32 = y - obs_cy;
+            if dx * dx + dy * dy < obs_r2 {
+                obstacle[y * nx + x] = 1;
+            }
+        }
+    }
+
+    // Relaxation parameter
+    let tau: f64 = 0.6;
+    let omega: f64 = 1.0 / tau;
+
+    // Initialize with uniform density and small inlet velocity
+    let u_inlet: f64 = 0.04;
+    for y: i32 in range(0, ny) {
+        for x: i32 in range(0, nx) {
+            let idx: i32 = y * nx + x;
+            let u0: f64 = u_inlet;
+            let v0: f64 = 0.0;
+            let usq: f64 = u0 * u0 + v0 * v0;
+
+            // Equilibrium initialization
+            f0[idx] = w[0] * (1.0 - 1.5 * usq);
+            f1[idx] = w[1] * (1.0 + 3.0 * u0 + 4.5 * u0 * u0 - 1.5 * usq);
+            f2[idx] = w[2] * (1.0 - 1.5 * usq);
+            f3[idx] = w[3] * (1.0 - 3.0 * u0 + 4.5 * u0 * u0 - 1.5 * usq);
+            f4[idx] = w[4] * (1.0 - 1.5 * usq);
+            f5[idx] = w[5] * (1.0 + 3.0 * u0 + 4.5 * u0 * u0 - 1.5 * usq);
+            f6[idx] = w[6] * (1.0 - 3.0 * u0 + 4.5 * u0 * u0 - 1.5 * usq);
+            f7[idx] = w[7] * (1.0 - 3.0 * u0 + 4.5 * u0 * u0 - 1.5 * usq);
+            f8[idx] = w[8] * (1.0 + 3.0 * u0 + 4.5 * u0 * u0 - 1.5 * usq);
+        }
+    }
+
+    // Main simulation loop
+    for step: i32 in range(0, nsteps) {
+        // Streaming step (with periodic BC in x, bounce-back on y walls and obstacle)
+        for y: i32 in range(0, ny) {
+            for x: i32 in range(0, nx) {
+                let idx: i32 = y * nx + x;
+                // f0: no movement
+                g0[idx] = f0[idx];
+                // f1: from (x-1, y)
+                let sx: i32 = (x - 1 + nx) % nx;
+                g1[idx] = f1[y * nx + sx];
+                // f2: from (x, y-1)
+                if y > 0 { g2[idx] = f2[(y - 1) * nx + x]; }
+                if y == 0 { g2[idx] = f4[idx]; }
+                // f3: from (x+1, y)
+                sx = (x + 1) % nx;
+                g3[idx] = f3[y * nx + sx];
+                // f4: from (x, y+1)
+                if y < ny - 1 { g4[idx] = f4[(y + 1) * nx + x]; }
+                if y == ny - 1 { g4[idx] = f2[idx]; }
+                // f5: from (x-1, y-1)
+                sx = (x - 1 + nx) % nx;
+                if y > 0 { g5[idx] = f5[(y - 1) * nx + sx]; }
+                if y == 0 { g5[idx] = f7[idx]; }
+                // f6: from (x+1, y-1)
+                sx = (x + 1) % nx;
+                if y > 0 { g6[idx] = f6[(y - 1) * nx + sx]; }
+                if y == 0 { g6[idx] = f8[idx]; }
+                // f7: from (x+1, y+1)
+                sx = (x + 1) % nx;
+                if y < ny - 1 { g7[idx] = f7[(y + 1) * nx + sx]; }
+                if y == ny - 1 { g7[idx] = f5[idx]; }
+                // f8: from (x-1, y+1)
+                sx = (x - 1 + nx) % nx;
+                if y < ny - 1 { g8[idx] = f8[(y + 1) * nx + sx]; }
+                if y == ny - 1 { g8[idx] = f6[idx]; }
+            }
+        }
+
+        // Bounce-back on obstacle
+        for y: i32 in range(0, ny) {
+            for x: i32 in range(0, nx) {
+                let idx: i32 = y * nx + x;
+                if obstacle[idx] == 1 {
+                    let t1: f64 = g1[idx]; let t2: f64 = g2[idx]; let t3: f64 = g3[idx]; let t4: f64 = g4[idx];
+                    let t5: f64 = g5[idx]; let t6: f64 = g6[idx]; let t7: f64 = g7[idx]; let t8: f64 = g8[idx];
+                    g1[idx] = t3; g3[idx] = t1;
+                    g2[idx] = t4; g4[idx] = t2;
+                    g5[idx] = t7; g7[idx] = t5;
+                    g6[idx] = t8; g8[idx] = t6;
+                }
+            }
+        }
+
+        // Collision step (BGK)
+        for y: i32 in range(0, ny) {
+            for x: i32 in range(0, nx) {
+                let idx: i32 = y * nx + x;
+                // Compute macroscopic quantities
+                let r: f64 = g0[idx]+g1[idx]+g2[idx]+g3[idx]+g4[idx]+g5[idx]+g6[idx]+g7[idx]+g8[idx];
+                let u: f64 = (g1[idx]-g3[idx]+g5[idx]-g6[idx]-g7[idx]+g8[idx]) / r;
+                let v: f64 = (g2[idx]-g4[idx]+g5[idx]+g6[idx]-g7[idx]-g8[idx]) / r;
+
+                rho[idx] = r;
+                ux[idx] = u;
+                uy[idx] = v;
+
+                let usq: f64 = u*u + v*v;
+                // Equilibrium + collision
+                let feq0: f64 = w[0]*r*(1.0 - 1.5*usq);
+                let feq1: f64 = w[1]*r*(1.0 + 3.0*u + 4.5*u*u - 1.5*usq);
+                let feq2: f64 = w[2]*r*(1.0 + 3.0*v + 4.5*v*v - 1.5*usq);
+                let feq3: f64 = w[3]*r*(1.0 - 3.0*u + 4.5*u*u - 1.5*usq);
+                let feq4: f64 = w[4]*r*(1.0 - 3.0*v + 4.5*v*v - 1.5*usq);
+                let feq5: f64 = w[5]*r*(1.0+3.0*(u+v)+4.5*(u+v)*(u+v)-1.5*usq);
+                let feq6: f64 = w[6]*r*(1.0+3.0*(0.0-u+v)+4.5*(0.0-u+v)*(0.0-u+v)-1.5*usq);
+                let feq7: f64 = w[7]*r*(1.0+3.0*(0.0-u-v)+4.5*(0.0-u-v)*(0.0-u-v)-1.5*usq);
+                let feq8: f64 = w[8]*r*(1.0+3.0*(u-v)+4.5*(u-v)*(u-v)-1.5*usq);
+
+                f0[idx] = g0[idx] - omega*(g0[idx]-feq0);
+                f1[idx] = g1[idx] - omega*(g1[idx]-feq1);
+                f2[idx] = g2[idx] - omega*(g2[idx]-feq2);
+                f3[idx] = g3[idx] - omega*(g3[idx]-feq3);
+                f4[idx] = g4[idx] - omega*(g4[idx]-feq4);
+                f5[idx] = g5[idx] - omega*(g5[idx]-feq5);
+                f6[idx] = g6[idx] - omega*(g6[idx]-feq6);
+                f7[idx] = g7[idx] - omega*(g7[idx]-feq7);
+                f8[idx] = g8[idx] - omega*(g8[idx]-feq8);
+            }
+        }
+
+        // Inlet BC: Zou-He (left boundary x=0)
+        for y: i32 in range(1, ny - 1) {
+            let idx: i32 = y * nx;
+            let r: f64 = rho[idx];
+            f1[idx] = f3[idx] + 2.0/3.0 * r * u_inlet;
+            f5[idx] = f7[idx] + 1.0/6.0 * r * u_inlet;
+            f8[idx] = f6[idx] + 1.0/6.0 * r * u_inlet;
+        }
+    }
+
+    // Compute checksum: total kinetic energy and avg velocity
+    let total_ke: f64 = 0.0;
+    let avg_ux: f64 = 0.0;
+    let avg_uy: f64 = 0.0;
+    let count: i32 = 0;
+    for y: i32 in range(0, ny) {
+        for x: i32 in range(0, nx) {
+            let idx: i32 = y * nx + x;
+            if obstacle[idx] == 0 {
+                total_ke = total_ke + 0.5 * rho[idx] * (ux[idx]*ux[idx] + uy[idx]*uy[idx]);
+                avg_ux = avg_ux + ux[idx];
+                avg_uy = avg_uy + uy[idx];
+                count = count + 1;
+            }
+        }
+    }
+    avg_ux = avg_ux / to_f64(count);
+    avg_uy = avg_uy / to_f64(count);
+
+    let checksum: f64 = total_ke * 1000000.0 + avg_ux * 100000.0 + avg_uy * 100000.0 + to_f64(count);
+    print_f64(checksum);
+    return 0;
+}

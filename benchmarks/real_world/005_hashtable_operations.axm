@@ -1,0 +1,131 @@
+@module hashtable_operations;
+@intent("Open-addressing hash table with linear probing: 50000 inserts, 50000 lookups, 25000 deletes");
+
+fn main() -> i32 {
+    let capacity: i32 = 65536;
+    let mask: i32 = 65535;
+
+    // Hash table storage: keys, values, status (0=empty, 1=occupied, 2=tombstone)
+    let keys: array[i64, 65536] = array_zeros[i64, 65536];
+    let vals: array[i64, 65536] = array_zeros[i64, 65536];
+    let status: array[i32, 65536] = array_zeros[i32, 65536];
+
+    let hash_mult: i64 = 2654435761;
+    let mod32: i64 = 4294967296;
+    let size: i32 = 0;
+
+    // LCG for generating keys/values
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Store inserted keys for lookup/delete
+    let inserted_keys: array[i64, 50000] = array_zeros[i64, 50000];
+
+    // --- INSERT 50000 items ---
+    for i: i32 in range(0, 50000) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let key: i64 = seed;
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let val: i64 = seed;
+        inserted_keys[i] = key;
+
+        // Hash: multiplicative hashing
+        let h: i64 = (key * hash_mult) % mod32;
+        let idx: i32 = narrow(h % widen(capacity));
+
+        // Linear probing insert
+        let found: i32 = 0;
+        let probe: i32 = 0;
+        while probe < capacity and found == 0 {
+            let pos: i32 = (idx + probe) % capacity;
+            if status[pos] == 0 or status[pos] == 2 {
+                keys[pos] = key;
+                vals[pos] = val;
+                status[pos] = 1;
+                size = size + 1;
+                found = 1;
+            }
+            if found == 0 and status[pos] == 1 and keys[pos] == key {
+                vals[pos] = val;
+                found = 1;
+            }
+            probe = probe + 1;
+        }
+    }
+
+    // --- LOOKUP 50000 items ---
+    let lookup_sum: i64 = 0;
+    let found_count: i32 = 0;
+    for i: i32 in range(0, 50000) {
+        let key: i64 = inserted_keys[i];
+        let h: i64 = (key * hash_mult) % mod32;
+        let idx: i32 = narrow(h % widen(capacity));
+
+        let found: i32 = 0;
+        let probe: i32 = 0;
+        while probe < capacity and found == 0 {
+            let pos: i32 = (idx + probe) % capacity;
+            if status[pos] == 0 {
+                found = 2;
+            }
+            if found == 0 and status[pos] == 1 and keys[pos] == key {
+                lookup_sum = lookup_sum + vals[pos];
+                found_count = found_count + 1;
+                found = 1;
+            }
+            probe = probe + 1;
+        }
+    }
+
+    // --- DELETE 25000 items ---
+    let delete_count: i32 = 0;
+    for i: i32 in range(0, 25000) {
+        let key: i64 = inserted_keys[i * 2];
+        let h: i64 = (key * hash_mult) % mod32;
+        let idx: i32 = narrow(h % widen(capacity));
+
+        let found: i32 = 0;
+        let probe: i32 = 0;
+        while probe < capacity and found == 0 {
+            let pos: i32 = (idx + probe) % capacity;
+            if status[pos] == 0 {
+                found = 2;
+            }
+            if found == 0 and status[pos] == 1 and keys[pos] == key {
+                status[pos] = 2;
+                delete_count = delete_count + 1;
+                size = size - 1;
+                found = 1;
+            }
+            probe = probe + 1;
+        }
+    }
+
+    // --- Re-lookup after deletes ---
+    let relookup_found: i32 = 0;
+    for i: i32 in range(0, 50000) {
+        let key: i64 = inserted_keys[i];
+        let h: i64 = (key * hash_mult) % mod32;
+        let idx: i32 = narrow(h % widen(capacity));
+
+        let found: i32 = 0;
+        let probe: i32 = 0;
+        while probe < capacity and found == 0 {
+            let pos: i32 = (idx + probe) % capacity;
+            if status[pos] == 0 {
+                found = 2;
+            }
+            if found == 0 and status[pos] == 1 and keys[pos] == key {
+                relookup_found = relookup_found + 1;
+                found = 1;
+            }
+            probe = probe + 1;
+        }
+    }
+
+    let checksum: i64 = lookup_sum + widen(found_count) * 1000 + widen(delete_count) * 100 + widen(relookup_found) + widen(size);
+    print_i64(checksum);
+    return 0;
+}

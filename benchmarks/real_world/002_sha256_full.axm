@@ -1,0 +1,153 @@
+@module sha256_full;
+@intent("SHA-256 hash computation on 10000 blocks, 64 rounds per block with message schedule");
+
+fn main() -> i32 {
+    let blocks: i32 = 10000;
+    let mod32: i64 = 4294967296;
+
+    // SHA-256 initial hash values
+    let h0: i64 = 1779033703;
+    let h1: i64 = 3144134277;
+    let h2: i64 = 1013904242;
+    let h3: i64 = 2773480762;
+    let h4: i64 = 1359893119;
+    let h5: i64 = 2600822924;
+    let h6: i64 = 528734635;
+    let h7: i64 = 1541459225;
+
+    // Round constants K[0..63]
+    let k: array[i64, 64] = array_zeros[i64, 64];
+    k[0]=1116352408; k[1]=1899447441; k[2]=3049323471; k[3]=3921009573;
+    k[4]=961987163; k[5]=1508970993; k[6]=2453635748; k[7]=2870763221;
+    k[8]=3624381080; k[9]=310598401; k[10]=607225278; k[11]=1426881987;
+    k[12]=1925078388; k[13]=2162078206; k[14]=2614888103; k[15]=3248222580;
+    k[16]=3835390401; k[17]=4022224774; k[18]=264347078; k[19]=604807628;
+    k[20]=770255983; k[21]=1249150122; k[22]=1555081692; k[23]=1996064986;
+    k[24]=2554220882; k[25]=2821834349; k[26]=2952996808; k[27]=3210313671;
+    k[28]=3336571891; k[29]=3584528711; k[30]=113926993; k[31]=338241895;
+    k[32]=666307205; k[33]=773529912; k[34]=1294757372; k[35]=1396182291;
+    k[36]=1695183700; k[37]=1986661051; k[38]=2177026350; k[39]=2456956037;
+    k[40]=2730485921; k[41]=2820302411; k[42]=3259730800; k[43]=3345764771;
+    k[44]=3516065817; k[45]=3600352804; k[46]=4094571909; k[47]=275423344;
+    k[48]=430227734; k[49]=506948616; k[50]=659060556; k[51]=883997877;
+    k[52]=958139571; k[53]=1322822218; k[54]=1537002063; k[55]=1747873779;
+    k[56]=1955562222; k[57]=2024104815; k[58]=2227730452; k[59]=2361852424;
+    k[60]=2428436474; k[61]=2756734187; k[62]=3204031479; k[63]=3329325298;
+
+    // Powers of 2 for shift simulation
+    let pow2: array[i64, 32] = array_zeros[i64, 32];
+    pow2[0] = 1;
+    for i: i32 in range(1, 32) {
+        pow2[i] = pow2[i - 1] * 2;
+    }
+
+    let w: array[i64, 64] = array_zeros[i64, 64];
+
+    for block: i32 in range(0, blocks) {
+        // Generate message words from block number
+        let seed: i64 = widen(block) * 2654435761 + 1;
+        for i: i32 in range(0, 16) {
+            seed = (seed * 6364136223846793005 + widen(i) * 1442695040888963407) % mod32;
+            w[i] = seed;
+        }
+
+        // Message schedule expansion: w[16..63]
+        for i: i32 in range(16, 64) {
+            // sigma0: ROTR(w[i-15],7) XOR ROTR(w[i-15],18) XOR SHR(w[i-15],3)
+            // Simulate ROTR(x, n) = (x / pow2[n] + x * pow2[32-n]) % mod32
+            let w15: i64 = w[i - 15];
+            let r7: i64 = (w15 / pow2[7] + w15 * pow2[25]) % mod32;
+            let r18: i64 = (w15 / pow2[18] + w15 * pow2[14]) % mod32;
+            let sh3: i64 = w15 / pow2[3];
+            // XOR via: a^b = a+b - 2*(a*b % mod32)  (approximate AND)
+            let xor1_and: i64 = (r7 * r18) % mod32;
+            let xor1: i64 = (r7 + r18 - 2 * xor1_and + 2 * mod32) % mod32;
+            let xor2_and: i64 = (xor1 * sh3) % mod32;
+            let s0: i64 = (xor1 + sh3 - 2 * xor2_and + 2 * mod32) % mod32;
+
+            // sigma1: ROTR(w[i-2],17) XOR ROTR(w[i-2],19) XOR SHR(w[i-2],10)
+            let w2: i64 = w[i - 2];
+            let r17: i64 = (w2 / pow2[17] + w2 * pow2[15]) % mod32;
+            let r19: i64 = (w2 / pow2[19] + w2 * pow2[13]) % mod32;
+            let sh10: i64 = w2 / pow2[10];
+            let xor3_and: i64 = (r17 * r19) % mod32;
+            let xor3: i64 = (r17 + r19 - 2 * xor3_and + 2 * mod32) % mod32;
+            let xor4_and: i64 = (xor3 * sh10) % mod32;
+            let s1: i64 = (xor3 + sh10 - 2 * xor4_and + 2 * mod32) % mod32;
+
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) % mod32;
+        }
+
+        let a: i64 = h0;
+        let b: i64 = h1;
+        let c: i64 = h2;
+        let d: i64 = h3;
+        let e: i64 = h4;
+        let f: i64 = h5;
+        let g: i64 = h6;
+        let hh: i64 = h7;
+
+        // 64 compression rounds
+        for i: i32 in range(0, 64) {
+            // Sigma1(e) = ROTR(e,6) XOR ROTR(e,11) XOR ROTR(e,25)
+            let re6: i64 = (e / pow2[6] + e * pow2[26]) % mod32;
+            let re11: i64 = (e / pow2[11] + e * pow2[21]) % mod32;
+            let re25: i64 = (e / pow2[25] + e * pow2[7]) % mod32;
+            let x1_and: i64 = (re6 * re11) % mod32;
+            let x1: i64 = (re6 + re11 - 2 * x1_and + 2 * mod32) % mod32;
+            let x2_and: i64 = (x1 * re25) % mod32;
+            let S1: i64 = (x1 + re25 - 2 * x2_and + 2 * mod32) % mod32;
+
+            // Ch(e,f,g) = (e AND f) XOR (NOT e AND g)
+            let ef: i64 = (e * f) % mod32;
+            let ne: i64 = (mod32 - 1 - e) % mod32;
+            let neg: i64 = (ne * g) % mod32;
+            let ch_and: i64 = (ef * neg) % mod32;
+            let ch: i64 = (ef + neg - 2 * ch_and + 2 * mod32) % mod32;
+
+            let temp1: i64 = (hh + S1 + ch + k[i] + w[i]) % mod32;
+
+            // Sigma0(a) = ROTR(a,2) XOR ROTR(a,13) XOR ROTR(a,22)
+            let ra2: i64 = (a / pow2[2] + a * pow2[30]) % mod32;
+            let ra13: i64 = (a / pow2[13] + a * pow2[19]) % mod32;
+            let ra22: i64 = (a / pow2[22] + a * pow2[10]) % mod32;
+            let x3_and: i64 = (ra2 * ra13) % mod32;
+            let x3: i64 = (ra2 + ra13 - 2 * x3_and + 2 * mod32) % mod32;
+            let x4_and: i64 = (x3 * ra22) % mod32;
+            let S0: i64 = (x3 + ra22 - 2 * x4_and + 2 * mod32) % mod32;
+
+            // Maj(a,b,c) = (a AND b) XOR (a AND c) XOR (b AND c)
+            let ab: i64 = (a * b) % mod32;
+            let ac: i64 = (a * c) % mod32;
+            let bc: i64 = (b * c) % mod32;
+            let m1_and: i64 = (ab * ac) % mod32;
+            let m1: i64 = (ab + ac - 2 * m1_and + 2 * mod32) % mod32;
+            let m2_and: i64 = (m1 * bc) % mod32;
+            let maj: i64 = (m1 + bc - 2 * m2_and + 2 * mod32) % mod32;
+
+            let temp2: i64 = (S0 + maj) % mod32;
+
+            hh = g;
+            g = f;
+            f = e;
+            e = (d + temp1) % mod32;
+            d = c;
+            c = b;
+            b = a;
+            a = (temp1 + temp2) % mod32;
+        }
+
+        h0 = (h0 + a) % mod32;
+        h1 = (h1 + b) % mod32;
+        h2 = (h2 + c) % mod32;
+        h3 = (h3 + d) % mod32;
+        h4 = (h4 + e) % mod32;
+        h5 = (h5 + f) % mod32;
+        h6 = (h6 + g) % mod32;
+        h7 = (h7 + hh) % mod32;
+    }
+
+    let checksum: i64 = (h0 + h1 + h2 + h3 + h4 + h5 + h6 + h7) % mod32;
+    print_i64(checksum);
+    return 0;
+}

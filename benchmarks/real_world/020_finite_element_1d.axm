@@ -1,0 +1,165 @@
+@module finite_element_1d;
+@intent("1D finite element method: assemble stiffness matrix, apply BCs, solve via Gaussian elimination, 2000 elements");
+
+fn main() -> i32 {
+    let n_elem: i32 = 2000;
+    let n_nodes: i32 = 2001;
+    let domain_len: f64 = 10.0;
+    let h: f64 = domain_len / to_f64(n_elem);
+
+    // We solve: -u''(x) + u(x) = f(x) on [0, 10], u(0)=0, u(10)=0
+    // f(x) = sin(pi*x/10) * (1 + pi^2/100)
+    // Exact solution: u(x) = sin(pi*x/10) (approximately, for Helmholtz with reaction term)
+
+    // Stiffness matrix K stored as tridiagonal: diag, upper, lower
+    let K_diag: array[f64, 2001] = array_zeros[f64, 2001];
+    let K_upper: array[f64, 2001] = array_zeros[f64, 2001];
+    let K_lower: array[f64, 2001] = array_zeros[f64, 2001];
+
+    // Mass matrix (for reaction term) - also tridiagonal
+    let M_diag: array[f64, 2001] = array_zeros[f64, 2001];
+    let M_upper: array[f64, 2001] = array_zeros[f64, 2001];
+    let M_lower: array[f64, 2001] = array_zeros[f64, 2001];
+
+    // Load vector
+    let F: array[f64, 2001] = array_zeros[f64, 2001];
+
+    // Solution vector
+    let u: array[f64, 2001] = array_zeros[f64, 2001];
+
+    let pi: f64 = 3.14159265358979;
+
+    // Assemble element matrices
+    // For linear elements on [-h/2, h/2]:
+    // Element stiffness: K_e = (1/h) * [[1, -1], [-1, 1]]
+    // Element mass:      M_e = (h/6) * [[2, 1], [1, 2]]
+    let ke_diag: f64 = 1.0 / h;
+    let ke_off: f64 = -1.0 / h;
+    let me_diag: f64 = h * 2.0 / 6.0;
+    let me_off: f64 = h / 6.0;
+
+    for e: i32 in range(0, n_elem) {
+        let i: i32 = e;
+        let j: i32 = e + 1;
+
+        // Assemble stiffness
+        K_diag[i] = K_diag[i] + ke_diag;
+        K_diag[j] = K_diag[j] + ke_diag;
+        K_upper[i] = K_upper[i] + ke_off;
+        K_lower[j] = K_lower[j] + ke_off;
+
+        // Assemble mass (for reaction term)
+        M_diag[i] = M_diag[i] + me_diag;
+        M_diag[j] = M_diag[j] + me_diag;
+        M_upper[i] = M_upper[i] + me_off;
+        M_lower[j] = M_lower[j] + me_off;
+
+        // Assemble load vector using 2-point Gauss quadrature
+        let x_i: f64 = to_f64(i) * h;
+        let x_j: f64 = to_f64(j) * h;
+        let x_mid: f64 = (x_i + x_j) / 2.0;
+
+        // f(x) at midpoint: sin(pi*x/10) * (1 + pi^2/100)
+        let arg: f64 = pi * x_mid / domain_len;
+        // sin via Taylor (reduce to [-pi, pi])
+        let a: f64 = arg - to_f64(truncate(arg / (2.0 * pi))) * 2.0 * pi;
+        if a > pi { a = a - 2.0 * pi; }
+        if a < 0.0 - pi { a = a + 2.0 * pi; }
+        let a3: f64 = a * a * a;
+        let a5: f64 = a3 * a * a;
+        let a7: f64 = a5 * a * a;
+        let a9: f64 = a7 * a * a;
+        let sin_val: f64 = a - a3 / 6.0 + a5 / 120.0 - a7 / 5040.0 + a9 / 362880.0;
+
+        let f_val: f64 = sin_val * (1.0 + pi * pi / 100.0);
+
+        // Linear shape functions integrated: h/2 for each node
+        F[i] = F[i] + f_val * h / 2.0;
+        F[j] = F[j] + f_val * h / 2.0;
+    }
+
+    // Combine: A = K + M (Helmholtz equation)
+    let A_diag: array[f64, 2001] = array_zeros[f64, 2001];
+    let A_upper: array[f64, 2001] = array_zeros[f64, 2001];
+    let A_lower: array[f64, 2001] = array_zeros[f64, 2001];
+
+    for i: i32 in range(0, n_nodes) {
+        A_diag[i] = K_diag[i] + M_diag[i];
+        A_upper[i] = K_upper[i] + M_upper[i];
+        A_lower[i] = K_lower[i] + M_lower[i];
+    }
+
+    // Apply Dirichlet BCs: u(0) = 0, u(n_nodes-1) = 0
+    // Modify row 0 and row n_nodes-1
+    A_diag[0] = 1.0;
+    A_upper[0] = 0.0;
+    F[0] = 0.0;
+
+    A_diag[n_nodes - 1] = 1.0;
+    A_lower[n_nodes - 1] = 0.0;
+    F[n_nodes - 1] = 0.0;
+
+    // Solve tridiagonal system via Thomas algorithm (Gaussian elimination for tridiagonal)
+    // Forward elimination
+    let c_prime: array[f64, 2001] = array_zeros[f64, 2001];
+    let d_prime: array[f64, 2001] = array_zeros[f64, 2001];
+
+    c_prime[0] = A_upper[0] / A_diag[0];
+    d_prime[0] = F[0] / A_diag[0];
+
+    for i: i32 in range(1, n_nodes) {
+        let m: f64 = A_lower[i] / (A_diag[i] - A_lower[i] * c_prime[i - 1]);
+        c_prime[i] = A_upper[i] / (A_diag[i] - A_lower[i] * c_prime[i - 1]);
+        d_prime[i] = (F[i] - A_lower[i] * d_prime[i - 1]) / (A_diag[i] - A_lower[i] * c_prime[i - 1]);
+    }
+
+    // Back substitution
+    u[n_nodes - 1] = d_prime[n_nodes - 1];
+    let i: i32 = n_nodes - 2;
+    while i >= 0 {
+        u[i] = d_prime[i] - c_prime[i] * u[i + 1];
+        i = i - 1;
+    }
+
+    // Compute error vs exact solution u_exact(x) = sin(pi*x/10)
+    let error_l2: f64 = 0.0;
+    let error_max: f64 = 0.0;
+    for idx: i32 in range(0, n_nodes) {
+        let x: f64 = to_f64(idx) * h;
+        let arg: f64 = pi * x / domain_len;
+        let a: f64 = arg - to_f64(truncate(arg / (2.0 * pi))) * 2.0 * pi;
+        if a > pi { a = a - 2.0 * pi; }
+        if a < 0.0 - pi { a = a + 2.0 * pi; }
+        let a3: f64 = a * a * a;
+        let a5: f64 = a3 * a * a;
+        let a7: f64 = a5 * a * a;
+        let a9: f64 = a7 * a * a;
+        let u_exact: f64 = a - a3 / 6.0 + a5 / 120.0 - a7 / 5040.0 + a9 / 362880.0;
+
+        let err: f64 = u[idx] - u_exact;
+        if err < 0.0 { err = 0.0 - err; }
+        error_l2 = error_l2 + err * err * h;
+        if err > error_max {
+            error_max = err;
+        }
+    }
+    error_l2 = sqrt(error_l2);
+
+    // Solution checksum: weighted sum
+    let u_sum: f64 = 0.0;
+    for idx: i32 in range(0, n_nodes) {
+        u_sum = u_sum + u[idx] * to_f64(idx + 1);
+    }
+
+    // Max solution value
+    let u_max: f64 = 0.0;
+    for idx: i32 in range(0, n_nodes) {
+        if u[idx] > u_max {
+            u_max = u[idx];
+        }
+    }
+
+    let checksum: f64 = u_sum + error_l2 * 1000000.0 + error_max * 100000.0 + u_max * 10000.0;
+    print_f64(checksum);
+    return 0;
+}

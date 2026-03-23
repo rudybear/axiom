@@ -1,0 +1,195 @@
+@module lru_cache;
+@intent("LRU cache with doubly-linked list (flat arrays) + hash table, 100000 get/put operations");
+
+fn main() -> i32 {
+    let cap: i32 = 4096;
+    let hash_size: i32 = 8192;
+    let hash_mask: i32 = 8191;
+
+    // Doubly-linked list nodes (flat arrays)
+    let node_key: array[i64, 4098] = array_zeros[i64, 4098];
+    let node_val: array[i64, 4098] = array_zeros[i64, 4098];
+    let node_prev: array[i32, 4098] = array_zeros[i32, 4098];
+    let node_next: array[i32, 4098] = array_zeros[i32, 4098];
+
+    // Hash table: maps key -> node index (chaining via next_hash)
+    let hash_bucket: array[i32, 8192] = array_zeros[i32, 8192];
+    let node_hash_next: array[i32, 4098] = array_zeros[i32, 4098];
+
+    // Sentinel: head=0, tail=1, real nodes start at 2
+    let head: i32 = 0;
+    let tail: i32 = 1;
+    node_next[head] = tail;
+    node_prev[tail] = head;
+    node_prev[head] = -1;
+    node_next[tail] = -1;
+
+    // Free node pool (indices 2..4097)
+    let free_stack: array[i32, 4096] = array_zeros[i32, 4096];
+    let free_top: i32 = 0;
+    for i: i32 in range(0, 4096) {
+        free_stack[i] = i + 2;
+    }
+    free_top = 4096;
+
+    // Initialize hash buckets to -1 (empty)
+    for i: i32 in range(0, 8192) {
+        hash_bucket[i] = -1;
+    }
+    for i: i32 in range(0, 4098) {
+        node_hash_next[i] = -1;
+    }
+
+    let size: i32 = 0;
+    let hash_mult: i64 = 2654435761;
+    let mod32: i64 = 4294967296;
+
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    let hit_count: i32 = 0;
+    let miss_count: i32 = 0;
+    let evict_count: i32 = 0;
+    let val_sum: i64 = 0;
+
+    // 100000 operations: mix of get and put
+    for op: i32 in range(0, 100000) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let op_key: i64 = seed % 8000;
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let op_val: i64 = seed;
+        let is_get: i32 = narrow(seed % 3);
+
+        let h: i32 = narrow((op_key * hash_mult % mod32) % widen(hash_size));
+
+        if is_get == 0 {
+            // GET operation
+            let found_node: i32 = -1;
+            let cur: i32 = hash_bucket[h];
+            while cur != -1 and found_node == -1 {
+                if node_key[cur] == op_key {
+                    found_node = cur;
+                }
+                if found_node == -1 {
+                    cur = node_hash_next[cur];
+                }
+            }
+
+            if found_node != -1 {
+                hit_count = hit_count + 1;
+                val_sum = val_sum + node_val[found_node];
+                // Move to front: remove from current position
+                let p: i32 = node_prev[found_node];
+                let n: i32 = node_next[found_node];
+                node_next[p] = n;
+                node_prev[n] = p;
+                // Insert after head
+                let old_first: i32 = node_next[head];
+                node_next[head] = found_node;
+                node_prev[found_node] = head;
+                node_next[found_node] = old_first;
+                node_prev[old_first] = found_node;
+            }
+            if found_node == -1 {
+                miss_count = miss_count + 1;
+            }
+        }
+
+        if is_get != 0 {
+            // PUT operation
+            // Check if key exists
+            let found_node: i32 = -1;
+            let cur: i32 = hash_bucket[h];
+            while cur != -1 and found_node == -1 {
+                if node_key[cur] == op_key {
+                    found_node = cur;
+                }
+                if found_node == -1 {
+                    cur = node_hash_next[cur];
+                }
+            }
+
+            if found_node != -1 {
+                // Update existing
+                node_val[found_node] = op_val;
+                let p: i32 = node_prev[found_node];
+                let n: i32 = node_next[found_node];
+                node_next[p] = n;
+                node_prev[n] = p;
+                let old_first: i32 = node_next[head];
+                node_next[head] = found_node;
+                node_prev[found_node] = head;
+                node_next[found_node] = old_first;
+                node_prev[old_first] = found_node;
+            }
+
+            if found_node == -1 {
+                // Evict if full
+                if size >= cap {
+                    // Remove LRU (node before tail)
+                    let lru: i32 = node_prev[tail];
+                    let lru_p: i32 = node_prev[lru];
+                    node_next[lru_p] = tail;
+                    node_prev[tail] = lru_p;
+
+                    // Remove from hash
+                    let lru_h: i32 = narrow((node_key[lru] * hash_mult % mod32) % widen(hash_size));
+                    let prev_hash: i32 = -1;
+                    let hcur: i32 = hash_bucket[lru_h];
+                    let removed: i32 = 0;
+                    while hcur != -1 and removed == 0 {
+                        if hcur == lru {
+                            if prev_hash == -1 {
+                                hash_bucket[lru_h] = node_hash_next[lru];
+                            }
+                            if prev_hash != -1 {
+                                node_hash_next[prev_hash] = node_hash_next[lru];
+                            }
+                            removed = 1;
+                        }
+                        if removed == 0 {
+                            prev_hash = hcur;
+                            hcur = node_hash_next[hcur];
+                        }
+                    }
+
+                    // Return to free pool
+                    free_top = free_top - 1;
+                    if free_top < 0 {
+                        free_top = 0;
+                    }
+                    free_stack[free_top] = lru;
+                    size = size - 1;
+                    evict_count = evict_count + 1;
+                }
+
+                // Allocate new node
+                if free_top > 0 {
+                    free_top = free_top - 1;
+                    let new_node: i32 = free_stack[free_top];
+                    node_key[new_node] = op_key;
+                    node_val[new_node] = op_val;
+
+                    // Insert at front of list
+                    let old_first: i32 = node_next[head];
+                    node_next[head] = new_node;
+                    node_prev[new_node] = head;
+                    node_next[new_node] = old_first;
+                    node_prev[old_first] = new_node;
+
+                    // Add to hash bucket
+                    node_hash_next[new_node] = hash_bucket[h];
+                    hash_bucket[h] = new_node;
+
+                    size = size + 1;
+                }
+            }
+        }
+    }
+
+    let checksum: i64 = val_sum + widen(hit_count) * 1000 + widen(miss_count) * 100 + widen(evict_count) * 10 + widen(size);
+    print_i64(checksum);
+    return 0;
+}

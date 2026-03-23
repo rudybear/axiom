@@ -1,0 +1,98 @@
+@module crc32_compute;
+@intent("CRC-32 computation with precomputed lookup table, processing 500000 pseudo-random bytes");
+
+fn main() -> i32 {
+    let mod32: i64 = 4294967296;
+    let poly: i64 = 3988292384;
+
+    // Powers of 2 for bit manipulation
+    let pow2: array[i64, 32] = array_zeros[i64, 32];
+    pow2[0] = 1;
+    for i: i32 in range(1, 32) {
+        pow2[i] = pow2[i - 1] * 2;
+    }
+
+    // Build CRC-32 lookup table (256 entries)
+    let table: array[i64, 256] = array_zeros[i64, 256];
+    for i: i32 in range(0, 256) {
+        let crc: i64 = widen(i);
+        for j: i32 in range(0, 8) {
+            let low_bit: i64 = crc % 2;
+            crc = crc / 2;
+            if low_bit == 1 {
+                // XOR with polynomial: crc ^ poly
+                // XOR(a,b) = a + b - 2*AND(a,b)
+                // AND approximation: for proper CRC we need real bit-AND
+                // Since values are < mod32, use: a XOR b via (a+b) - 2*(a AND b)
+                // AND(a,b) can be computed bit by bit, but that's too slow.
+                // Instead, since we only XOR with a constant, precompute.
+                // Actually, use the identity: for CRC, just do direct mod arithmetic
+                let crc_and_poly: i64 = 0;
+                let tmp_c: i64 = crc;
+                let tmp_p: i64 = poly;
+                // Compute AND bit by bit (8 iterations for speed - approximate for top bits)
+                let and_acc: i64 = 0;
+                for bit: i32 in range(0, 32) {
+                    let c_bit: i64 = (tmp_c / pow2[bit]) % 2;
+                    let p_bit: i64 = (tmp_p / pow2[bit]) % 2;
+                    and_acc = and_acc + c_bit * p_bit * pow2[bit];
+                }
+                crc = crc + poly - 2 * and_acc;
+                // Ensure positive and in range
+                crc = ((crc % mod32) + mod32) % mod32;
+            }
+        }
+        table[i] = crc;
+    }
+
+    // Process pseudo-random bytes
+    let nbytes: i32 = 500000;
+    let crc: i64 = mod32 - 1;
+    let seed: i64 = 12345;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    for i: i32 in range(0, nbytes) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let byte_val: i64 = seed % 256;
+
+        // CRC update: crc = table[(crc XOR byte) & 0xFF] XOR (crc >> 8)
+        let low_crc: i64 = crc % 256;
+        // XOR low_crc with byte_val (both < 256, safe small XOR)
+        let lc_and_bv: i64 = 0;
+        let acc: i64 = 0;
+        for bit: i32 in range(0, 8) {
+            let c_bit: i64 = (low_crc / pow2[bit]) % 2;
+            let b_bit: i64 = (byte_val / pow2[bit]) % 2;
+            acc = acc + c_bit * b_bit * pow2[bit];
+        }
+        let idx: i64 = (low_crc + byte_val - 2 * acc + 512) % 256;
+        let table_val: i64 = table[narrow(idx)];
+
+        let shifted_crc: i64 = crc / 256;
+
+        // XOR table_val with shifted_crc
+        let xor_acc: i64 = 0;
+        for bit: i32 in range(0, 32) {
+            let t_bit: i64 = (table_val / pow2[bit]) % 2;
+            let s_bit: i64 = (shifted_crc / pow2[bit]) % 2;
+            xor_acc = xor_acc + t_bit * s_bit * pow2[bit];
+        }
+        crc = (table_val + shifted_crc - 2 * xor_acc + 2 * mod32) % mod32;
+    }
+
+    // Final XOR with 0xFFFFFFFF
+    let final_crc: i64 = 0;
+    let mask: i64 = mod32 - 1;
+    let xf_acc: i64 = 0;
+    for bit: i32 in range(0, 32) {
+        let c_bit: i64 = (crc / pow2[bit]) % 2;
+        // mask bit is always 1
+        xf_acc = xf_acc + c_bit * pow2[bit];
+    }
+    final_crc = (crc + mask - 2 * xf_acc + 2 * mod32) % mod32;
+
+    print_i64(final_crc);
+    return 0;
+}
