@@ -1,0 +1,13 @@
+@module ffi_test;
+extern fn clock() -> i64;
+
+@export
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn main() -> i32 {
+    let t: i64 = clock();
+    print_i64(t);
+    return 0;
+}

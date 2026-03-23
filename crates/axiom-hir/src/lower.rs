@@ -125,6 +125,7 @@ impl LoweringContext {
         }
 
         let mut functions = Vec::new();
+        let mut extern_functions = Vec::new();
         let mut structs = Vec::new();
         let mut type_aliases = Vec::new();
         let mut imports = Vec::new();
@@ -134,6 +135,10 @@ impl LoweringContext {
                 ast::Item::Function(f) => {
                     let hir_func = self.lower_function(f, item.span);
                     functions.push(hir_func);
+                }
+                ast::Item::ExternFunction(ef) => {
+                    let hir_extern = self.lower_extern_function(ef, item.span);
+                    extern_functions.push(hir_extern);
                 }
                 ast::Item::Struct(s) => {
                     let hir_struct = self.lower_struct(s, item.span);
@@ -154,6 +159,7 @@ impl LoweringContext {
             name,
             annotations,
             functions,
+            extern_functions,
             structs,
             type_aliases,
             imports,
@@ -198,6 +204,49 @@ impl LoweringContext {
             params,
             return_type,
             body,
+            span,
+        }
+    }
+
+    /// Lower an extern function declaration.
+    fn lower_extern_function(
+        &mut self,
+        ef: &ast::ExternFunction,
+        span: Span,
+    ) -> HirExternFunction {
+        let id = self.id_gen.next_id();
+
+        // Check for duplicate function names (extern functions share namespace with regular fns)
+        if let Some(&first_span) = self.seen_functions.get(&ef.name.node) {
+            self.errors.push(LowerError::DuplicateDefinition {
+                name: ef.name.node.clone(),
+                kind: "function".to_string(),
+                first_span: span_to_source_span(first_span),
+                second_span: span_to_source_span(ef.name.span),
+            });
+        } else {
+            self.seen_functions
+                .insert(ef.name.node.clone(), ef.name.span);
+        }
+
+        let annotations: Vec<HirAnnotation> = ef
+            .annotations
+            .iter()
+            .map(|a| self.lower_annotation(a))
+            .collect();
+        self.validate_annotations(&annotations, AnnotationTarget::Function);
+
+        let params: Vec<HirParam> = ef.params.iter().map(|p| self.lower_param(p)).collect();
+
+        let return_type = self.lower_type(&ef.return_type, ef.name.span);
+
+        HirExternFunction {
+            id,
+            name: ef.name.node.clone(),
+            name_span: ef.name.span,
+            annotations,
+            params,
+            return_type,
             span,
         }
     }
@@ -526,6 +575,7 @@ impl LoweringContext {
             ast::Annotation::OptimizationLog(entries) => {
                 HirAnnotationKind::OptimizationLog(entries.clone())
             }
+            ast::Annotation::Export => HirAnnotationKind::Export,
             ast::Annotation::Custom(name, args) => {
                 HirAnnotationKind::Custom(name.clone(), args.clone())
             }
@@ -614,6 +664,7 @@ fn annotation_valid_targets(kind: &HirAnnotationKind) -> (&str, Vec<AnnotationTa
         HirAnnotationKind::Layout(_) => ("layout", vec![Param, StructField]),
         HirAnnotationKind::Align(_) => ("align", vec![Param, StructField]),
         HirAnnotationKind::OptimizationLog(_) => ("optimization_log", vec![Function]),
+        HirAnnotationKind::Export => ("export", vec![Function]),
         HirAnnotationKind::Custom(_, _) => (
             "custom",
             vec![Function, Module, Param, StructDef, StructField, Block],
@@ -1432,5 +1483,83 @@ fn f() -> i32 {
         assert!(err
             .iter()
             .any(|e| matches!(e, LowerError::DuplicateModuleAnnotation { .. })));
+    }
+
+    #[test]
+    fn test_lower_extern_function() {
+        let source = r#"
+extern fn sin(x: f64) -> f64;
+extern fn clock() -> i64;
+fn main() -> i32 {
+    return 0;
+}
+"#;
+        let hir = parse_and_lower(source).expect("lowering should succeed");
+        assert_eq!(hir.extern_functions.len(), 2);
+        assert_eq!(hir.extern_functions[0].name, "sin");
+        assert_eq!(
+            hir.extern_functions[0].return_type,
+            HirType::Primitive(PrimitiveType::F64)
+        );
+        assert_eq!(hir.extern_functions[0].params.len(), 1);
+        assert_eq!(hir.extern_functions[1].name, "clock");
+        assert_eq!(
+            hir.extern_functions[1].return_type,
+            HirType::Primitive(PrimitiveType::I64)
+        );
+        assert!(hir.extern_functions[1].params.is_empty());
+        assert_eq!(hir.functions.len(), 1);
+    }
+
+    #[test]
+    fn test_lower_export_annotation() {
+        let source = r#"
+@export
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+"#;
+        let hir = parse_and_lower(source).expect("lowering should succeed");
+        assert_eq!(hir.functions.len(), 1);
+        let func = &hir.functions[0];
+        assert_eq!(func.name, "add");
+        assert!(
+            func.annotations
+                .iter()
+                .any(|a| matches!(a.kind, HirAnnotationKind::Export)),
+            "should have @export annotation"
+        );
+    }
+
+    #[test]
+    fn test_lower_ffi_test_sample() {
+        let source = r#"
+@module ffi_test;
+extern fn clock() -> i64;
+
+@export
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn main() -> i32 {
+    let t: i64 = clock();
+    print_i64(t);
+    return 0;
+}
+"#;
+        let hir = parse_and_lower(source).expect("lowering should succeed");
+        assert_eq!(hir.name.as_deref(), Some("ffi_test"));
+        assert_eq!(hir.extern_functions.len(), 1);
+        assert_eq!(hir.extern_functions[0].name, "clock");
+        assert_eq!(hir.functions.len(), 2);
+
+        // Check add has @export
+        let add = &hir.functions[0];
+        assert_eq!(add.name, "add");
+        assert!(add
+            .annotations
+            .iter()
+            .any(|a| matches!(a.kind, HirAnnotationKind::Export)));
     }
 }

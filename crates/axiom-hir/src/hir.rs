@@ -75,12 +75,33 @@ pub struct HirModule {
     pub annotations: Vec<HirAnnotation>,
     /// All functions in the module.
     pub functions: Vec<HirFunction>,
+    /// All extern function declarations in the module.
+    pub extern_functions: Vec<HirExternFunction>,
     /// All struct definitions in the module.
     pub structs: Vec<HirStruct>,
     /// All type aliases in the module.
     pub type_aliases: Vec<HirTypeAlias>,
     /// All import declarations in the module.
     pub imports: Vec<HirImport>,
+}
+
+/// An external function declaration (no body, C calling convention).
+#[derive(Debug, Clone)]
+pub struct HirExternFunction {
+    /// Unique node ID.
+    pub id: NodeId,
+    /// Function name.
+    pub name: String,
+    /// Span of the function name in source.
+    pub name_span: Span,
+    /// Validated annotations.
+    pub annotations: Vec<HirAnnotation>,
+    /// Function parameters.
+    pub params: Vec<HirParam>,
+    /// Return type.
+    pub return_type: HirType,
+    /// Span covering the entire extern function declaration.
+    pub span: Span,
 }
 
 /// A function with validated annotations.
@@ -497,6 +518,8 @@ pub enum HirAnnotationKind {
     Align(u64),
     /// `@optimization_log { ... }` - history of optimization attempts.
     OptimizationLog(Vec<OptLogEntry>),
+    /// `@export` - C calling convention, externally visible.
+    Export,
     /// `@custom(name, args)` - extensibility.
     Custom(String, Vec<AnnotationValue>),
 }

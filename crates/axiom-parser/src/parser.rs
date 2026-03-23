@@ -16,9 +16,9 @@
 use axiom_lexer::{Lexer, Span, Token, TokenKind};
 
 use crate::ast::{
-    Annotation, AnnotationValue, BinOp, Block, DimExpr, Expr, Function, ImportDecl, InlineHint,
-    Item, LayoutKind, Module, Param, Spanned, StrategyBlock, StrategyValue, StructDef,
-    StructField, Stmt, TransferBlock, TypeAlias, TypeExpr, UnaryOp,
+    Annotation, AnnotationValue, BinOp, Block, DimExpr, Expr, ExternFunction, Function,
+    ImportDecl, InlineHint, Item, LayoutKind, Module, Param, Spanned, StrategyBlock,
+    StrategyValue, StructDef, StructField, Stmt, TransferBlock, TypeAlias, TypeExpr, UnaryOp,
 };
 use crate::error::{span_to_source_span, ParseError, ParseResult};
 
@@ -322,6 +322,7 @@ impl<'src> Parser<'src> {
         loop {
             match self.peek() {
                 TokenKind::Fn
+                | TokenKind::Extern
                 | TokenKind::Struct
                 | TokenKind::Type
                 | TokenKind::Import
@@ -413,13 +414,14 @@ impl<'src> Parser<'src> {
 
         match self.peek() {
             TokenKind::Fn => Some(self.parse_function(annotations)),
+            TokenKind::Extern => Some(self.parse_extern_function(annotations)),
             TokenKind::Struct => Some(self.parse_struct(annotations)),
             TokenKind::Type => Some(self.parse_type_alias(annotations)),
             TokenKind::Import => Some(self.parse_import(annotations)),
             _ => {
                 if !self.at_end() {
                     self.errors.push(ParseError::UnexpectedToken {
-                        expected: "item (fn, struct, type, or import)".to_string(),
+                        expected: "item (fn, extern, struct, type, or import)".to_string(),
                         found: format!("{:?}", self.peek()),
                         span: span_to_source_span(self.current_span()),
                     });
@@ -521,6 +523,7 @@ impl<'src> Parser<'src> {
                     Annotation::Intent(String::new())
                 }
             }
+            "export" => Annotation::Export,
             "complexity" => {
                 // @complexity O(n^3) — collect tokens until next annotation/fn/semicolon/brace
                 let complexity_start = self.current_span().start;
@@ -1018,6 +1021,62 @@ impl<'src> Parser<'src> {
                 params,
                 return_type,
                 body,
+            }),
+            start_span.merge(end_span),
+        )
+    }
+
+    /// Parse an extern function declaration: `extern fn name(params) -> RetType;`
+    fn parse_extern_function(&mut self, annotations: Vec<Spanned<Annotation>>) -> Spanned<Item> {
+        let start_span = self.current_span();
+        self.advance(); // consume `extern`
+
+        // Expect `fn` keyword after `extern`
+        if !self.eat(&TokenKind::Fn) {
+            self.errors.push(ParseError::UnexpectedToken {
+                expected: "'fn' after 'extern'".to_string(),
+                found: format!("{:?}", self.peek()),
+                span: span_to_source_span(self.current_span()),
+            });
+        }
+
+        let name = if let Some((name, span)) = self.expect_ident("extern function name") {
+            Spanned::new(name, span)
+        } else {
+            Spanned::new("_error_".to_string(), self.current_span())
+        };
+
+        // Parse parameter list
+        let params = if self.eat(&TokenKind::LParen) {
+            let params = self.parse_param_list();
+            self.expect(&TokenKind::RParen, "')'");
+            params
+        } else {
+            self.errors.push(ParseError::UnexpectedToken {
+                expected: "'('".to_string(),
+                found: format!("{:?}", self.peek()),
+                span: span_to_source_span(self.current_span()),
+            });
+            Vec::new()
+        };
+
+        // Parse optional return type
+        let return_type = if self.eat(&TokenKind::Arrow) {
+            self.parse_type_expr()
+        } else {
+            TypeExpr::Named("void".to_string())
+        };
+
+        // Expect semicolon (no body)
+        self.expect_semicolon();
+
+        let end_span = self.prev_span();
+        Spanned::new(
+            Item::ExternFunction(ExternFunction {
+                name,
+                annotations,
+                params,
+                return_type,
             }),
             start_span.merge(end_span),
         )
@@ -2825,5 +2884,127 @@ fn foo() -> i32 { return 0; }
             }
             _ => panic!("expected expression statement with call"),
         }
+    }
+
+    #[test]
+    fn test_extern_function() {
+        let result = parse("extern fn sin(x: f64) -> f64;");
+        assert!(
+            !result.has_errors(),
+            "Parse errors: {:?}",
+            result.errors
+        );
+        assert_eq!(result.module.items.len(), 1);
+        match &result.module.items[0].node {
+            Item::ExternFunction(ef) => {
+                assert_eq!(ef.name.node, "sin");
+                assert_eq!(ef.params.len(), 1);
+                assert_eq!(ef.params[0].name.node, "x");
+                assert!(matches!(ef.return_type, TypeExpr::Named(ref n) if n == "f64"));
+            }
+            _ => panic!("expected ExternFunction"),
+        }
+    }
+
+    #[test]
+    fn test_extern_function_no_params() {
+        let result = parse("extern fn clock() -> i64;");
+        assert!(
+            !result.has_errors(),
+            "Parse errors: {:?}",
+            result.errors
+        );
+        assert_eq!(result.module.items.len(), 1);
+        match &result.module.items[0].node {
+            Item::ExternFunction(ef) => {
+                assert_eq!(ef.name.node, "clock");
+                assert!(ef.params.is_empty());
+                assert!(matches!(ef.return_type, TypeExpr::Named(ref n) if n == "i64"));
+            }
+            _ => panic!("expected ExternFunction"),
+        }
+    }
+
+    #[test]
+    fn test_extern_function_void_return() {
+        let result = parse("extern fn free(p: ptr[u8]);");
+        assert!(
+            !result.has_errors(),
+            "Parse errors: {:?}",
+            result.errors
+        );
+        assert_eq!(result.module.items.len(), 1);
+        match &result.module.items[0].node {
+            Item::ExternFunction(ef) => {
+                assert_eq!(ef.name.node, "free");
+                assert_eq!(ef.params.len(), 1);
+                // No arrow, so void return type
+                assert!(matches!(ef.return_type, TypeExpr::Named(ref n) if n == "void"));
+            }
+            _ => panic!("expected ExternFunction"),
+        }
+    }
+
+    #[test]
+    fn test_export_annotation() {
+        let result = parse(
+            r#"
+@export
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+"#,
+        );
+        assert!(
+            !result.has_errors(),
+            "Parse errors: {:?}",
+            result.errors
+        );
+        assert_eq!(result.module.items.len(), 1);
+        match &result.module.items[0].node {
+            Item::Function(f) => {
+                assert_eq!(f.name.node, "add");
+                assert!(
+                    f.annotations
+                        .iter()
+                        .any(|a| matches!(a.node, Annotation::Export)),
+                    "should have @export annotation"
+                );
+            }
+            _ => panic!("expected Function"),
+        }
+    }
+
+    #[test]
+    fn test_ffi_test_sample() {
+        let source = r#"
+@module ffi_test;
+extern fn clock() -> i64;
+
+@export
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn main() -> i32 {
+    let t: i64 = clock();
+    print_i64(t);
+    return 0;
+}
+"#;
+        let result = parse(source);
+        assert!(
+            !result.has_errors(),
+            "Parse errors: {:?}",
+            result.errors
+        );
+        // Should have 3 items: extern fn clock, fn add, fn main
+        assert_eq!(result.module.items.len(), 3);
+        assert!(matches!(
+            result.module.items[0].node,
+            Item::ExternFunction(_)
+        ));
+        assert!(matches!(result.module.items[1].node, Item::Function(_)));
+        assert!(matches!(result.module.items[2].node, Item::Function(_)));
     }
 }

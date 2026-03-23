@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use axiom_hir::{
-    BinOp, HirBlock, HirExpr, HirExprKind, HirFunction, HirModule, HirParam, HirStmt,
-    HirStmtKind, HirType, PrimitiveType, UnaryOp,
+    BinOp, HirAnnotationKind, HirBlock, HirExpr, HirExprKind, HirExternFunction, HirFunction,
+    HirModule, HirParam, HirStmt, HirStmtKind, HirType, PrimitiveType, UnaryOp,
 };
 
 use crate::error::CodegenError;
@@ -175,6 +175,31 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         );
     }
 
+    // Register extern function signatures.
+    for ef in &module.extern_functions {
+        let ret_type = match hir_type_to_llvm(&ef.return_type) {
+            Ok(t) => t,
+            Err(e) => {
+                ctx.errors.push(e);
+                continue;
+            }
+        };
+        let mut param_types = Vec::new();
+        for param in &ef.params {
+            match hir_type_to_llvm(&param.ty) {
+                Ok(t) => param_types.push(t),
+                Err(e) => ctx.errors.push(e),
+            }
+        }
+        ctx.functions.insert(
+            ef.name.clone(),
+            FuncInfo {
+                return_type: ret_type,
+                param_types,
+            },
+        );
+    }
+
     // First pass: emit all functions to a buffer (so we know what globals are needed).
     let mut func_output = String::with_capacity(4096);
     for func in &module.functions {
@@ -236,7 +261,12 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     // Emit function definitions.
     ctx.output.push_str(&func_output);
 
-    // Emit external declarations.
+    // Emit user-declared extern function declarations.
+    for ef in &module.extern_functions {
+        emit_extern_function_decl(&mut ctx, ef);
+    }
+
+    // Emit external declarations for built-in C functions.
     if ctx.needs_puts {
         let _ = writeln!(ctx.output, "declare i32 @puts(ptr)");
     }
@@ -285,7 +315,20 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     // Build parameter list string.
     let params_str = build_params_str(ctx, &func.params);
 
-    ctx.emit_raw(&format!("define {ret_type} @{}({params_str}) {{", func.name));
+    // Check if function has @export annotation.
+    let is_export = func
+        .annotations
+        .iter()
+        .any(|a| matches!(a.kind, HirAnnotationKind::Export));
+
+    if is_export {
+        ctx.emit_raw(&format!(
+            "define dso_local {ret_type} @{}({params_str}) {{",
+            func.name
+        ));
+    } else {
+        ctx.emit_raw(&format!("define {ret_type} @{}({params_str}) {{", func.name));
+    }
     ctx.emit_raw("entry:");
 
     // Alloca + store for each parameter.
@@ -295,6 +338,32 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     emit_block(ctx, &func.body);
 
     ctx.emit_raw("}");
+}
+
+/// Emit an extern function declaration (`declare`).
+fn emit_extern_function_decl(ctx: &mut CodegenContext, ef: &HirExternFunction) {
+    let ret_type = match hir_type_to_llvm(&ef.return_type) {
+        Ok(t) => t,
+        Err(e) => {
+            ctx.errors.push(e);
+            return;
+        }
+    };
+
+    let mut param_types_str = Vec::new();
+    for param in &ef.params {
+        match hir_type_to_llvm(&param.ty) {
+            Ok(t) => param_types_str.push(t),
+            Err(e) => ctx.errors.push(e),
+        }
+    }
+
+    let params_str = param_types_str.join(", ");
+    let _ = writeln!(
+        ctx.output,
+        "declare {ret_type} @{}({params_str})",
+        ef.name
+    );
 }
 
 /// Build the parameter list string for a function definition.
@@ -1498,10 +1567,7 @@ fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError> {
             ty: "slice".to_string(),
             context: "slice types not yet supported".to_string(),
         }),
-        HirType::Ptr { .. } => Err(CodegenError::UnsupportedType {
-            ty: "ptr".to_string(),
-            context: "pointer types not yet supported".to_string(),
-        }),
+        HirType::Ptr { .. } => Ok("ptr".to_string()),
         HirType::Tuple { .. } => Err(CodegenError::UnsupportedType {
             ty: "tuple".to_string(),
             context: "tuple types not yet supported".to_string(),
@@ -1595,8 +1661,9 @@ fn format_float(value: f64) -> String {
 mod tests {
     use super::*;
     use axiom_hir::{
-        HirBlock, HirExpr, HirExprKind, HirFunction, HirModule, HirParam,
-        HirStmt, HirStmtKind, HirType, NodeId, PrimitiveType, SPAN_DUMMY,
+        HirAnnotation, HirAnnotationKind, HirBlock, HirExpr, HirExprKind,
+        HirExternFunction, HirFunction, HirModule, HirParam, HirStmt, HirStmtKind,
+        HirType, NodeId, PrimitiveType, SPAN_DUMMY,
     };
 
     /// Helper: create a dummy span.
@@ -1750,6 +1817,24 @@ mod tests {
             name: name.map(|s| s.to_string()),
             annotations: vec![],
             functions,
+            extern_functions: vec![],
+            structs: vec![],
+            type_aliases: vec![],
+            imports: vec![],
+        }
+    }
+
+    /// Helper: create a module with functions and extern functions.
+    fn module_with_externs(
+        name: Option<&str>,
+        functions: Vec<HirFunction>,
+        extern_functions: Vec<HirExternFunction>,
+    ) -> HirModule {
+        HirModule {
+            name: name.map(|s| s.to_string()),
+            annotations: vec![],
+            functions,
+            extern_functions,
             structs: vec![],
             type_aliases: vec![],
             imports: vec![],
@@ -2883,6 +2968,103 @@ mod tests {
         assert!(
             ir.contains("declare i32 @printf(ptr, ...)"),
             "should declare printf: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // FFI / Extern function tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extern_decl() {
+        let ef = HirExternFunction {
+            id: nid(0),
+            name: "sin".to_string(),
+            name_span: span(),
+            annotations: vec![],
+            params: vec![param("x", HirType::Primitive(PrimitiveType::F64))],
+            return_type: HirType::Primitive(PrimitiveType::F64),
+            span: span(),
+        };
+
+        let m = module_with_externs(Some("test"), vec![], vec![ef]);
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("declare double @sin(double)"),
+            "should declare extern sin: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_extern_call() {
+        let ef = HirExternFunction {
+            id: nid(0),
+            name: "clock".to_string(),
+            name_span: span(),
+            annotations: vec![],
+            params: vec![],
+            return_type: HirType::Primitive(PrimitiveType::I64),
+            span: span(),
+        };
+
+        let main_func = func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "t".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::I64),
+                    value: call("clock", vec![]),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Return {
+                    value: int_lit(0),
+                }),
+            ]),
+        );
+
+        let m = module_with_externs(Some("test"), vec![main_func], vec![ef]);
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("declare i64 @clock()"),
+            "should declare extern clock: {ir}"
+        );
+        assert!(
+            ir.contains("call i64 @clock()"),
+            "should call clock: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_export_function() {
+        let export_ann = HirAnnotation {
+            kind: HirAnnotationKind::Export,
+            span: SPAN_DUMMY,
+        };
+
+        let add_func = HirFunction {
+            id: nid(0),
+            name: "add".to_string(),
+            name_span: span(),
+            annotations: vec![export_ann],
+            params: vec![
+                param("a", HirType::Primitive(PrimitiveType::I32)),
+                param("b", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            return_type: HirType::Primitive(PrimitiveType::I32),
+            body: block(vec![stmt(HirStmtKind::Return {
+                value: binop(BinOp::Add, ident("a"), ident("b")),
+            })]),
+            span: span(),
+        };
+
+        let m = module(Some("test"), vec![add_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("define dso_local i32 @add(i32 %a, i32 %b)"),
+            "should define exported function with dso_local: {ir}"
         );
     }
 }
