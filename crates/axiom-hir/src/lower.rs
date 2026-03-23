@@ -506,9 +506,39 @@ impl LoweringContext {
                     .map(|a| self.lower_expr(a, SPAN_DUMMY))
                     .collect(),
             },
+            ast::Expr::ArrayZeros {
+                element_type,
+                size,
+            } => {
+                let elem_hir = self.lower_type(element_type, span);
+                let sz = Self::extract_array_size(size);
+                if sz.is_none() {
+                    self.errors.push(LowerError::InvalidArraySize {
+                        span: span_to_source_span(span),
+                    });
+                }
+                HirExprKind::ArrayZeros {
+                    element_type: elem_hir,
+                    size: sz.unwrap_or(0),
+                }
+            }
         };
 
         HirExpr { id, kind, span }
+    }
+
+    /// Extract a compile-time constant array size from an AST expression.
+    fn extract_array_size(expr: &ast::Expr) -> Option<usize> {
+        match expr {
+            ast::Expr::IntLiteral(v) => {
+                if *v >= 0 {
+                    Some(*v as usize)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Lower a type expression, validating named types against `known_types`.
@@ -531,10 +561,18 @@ impl LoweringContext {
                 element: Box::new(self.lower_type(element, span)),
                 dims: dims.iter().map(lower_dim_expr).collect(),
             },
-            ast::TypeExpr::Array(element, length) => HirType::Array {
-                element: Box::new(self.lower_type(element, span)),
-                length: Box::new(self.lower_expr(length, SPAN_DUMMY)),
-            },
+            ast::TypeExpr::Array(element, length) => {
+                let size = Self::extract_array_size(length);
+                if size.is_none() {
+                    self.errors.push(LowerError::InvalidArraySize {
+                        span: span_to_source_span(span),
+                    });
+                }
+                HirType::Array {
+                    element: Box::new(self.lower_type(element, span)),
+                    size: size.unwrap_or(0),
+                }
+            }
             ast::TypeExpr::Slice(element) => HirType::Slice {
                 element: Box::new(self.lower_type(element, span)),
             },

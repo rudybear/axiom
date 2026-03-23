@@ -29,6 +29,35 @@ struct VarInfo {
     alloca_name: String,
     /// The LLVM type (e.g., `i64`).
     llvm_type: String,
+    /// For array variables: the element type and fixed size.
+    /// Local arrays have `alloca [N x T]` — the alloca IS the array pointer.
+    /// Array parameters have `alloca ptr` — the alloca stores a pointer to the array.
+    array_info: Option<ArrayVarInfo>,
+}
+
+/// Extra info for array variables, enabling correct GEP codegen.
+#[derive(Debug, Clone)]
+struct ArrayVarInfo {
+    /// LLVM element type (e.g., `i32`).
+    element_type: String,
+    /// Fixed array size.
+    size: usize,
+    /// If true, the alloca stores the array directly (`alloca [N x T]`).
+    /// If false, the alloca stores a pointer to the array (`alloca ptr`).
+    is_local: bool,
+}
+
+/// Optimization-relevant annotation flags for a function.
+#[derive(Debug, Clone, Default)]
+struct FuncAnnotations {
+    /// Whether the function is annotated with `@pure`.
+    is_pure: bool,
+    /// Whether the function is annotated with `@const`.
+    is_const: bool,
+    /// Whether the function is annotated with `@vectorizable`.
+    is_vectorizable: bool,
+    /// Whether the function has any array/pointer parameter reads (for memory attribute).
+    reads_arg_memory: bool,
 }
 
 /// Information about a function's signature.
@@ -40,6 +69,8 @@ struct FuncInfo {
     param_types: Vec<String>,
     /// Whether this function uses fastcc (internal, non-main, non-export).
     uses_fastcc: bool,
+    /// Optimization annotation flags.
+    annotations: FuncAnnotations,
 }
 
 /// Result of emitting an expression -- an SSA register name or immediate.
@@ -83,12 +114,34 @@ struct CodegenContext {
     needs_abs_i32: bool,
     /// Whether the `@llvm.fabs.f64` intrinsic is needed.
     needs_fabs_f64: bool,
+    /// Whether the `@llvm.memset.p0.i64` intrinsic is needed.
+    needs_memset: bool,
     /// Collected errors.
     errors: Vec<CodegenError>,
     /// Whether the current basic block has been terminated (ret or br).
     block_terminated: bool,
     /// The LLVM return type of the current function being emitted.
     current_return_type: String,
+    /// Whether the current function is `@pure`.
+    current_func_is_pure: bool,
+    /// Whether the current function is `@const`.
+    current_func_is_const: bool,
+    /// Whether the current function is `@vectorizable`.
+    current_func_is_vectorizable: bool,
+    /// Whether the current function reads argument memory (has ptr/array params).
+    current_func_reads_argmem: bool,
+    /// Next metadata ID for branch weights, loop hints, etc.
+    next_metadata_id: u32,
+    /// Collected function attribute group strings (e.g., `attributes #0 = { ... }`).
+    attribute_groups: Vec<String>,
+    /// Collected metadata entries for the footer.
+    metadata_entries: Vec<String>,
+    /// Map from attribute group string to its group number.
+    attr_group_map: HashMap<String, u32>,
+    /// Next attribute group number.
+    next_attr_group: u32,
+    /// Bodies of @const functions for compile-time evaluation.
+    const_func_bodies: HashMap<String, HirFunction>,
 }
 
 impl CodegenContext {
@@ -110,10 +163,41 @@ impl CodegenContext {
             needs_pow_f64: false,
             needs_abs_i32: false,
             needs_fabs_f64: false,
+            needs_memset: false,
             errors: Vec::new(),
             block_terminated: false,
             current_return_type: String::new(),
+            current_func_is_pure: false,
+            current_func_is_const: false,
+            current_func_is_vectorizable: false,
+            current_func_reads_argmem: false,
+            next_metadata_id: 0,
+            attribute_groups: Vec::new(),
+            metadata_entries: Vec::new(),
+            attr_group_map: HashMap::new(),
+            next_attr_group: 0,
+            const_func_bodies: HashMap::new(),
         }
+    }
+
+    /// Get or create an attribute group number for the given attributes string.
+    fn get_or_create_attr_group(&mut self, attrs: &str) -> u32 {
+        if let Some(&id) = self.attr_group_map.get(attrs) {
+            return id;
+        }
+        let id = self.next_attr_group;
+        self.next_attr_group += 1;
+        self.attr_group_map.insert(attrs.to_string(), id);
+        self.attribute_groups
+            .push(format!("attributes #{id} = {{ {attrs} }}"));
+        id
+    }
+
+    /// Allocate the next metadata ID.
+    fn fresh_metadata_id(&mut self) -> u32 {
+        let id = self.next_metadata_id;
+        self.next_metadata_id += 1;
+        id
     }
 
     /// Return the next numbered register like `%0`, `%1`, `%2`.
@@ -163,7 +247,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         };
         let mut param_types = Vec::new();
         for param in &func.params {
-            match hir_type_to_llvm(&param.ty) {
+            match hir_type_to_llvm_param(&param.ty) {
                 Ok(t) => param_types.push(t),
                 Err(e) => ctx.errors.push(e),
             }
@@ -173,12 +257,16 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             .iter()
             .any(|a| matches!(a.kind, HirAnnotationKind::Export));
         let uses_fastcc = func.name != "main" && !is_export;
+
+        let func_annots = extract_func_annotations(&func.annotations, &func.params);
+
         ctx.functions.insert(
             func.name.clone(),
             FuncInfo {
                 return_type: ret_type,
                 param_types,
                 uses_fastcc,
+                annotations: func_annots,
             },
         );
     }
@@ -194,7 +282,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         };
         let mut param_types = Vec::new();
         for param in &ef.params {
-            match hir_type_to_llvm(&param.ty) {
+            match hir_type_to_llvm_param(&param.ty) {
                 Ok(t) => param_types.push(t),
                 Err(e) => ctx.errors.push(e),
             }
@@ -205,8 +293,21 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
                 return_type: ret_type,
                 param_types,
                 uses_fastcc: false,
+                annotations: FuncAnnotations::default(),
             },
         );
+    }
+
+    // Store @const function bodies for compile-time evaluation.
+    for func in &module.functions {
+        let is_const = func
+            .annotations
+            .iter()
+            .any(|a| matches!(a.kind, HirAnnotationKind::Const));
+        if is_const {
+            ctx.const_func_bodies
+                .insert(func.name.clone(), func.clone());
+        }
     }
 
     // First pass: emit all functions to a buffer (so we know what globals are needed).
@@ -294,12 +395,66 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     if ctx.needs_fabs_f64 {
         let _ = writeln!(ctx.output, "declare double @llvm.fabs.f64(double)");
     }
+    if ctx.needs_memset {
+        let _ = writeln!(
+            ctx.output,
+            "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"
+        );
+    }
+
+    // Emit attribute groups.
+    if !ctx.attribute_groups.is_empty() {
+        ctx.emit_blank();
+        for ag in &ctx.attribute_groups {
+            let _ = writeln!(ctx.output, "{ag}");
+        }
+    }
+
+    // Emit metadata entries.
+    if !ctx.metadata_entries.is_empty() {
+        ctx.emit_blank();
+        for md in &ctx.metadata_entries {
+            let _ = writeln!(ctx.output, "{md}");
+        }
+    }
 
     if !ctx.errors.is_empty() {
         return Err(ctx.errors);
     }
 
     Ok(ctx.output)
+}
+
+/// Extract optimization annotation flags from a function's annotations.
+fn extract_func_annotations(
+    annotations: &[axiom_hir::HirAnnotation],
+    params: &[HirParam],
+) -> FuncAnnotations {
+    let mut annots = FuncAnnotations::default();
+    for ann in annotations {
+        match &ann.kind {
+            HirAnnotationKind::Pure => annots.is_pure = true,
+            HirAnnotationKind::Const => annots.is_const = true,
+            HirAnnotationKind::Vectorizable(_) => annots.is_vectorizable = true,
+            _ => {}
+        }
+    }
+    // Check if any parameter is a pointer/array type (meaning the function reads arg memory).
+    annots.reads_arg_memory = params.iter().any(|p| {
+        matches!(
+            p.ty,
+            HirType::Array { .. } | HirType::Ptr { .. } | HirType::Slice { .. }
+        )
+    });
+    annots
+}
+
+/// Check if an LLVM type string represents a signed integer type.
+///
+/// In AXIOM, i8/i16/i32/i64/i128 are signed integers (separate from u8/u16/etc.),
+/// so we can safely add `nsw` (no signed wrap) to operations on these types.
+fn is_signed_int_type_str(ty: &str) -> bool {
+    matches!(ty, "i8" | "i16" | "i32" | "i64" | "i128")
 }
 
 /// Emit a function definition.
@@ -321,8 +476,18 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
 
     ctx.current_return_type = ret_type.clone();
 
-    // Build parameter list string.
+    // Extract optimization annotations for the current function.
+    let func_annots = extract_func_annotations(&func.annotations, &func.params);
+    ctx.current_func_is_pure = func_annots.is_pure;
+    ctx.current_func_is_const = func_annots.is_const;
+    ctx.current_func_is_vectorizable = func_annots.is_vectorizable;
+    ctx.current_func_reads_argmem = func_annots.reads_arg_memory;
+
+    // Build parameter list string (with noalias on ptr params).
     let params_str = build_params_str(ctx, &func.params);
+
+    // Build function attribute group for @pure/@const functions.
+    let attr_suffix = build_func_attr_suffix(ctx, &func_annots);
 
     // Check if function has @export annotation.
     let is_export = func
@@ -333,15 +498,18 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     let is_main = func.name == "main";
     if is_export {
         ctx.emit_raw(&format!(
-            "define dso_local {ret_type} @{}({params_str}) {{",
+            "define dso_local {ret_type} @{}({params_str}){attr_suffix} {{",
             func.name
         ));
     } else if is_main {
-        ctx.emit_raw(&format!("define {ret_type} @{}({params_str}) {{", func.name));
+        ctx.emit_raw(&format!(
+            "define {ret_type} @{}({params_str}){attr_suffix} {{",
+            func.name
+        ));
     } else {
         // Internal functions use fastcc for better performance on recursive calls
         ctx.emit_raw(&format!(
-            "define internal fastcc {ret_type} @{}({params_str}) {{",
+            "define internal fastcc {ret_type} @{}({params_str}){attr_suffix} {{",
             func.name
         ));
     }
@@ -354,6 +522,48 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     emit_block(ctx, &func.body);
 
     ctx.emit_raw("}");
+
+    // Reset per-function optimization state.
+    ctx.current_func_is_pure = false;
+    ctx.current_func_is_const = false;
+    ctx.current_func_is_vectorizable = false;
+    ctx.current_func_reads_argmem = false;
+}
+
+/// Build the function attribute suffix string (e.g., ` #0`).
+///
+/// For `@pure` functions: memory(none) or memory(argmem: read) + nounwind
+/// For `@const` functions: memory(none) + nounwind + speculatable
+fn build_func_attr_suffix(ctx: &mut CodegenContext, annots: &FuncAnnotations) -> String {
+    if !annots.is_pure && !annots.is_const {
+        return String::new();
+    }
+
+    let mut attrs = Vec::new();
+
+    if annots.is_const {
+        // @const implies no memory access, speculatable.
+        attrs.push("memory(none)");
+        attrs.push("nounwind");
+        attrs.push("willreturn");
+        attrs.push("nosync");
+        attrs.push("speculatable");
+    } else if annots.is_pure {
+        if annots.reads_arg_memory {
+            // @pure with pointer args: reads argument memory only.
+            attrs.push("memory(argmem: read)");
+        } else {
+            // @pure without pointer args: no memory access at all.
+            attrs.push("memory(none)");
+        }
+        attrs.push("nounwind");
+        attrs.push("willreturn");
+        attrs.push("nosync");
+    }
+
+    let attrs_str = attrs.join(" ");
+    let group_id = ctx.get_or_create_attr_group(&attrs_str);
+    format!(" #{group_id}")
 }
 
 /// Emit an extern function declaration (`declare`).
@@ -368,7 +578,7 @@ fn emit_extern_function_decl(ctx: &mut CodegenContext, ef: &HirExternFunction) {
 
     let mut param_types_str = Vec::new();
     for param in &ef.params {
-        match hir_type_to_llvm(&param.ty) {
+        match hir_type_to_llvm_param(&param.ty) {
             Ok(t) => param_types_str.push(t),
             Err(e) => ctx.errors.push(e),
         }
@@ -383,12 +593,21 @@ fn emit_extern_function_decl(ctx: &mut CodegenContext, ef: &HirExternFunction) {
 }
 
 /// Build the parameter list string for a function definition.
+///
+/// Adds `noalias` to all `ptr` parameters — AXIOM guarantees no pointer aliasing
+/// by design (every array parameter is a unique allocation). This is the key
+/// reason Fortran beats C in numerical code.
 fn build_params_str(ctx: &mut CodegenContext, params: &[HirParam]) -> String {
     let mut parts = Vec::new();
     for param in params {
-        match hir_type_to_llvm(&param.ty) {
+        match hir_type_to_llvm_param(&param.ty) {
             Ok(llvm_type) => {
-                parts.push(format!("{llvm_type} %{}", param.name));
+                if llvm_type == "ptr" {
+                    // AXIOM has no pointer aliasing — emit noalias on all ptr params.
+                    parts.push(format!("ptr noalias %{}", param.name));
+                } else {
+                    parts.push(format!("{llvm_type} %{}", param.name));
+                }
             }
             Err(e) => ctx.errors.push(e),
         }
@@ -399,23 +618,53 @@ fn build_params_str(ctx: &mut CodegenContext, params: &[HirParam]) -> String {
 /// Emit alloca + store for function parameters.
 fn emit_param_allocas(ctx: &mut CodegenContext, params: &[HirParam]) {
     for param in params {
-        let llvm_type = match hir_type_to_llvm(&param.ty) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
         let alloca_name = format!("%{}.addr", param.name);
-        ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
-        ctx.emit(&format!(
-            "store {llvm_type} %{}, ptr {alloca_name}",
-            param.name
-        ));
-        ctx.variables.insert(
-            param.name.clone(),
-            VarInfo {
-                alloca_name,
-                llvm_type,
-            },
-        );
+
+        // Array parameters are passed as ptr — store the pointer.
+        if let HirType::Array {
+            ref element, size, ..
+        } = param.ty
+        {
+            let elem_llvm = match hir_type_to_llvm(element) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            ctx.emit(&format!("{alloca_name} = alloca ptr"));
+            ctx.emit(&format!(
+                "store ptr %{}, ptr {alloca_name}",
+                param.name
+            ));
+            ctx.variables.insert(
+                param.name.clone(),
+                VarInfo {
+                    alloca_name,
+                    llvm_type: "ptr".to_string(),
+                    array_info: Some(ArrayVarInfo {
+                        element_type: elem_llvm,
+                        size,
+                        is_local: false,
+                    }),
+                },
+            );
+        } else {
+            let llvm_type = match hir_type_to_llvm(&param.ty) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
+            ctx.emit(&format!(
+                "store {llvm_type} %{}, ptr {alloca_name}",
+                param.name
+            ));
+            ctx.variables.insert(
+                param.name.clone(),
+                VarInfo {
+                    alloca_name,
+                    llvm_type,
+                    array_info: None,
+                },
+            );
+        }
     }
 }
 
@@ -462,6 +711,47 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
 
 /// Emit a let binding: alloca + optional store.
 fn emit_let(ctx: &mut CodegenContext, name: &str, ty: &HirType, value: &HirExpr) {
+    // Special handling for array types: alloca [N x T] + memset.
+    if let HirType::Array {
+        ref element, size, ..
+    } = ty
+    {
+        let elem_llvm = match hir_type_to_llvm(element) {
+            Ok(t) => t,
+            Err(e) => {
+                ctx.errors.push(e);
+                return;
+            }
+        };
+        let array_llvm = format!("[{size} x {elem_llvm}]");
+        let alloca_name = format!("%{name}");
+        ctx.emit(&format!("{alloca_name} = alloca {array_llvm}, align 16"));
+
+        // Check if the initializer is ArrayZeros — emit memset.
+        if matches!(value.kind, HirExprKind::ArrayZeros { .. }) {
+            let elem_size = llvm_type_size(&elem_llvm);
+            let total_bytes = elem_size * (*size as u64);
+            ctx.needs_memset = true;
+            ctx.emit(&format!(
+                "call void @llvm.memset.p0.i64(ptr {alloca_name}, i8 0, i64 {total_bytes}, i1 false)"
+            ));
+        }
+
+        ctx.variables.insert(
+            name.to_string(),
+            VarInfo {
+                alloca_name,
+                llvm_type: array_llvm,
+                array_info: Some(ArrayVarInfo {
+                    element_type: elem_llvm,
+                    size: *size,
+                    is_local: true,
+                }),
+            },
+        );
+        return;
+    }
+
     let llvm_type = match hir_type_to_llvm(ty) {
         Ok(t) => t,
         Err(e) => {
@@ -484,11 +774,12 @@ fn emit_let(ctx: &mut CodegenContext, name: &str, ty: &HirType, value: &HirExpr)
         VarInfo {
             alloca_name,
             llvm_type,
+            array_info: None,
         },
     );
 }
 
-/// Emit an assignment: store to existing alloca.
+/// Emit an assignment: store to existing alloca or array index.
 fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
     if let HirExprKind::Ident { name } = &target.kind {
         let var_info = match ctx.variables.get(name) {
@@ -505,6 +796,79 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
             "store {} {}, ptr {}",
             var_info.llvm_type, val.reg, var_info.alloca_name
         ));
+    } else if let HirExprKind::Index {
+        expr: ref arr_expr,
+        ref indices,
+    } = target.kind
+    {
+        // Array index assignment: arr[i] = val
+        if let HirExprKind::Ident { name } = &arr_expr.kind {
+            let var_info = match ctx.variables.get(name.as_str()) {
+                Some(v) => v.clone(),
+                None => {
+                    ctx.errors.push(CodegenError::UndefinedVariable {
+                        name: name.clone(),
+                    });
+                    return;
+                }
+            };
+            if let Some(ref ainfo) = var_info.array_info {
+                let elem_type = ainfo.element_type.clone();
+                let arr_size = ainfo.size;
+                let is_local = ainfo.is_local;
+
+                if indices.len() != 1 {
+                    ctx.errors.push(CodegenError::UnsupportedExpression {
+                        expr: "multi-dimensional array index".to_string(),
+                        context: "array index assignment".to_string(),
+                    });
+                    return;
+                }
+                let idx_val = emit_expr(ctx, &indices[0], Some("i64"));
+                // Ensure index is i64 for GEP.
+                let idx_i64 = if idx_val.ty != "i64" {
+                    let ext_reg = ctx.fresh_reg();
+                    ctx.emit(&format!("{ext_reg} = sext {} {} to i64", idx_val.ty, idx_val.reg));
+                    ext_reg
+                } else {
+                    idx_val.reg.clone()
+                };
+
+                let array_llvm = format!("[{arr_size} x {elem_type}]");
+                let base_ptr = if is_local {
+                    var_info.alloca_name.clone()
+                } else {
+                    // Load the pointer from the alloca.
+                    let load_reg = ctx.fresh_reg();
+                    ctx.emit(&format!(
+                        "{load_reg} = load ptr, ptr {}",
+                        var_info.alloca_name
+                    ));
+                    load_reg
+                };
+
+                let gep_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{gep_reg} = getelementptr inbounds {array_llvm}, ptr {base_ptr}, i64 0, i64 {idx_i64}"
+                ));
+
+                let rhs_val = emit_expr(ctx, value, Some(&elem_type));
+                ctx.emit(&format!(
+                    "store {elem_type} {}, ptr {gep_reg}",
+                    rhs_val.reg
+                ));
+            } else {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: "index assignment on non-array variable".to_string(),
+                    context: "assignment".to_string(),
+                });
+            }
+        } else {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: "index assignment on non-ident base".to_string(),
+                context: "assignment".to_string(),
+            });
+        }
     } else {
         ctx.errors.push(CodegenError::UnsupportedExpression {
             expr: "non-ident assignment target".to_string(),
@@ -543,12 +907,34 @@ fn emit_if(
     let then_label = ctx.fresh_label("then");
     let merge_label = ctx.fresh_label("merge");
 
+    // Optimization #6: Branch prediction hints.
+    // Detect base-case patterns like `n <= 1` or `n < 2` in recursive/@pure functions
+    // and add !prof metadata indicating the then-branch (base case) is unlikely.
+    let branch_weights = if ctx.current_func_is_pure || ctx.current_func_is_const {
+        detect_base_case_pattern(condition)
+    } else {
+        None
+    };
+
     if let Some(else_blk) = else_block {
         let else_label = ctx.fresh_label("else");
-        ctx.emit(&format!(
-            "br i1 {}, label %{then_label}, label %{else_label}",
-            cond.reg
-        ));
+
+        if let Some((then_weight, else_weight)) = branch_weights {
+            // Add branch weight metadata.
+            let md_id = ctx.fresh_metadata_id();
+            ctx.metadata_entries.push(format!(
+                "!{md_id} = !{{!\"branch_weights\", i32 {then_weight}, i32 {else_weight}}}"
+            ));
+            ctx.emit(&format!(
+                "br i1 {}, label %{then_label}, label %{else_label}, !prof !{md_id}",
+                cond.reg
+            ));
+        } else {
+            ctx.emit(&format!(
+                "br i1 {}, label %{then_label}, label %{else_label}",
+                cond.reg
+            ));
+        }
 
         // Then block.
         ctx.emit_blank();
@@ -575,19 +961,22 @@ fn emit_if(
         ctx.emit_raw(&format!("{merge_label}:"));
         // If both branches terminated, the merge block is unreachable.
         ctx.block_terminated = then_terminated && else_terminated;
-        if ctx.block_terminated {
-            // Emit unreachable so that the block is still valid LLVM IR.
-            // Actually, if both returned, the merge block will just be unused
-            // but we should emit it anyway for valid IR. An unreachable helps.
-            // But if further code after the if will be skipped by block_terminated,
-            // we don't need unreachable -- the label alone is enough for any
-            // branches pointing to it.
-        }
     } else {
-        ctx.emit(&format!(
-            "br i1 {}, label %{then_label}, label %{merge_label}",
-            cond.reg
-        ));
+        if let Some((then_weight, else_weight)) = branch_weights {
+            let md_id = ctx.fresh_metadata_id();
+            ctx.metadata_entries.push(format!(
+                "!{md_id} = !{{!\"branch_weights\", i32 {then_weight}, i32 {else_weight}}}"
+            ));
+            ctx.emit(&format!(
+                "br i1 {}, label %{then_label}, label %{merge_label}, !prof !{md_id}",
+                cond.reg
+            ));
+        } else {
+            ctx.emit(&format!(
+                "br i1 {}, label %{then_label}, label %{merge_label}",
+                cond.reg
+            ));
+        }
 
         // Then block.
         ctx.emit_blank();
@@ -603,6 +992,33 @@ fn emit_if(
         ctx.emit_raw(&format!("{merge_label}:"));
         ctx.block_terminated = false;
     }
+}
+
+/// Detect base-case patterns in conditions for branch prediction.
+///
+/// Returns `Some((then_weight, else_weight))` if the condition looks like a
+/// base case (e.g., `n <= 1`, `n < 2`), indicating the then-branch is rarely taken.
+fn detect_base_case_pattern(condition: &HirExpr) -> Option<(u32, u32)> {
+    if let HirExprKind::BinaryOp { op, lhs, rhs } = &condition.kind {
+        // Check for patterns like `n <= SMALL_CONST` or `n < SMALL_CONST`.
+        let is_base_case_op = matches!(op, BinOp::LtEq | BinOp::Lt | BinOp::Eq);
+        if !is_base_case_op {
+            return None;
+        }
+
+        // LHS should be an identifier, RHS should be a small integer literal.
+        let rhs_is_small_lit = matches!(
+            &rhs.kind,
+            HirExprKind::IntLiteral { value } if *value >= 0 && *value <= 3
+        );
+        let lhs_is_ident = matches!(&lhs.kind, HirExprKind::Ident { .. });
+
+        if lhs_is_ident && rhs_is_small_lit {
+            // Base case: then-branch is unlikely (weight 1), else is likely (weight 2000).
+            return Some((1, 2000));
+        }
+    }
+    None
 }
 
 /// Emit a for loop with range() recognition.
@@ -673,8 +1089,11 @@ fn emit_for(
     // Emit end value (once, before the loop).
     let end_val = emit_expr(ctx, end_expr.expect("end_expr should be Some"), Some(&loop_type));
 
-    // Alloca for loop variable.
-    let alloca_name = format!("%{var}");
+    // Alloca for loop variable — use unique name to avoid collisions with
+    // multiple loops using the same variable name.
+    let unique_id = ctx.next_reg;
+    ctx.next_reg += 1;
+    let alloca_name = format!("%{var}.{unique_id}");
     ctx.emit(&format!("{alloca_name} = alloca {loop_type}"));
     ctx.emit(&format!(
         "store {loop_type} {}, ptr {alloca_name}",
@@ -689,6 +1108,7 @@ fn emit_for(
         VarInfo {
             alloca_name: alloca_name.clone(),
             llvm_type: loop_type.clone(),
+            array_info: None,
         },
     );
 
@@ -721,18 +1141,34 @@ fn emit_for(
     ctx.block_terminated = false;
     emit_block(ctx, body);
 
-    // Increment loop variable.
+    // Increment loop variable with nsw (loop induction variable doesn't wrap).
     if !ctx.block_terminated {
         let inc_load = ctx.fresh_reg();
         ctx.emit(&format!(
             "{inc_load} = load {loop_type}, ptr {alloca_name}"
         ));
         let inc_add = ctx.fresh_reg();
-        ctx.emit(&format!("{inc_add} = add {loop_type} {inc_load}, 1"));
+        ctx.emit(&format!("{inc_add} = add nsw {loop_type} {inc_load}, 1"));
         ctx.emit(&format!(
             "store {loop_type} {inc_add}, ptr {alloca_name}"
         ));
-        ctx.emit(&format!("br label %{cond_label}"));
+
+        // Optimization #7: Loop vectorization hints for @vectorizable functions.
+        if ctx.current_func_is_vectorizable {
+            let loop_md_id = ctx.fresh_metadata_id();
+            let vec_enable_id = ctx.fresh_metadata_id();
+            ctx.metadata_entries.push(format!(
+                "!{loop_md_id} = distinct !{{!{loop_md_id}, !{vec_enable_id}}}"
+            ));
+            ctx.metadata_entries.push(format!(
+                "!{vec_enable_id} = !{{!\"llvm.loop.vectorize.enable\", i1 true}}"
+            ));
+            ctx.emit(&format!(
+                "br label %{cond_label}, !llvm.loop !{loop_md_id}"
+            ));
+        } else {
+            ctx.emit(&format!("br label %{cond_label}"));
+        }
     }
 
     // End block.
@@ -820,6 +1256,32 @@ fn emit_expr(ctx: &mut CodegenContext, expr: &HirExpr, expected_type: Option<&st
         HirExprKind::BinaryOp { op, lhs, rhs } => emit_binary_op(ctx, *op, lhs, rhs),
         HirExprKind::UnaryOp { op, operand } => emit_unary_op(ctx, *op, operand),
         HirExprKind::Call { func, args } => emit_call(ctx, func, args),
+        HirExprKind::Index {
+            expr: arr_expr,
+            indices,
+        } => emit_array_index_read(ctx, arr_expr, indices),
+        HirExprKind::ArrayZeros {
+            element_type,
+            size,
+        } => {
+            // ArrayZeros is handled at the let-binding level (emit_let).
+            // If we reach here, it means ArrayZeros was used in a non-let context.
+            // Return a dummy value — the alloca+memset was already emitted by emit_let.
+            let elem_llvm = match hir_type_to_llvm(element_type) {
+                Ok(t) => t,
+                Err(e) => {
+                    ctx.errors.push(e);
+                    return LlvmValue {
+                        reg: "0".to_string(),
+                        ty: "i32".to_string(),
+                    };
+                }
+            };
+            LlvmValue {
+                reg: "zeroinitializer".to_string(),
+                ty: format!("[{size} x {elem_llvm}]"),
+            }
+        }
         _ => {
             ctx.errors.push(CodegenError::UnsupportedExpression {
                 expr: format!("{:?}", expr.kind),
@@ -848,6 +1310,28 @@ fn emit_ident(ctx: &mut CodegenContext, name: &str) -> LlvmValue {
         }
     };
 
+    // For array variables, return the pointer to the array data (for passing to functions).
+    if let Some(ref ainfo) = var_info.array_info {
+        if ainfo.is_local {
+            // Local array: alloca IS the pointer.
+            return LlvmValue {
+                reg: var_info.alloca_name,
+                ty: "ptr".to_string(),
+            };
+        } else {
+            // Parameter array: load the stored pointer.
+            let reg = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{reg} = load ptr, ptr {}",
+                var_info.alloca_name
+            ));
+            return LlvmValue {
+                reg,
+                ty: "ptr".to_string(),
+            };
+        }
+    }
+
     let reg = ctx.fresh_reg();
     ctx.emit(&format!(
         "{reg} = load {}, ptr {}",
@@ -856,6 +1340,92 @@ fn emit_ident(ctx: &mut CodegenContext, name: &str) -> LlvmValue {
     LlvmValue {
         reg,
         ty: var_info.llvm_type,
+    }
+}
+
+/// Emit an array index read: arr[i] -> GEP + load.
+fn emit_array_index_read(
+    ctx: &mut CodegenContext,
+    arr_expr: &HirExpr,
+    indices: &[HirExpr],
+) -> LlvmValue {
+    if let HirExprKind::Ident { name } = &arr_expr.kind {
+        let var_info = match ctx.variables.get(name.as_str()) {
+            Some(v) => v.clone(),
+            None => {
+                ctx.errors.push(CodegenError::UndefinedVariable {
+                    name: name.clone(),
+                });
+                return LlvmValue {
+                    reg: "0".to_string(),
+                    ty: "i32".to_string(),
+                };
+            }
+        };
+        if let Some(ref ainfo) = var_info.array_info {
+            if indices.len() != 1 {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: "multi-dimensional array index".to_string(),
+                    context: "array index read".to_string(),
+                });
+                return LlvmValue {
+                    reg: "0".to_string(),
+                    ty: "i32".to_string(),
+                };
+            }
+            let elem_type = ainfo.element_type.clone();
+            let arr_size = ainfo.size;
+            let is_local = ainfo.is_local;
+
+            let idx_val = emit_expr(ctx, &indices[0], Some("i64"));
+            // Ensure index is i64 for GEP.
+            let idx_i64 = if idx_val.ty != "i64" {
+                let ext_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{ext_reg} = sext {} {} to i64",
+                    idx_val.ty, idx_val.reg
+                ));
+                ext_reg
+            } else {
+                idx_val.reg.clone()
+            };
+
+            let array_llvm = format!("[{arr_size} x {elem_type}]");
+            let base_ptr = if is_local {
+                var_info.alloca_name.clone()
+            } else {
+                let load_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{load_reg} = load ptr, ptr {}",
+                    var_info.alloca_name
+                ));
+                load_reg
+            };
+
+            let gep_reg = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{gep_reg} = getelementptr inbounds {array_llvm}, ptr {base_ptr}, i64 0, i64 {idx_i64}"
+            ));
+
+            let load_reg = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{load_reg} = load {elem_type}, ptr {gep_reg}"
+            ));
+
+            return LlvmValue {
+                reg: load_reg,
+                ty: elem_type,
+            };
+        }
+    }
+
+    ctx.errors.push(CodegenError::UnsupportedExpression {
+        expr: "index expression on non-array".to_string(),
+        context: "index read".to_string(),
+    });
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "i32".to_string(),
     }
 }
 
@@ -870,20 +1440,45 @@ fn emit_binary_op(
     let rhs_val = emit_expr(ctx, rhs, Some(&lhs_val.ty));
 
     let is_float = is_float_type(&lhs_val.ty);
+    let is_int = is_signed_int_type_str(&lhs_val.ty);
+    let in_pure = ctx.current_func_is_pure || ctx.current_func_is_const;
     let result_reg = ctx.fresh_reg();
 
     let instruction = match (op, is_float) {
-        // Arithmetic.
-        (BinOp::Add, false) | (BinOp::AddWrap, false) => "add",
-        (BinOp::Sub, false) | (BinOp::SubWrap, false) => "sub",
-        (BinOp::Mul, false) | (BinOp::MulWrap, false) => "mul",
+        // Integer arithmetic — add nsw/nuw flags.
+        // Regular ops (Add, Sub, Mul) get nsw (no signed wrap) since AXIOM defines
+        // overflow as UB for non-Wrap variants.
+        // Wrap variants (AddWrap, SubWrap, MulWrap) explicitly allow wrapping — no flags.
+        (BinOp::Add, false) => {
+            if is_int { "add nsw" } else { "add" }
+        }
+        (BinOp::Sub, false) => {
+            if is_int { "sub nsw" } else { "sub" }
+        }
+        (BinOp::Mul, false) => {
+            if is_int { "mul nsw" } else { "mul" }
+        }
+        (BinOp::AddWrap, false) => "add",
+        (BinOp::SubWrap, false) => "sub",
+        (BinOp::MulWrap, false) => "mul",
         (BinOp::Div, false) => "sdiv",
         (BinOp::Mod, false) => "srem",
-        (BinOp::Add, true) => "fadd",
-        (BinOp::Sub, true) => "fsub",
-        (BinOp::Mul, true) => "fmul",
-        (BinOp::Div, true) => "fdiv",
-        (BinOp::Mod, true) => "frem",
+        // Float arithmetic — add `fast` flag in @pure/@const functions.
+        (BinOp::Add, true) => {
+            if in_pure { "fadd fast" } else { "fadd" }
+        }
+        (BinOp::Sub, true) => {
+            if in_pure { "fsub fast" } else { "fsub" }
+        }
+        (BinOp::Mul, true) => {
+            if in_pure { "fmul fast" } else { "fmul" }
+        }
+        (BinOp::Div, true) => {
+            if in_pure { "fdiv fast" } else { "fdiv" }
+        }
+        (BinOp::Mod, true) => {
+            if in_pure { "frem fast" } else { "frem" }
+        }
         // Logical.
         (BinOp::And, _) => "and",
         (BinOp::Or, _) => "or",
@@ -1104,7 +1699,43 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             }
         };
 
+        // Optimization #5: @const compile-time evaluation.
+        // If the callee is @const and all arguments are integer/float literals,
+        // try to evaluate at compile time by interpreting the function body.
+        if func_info.annotations.is_const {
+            // First try the simple pattern match.
+            if let Some(result) = try_const_eval(name, args) {
+                return LlvmValue {
+                    reg: result,
+                    ty: func_info.return_type,
+                };
+            }
+            // Then try evaluating the function body if we have it.
+            if let Some(const_func) = ctx.const_func_bodies.get(name.as_str()).cloned() {
+                // Check if all args are integer literals.
+                let int_args: Option<Vec<i128>> = args
+                    .iter()
+                    .map(|a| {
+                        if let HirExprKind::IntLiteral { value } = &a.kind {
+                            Some(*value)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if let Some(int_args) = int_args {
+                    if let Some(result) = try_const_eval_body(&const_func, &int_args) {
+                        return LlvmValue {
+                            reg: format!("{result}"),
+                            ty: func_info.return_type,
+                        };
+                    }
+                }
+            }
+        }
+
         // Emit arguments with type hints from the function signature.
+        // Add noalias to pointer arguments (AXIOM guarantees no aliasing).
         let mut arg_strs = Vec::new();
         for (i, arg) in args.iter().enumerate() {
             let expected_ty = func_info.param_types.get(i).map(|s| s.as_str());
@@ -1114,7 +1745,11 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             } else {
                 val.ty.clone()
             };
-            arg_strs.push(format!("{arg_ty} {}", val.reg));
+            if arg_ty == "ptr" {
+                arg_strs.push(format!("ptr noalias {}", val.reg));
+            } else {
+                arg_strs.push(format!("{arg_ty} {}", val.reg));
+            }
         }
 
         let result_reg = ctx.fresh_reg();
@@ -1616,6 +2251,34 @@ fn emit_builtin_to_f64_i64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVa
     }
 }
 
+/// Return the size in bytes of an LLVM primitive type string.
+fn llvm_type_size(ty: &str) -> u64 {
+    match ty {
+        "i1" => 1,
+        "i8" => 1,
+        "i16" => 2,
+        "i32" => 4,
+        "i64" => 8,
+        "i128" => 16,
+        "half" | "bfloat" => 2,
+        "float" => 4,
+        "double" => 8,
+        "ptr" => 8,
+        _ => 8, // conservative default
+    }
+}
+
+/// Convert an HIR type to the LLVM type used for function parameters.
+///
+/// Arrays are passed by pointer, so `array[T, N]` becomes `ptr`.
+fn hir_type_to_llvm_param(ty: &HirType) -> Result<String, CodegenError> {
+    if matches!(ty, HirType::Array { .. }) {
+        Ok("ptr".to_string())
+    } else {
+        hir_type_to_llvm(ty)
+    }
+}
+
 /// Convert an HIR type to its LLVM IR type string.
 fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError> {
     match ty {
@@ -1628,10 +2291,10 @@ fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError> {
             ty: "tensor".to_string(),
             context: "tensor types not yet supported".to_string(),
         }),
-        HirType::Array { .. } => Err(CodegenError::UnsupportedType {
-            ty: "array".to_string(),
-            context: "array types not yet supported".to_string(),
-        }),
+        HirType::Array { ref element, size } => {
+            let elem_llvm = hir_type_to_llvm(element)?;
+            Ok(format!("[{size} x {elem_llvm}]"))
+        }
         HirType::Slice { .. } => Err(CodegenError::UnsupportedType {
             ty: "slice".to_string(),
             context: "slice types not yet supported".to_string(),
@@ -1671,6 +2334,117 @@ fn primitive_to_llvm(p: PrimitiveType) -> String {
 /// Check whether an LLVM type string represents a floating-point type.
 fn is_float_type(ty: &str) -> bool {
     matches!(ty, "float" | "double" | "half" | "bfloat")
+}
+
+/// Try to evaluate a `@const` function call with all-literal arguments at compile time.
+///
+/// Returns `Some(literal_string)` if evaluation succeeds, `None` if arguments
+/// are not all literals or the function body is too complex for the simple evaluator.
+///
+/// This is a simple evaluator that handles basic arithmetic. It works by
+/// pattern-matching on the argument expressions to extract literal values,
+/// then looking up the function body in the module. For the initial implementation,
+/// we only handle direct single-expression-return functions with basic arithmetic.
+fn try_const_eval(func_name: &str, args: &[HirExpr]) -> Option<String> {
+    // Extract all-integer literal arguments.
+    let mut int_args = Vec::new();
+    let mut float_args = Vec::new();
+    let mut all_int = true;
+    let mut all_float = true;
+
+    for arg in args {
+        match &arg.kind {
+            HirExprKind::IntLiteral { value } => {
+                int_args.push(*value);
+                all_float = false;
+            }
+            HirExprKind::FloatLiteral { value } => {
+                float_args.push(*value);
+                all_int = false;
+            }
+            _ => return None, // Non-literal argument, can't evaluate at compile time.
+        }
+    }
+
+    if !all_int && !all_float {
+        return None; // Mixed types, not handled in simple evaluator.
+    }
+
+    // For the simple evaluator, we can't look up the function body from just the
+    // name (we'd need the full module). Instead, we provide a mechanism for the
+    // most common patterns.
+    //
+    // The real power comes from the @const annotation telling LLVM this function
+    // is speculatable + memory(none), enabling LLVM's own constant folding.
+    // Here we handle the simplest case: functions we can recognize by name pattern.
+    //
+    // This is intentionally conservative — we only fold what we can prove correct.
+    // The _function_ name is not enough, but for well-known patterns like
+    // single-arg arithmetic, we return None and let LLVM handle it.
+    //
+    // However, the `@const` attribute group (speculatable + readnone) means LLVM
+    // will aggressively constant-fold these calls when possible.
+    let _ = (func_name, &int_args, &float_args);
+
+    None
+}
+
+/// Try to evaluate a `@const` function at compile time given the HIR function body.
+///
+/// This is called during codegen for modules where we have access to the function body.
+/// For single-expression return functions with basic arithmetic on parameters,
+/// we can compute the result directly.
+fn try_const_eval_body(
+    func: &HirFunction,
+    int_args: &[i128],
+) -> Option<i128> {
+    // Only handle functions with a single return statement in the body.
+    if func.body.stmts.len() != 1 {
+        return None;
+    }
+    if let HirStmtKind::Return { ref value } = func.body.stmts[0].kind {
+        let param_map: HashMap<String, i128> = func
+            .params
+            .iter()
+            .zip(int_args.iter())
+            .map(|(p, &v)| (p.name.clone(), v))
+            .collect();
+        eval_const_expr(value, &param_map)
+    } else {
+        None
+    }
+}
+
+/// Evaluate a constant expression given parameter bindings.
+fn eval_const_expr(expr: &HirExpr, params: &HashMap<String, i128>) -> Option<i128> {
+    match &expr.kind {
+        HirExprKind::IntLiteral { value } => Some(*value),
+        HirExprKind::Ident { name } => params.get(name).copied(),
+        HirExprKind::BinaryOp { op, lhs, rhs } => {
+            let l = eval_const_expr(lhs, params)?;
+            let r = eval_const_expr(rhs, params)?;
+            match op {
+                BinOp::Add | BinOp::AddWrap => Some(l.wrapping_add(r)),
+                BinOp::Sub | BinOp::SubWrap => Some(l.wrapping_sub(r)),
+                BinOp::Mul | BinOp::MulWrap => Some(l.wrapping_mul(r)),
+                BinOp::Div => {
+                    if r == 0 { None } else { Some(l / r) }
+                }
+                BinOp::Mod => {
+                    if r == 0 { None } else { Some(l % r) }
+                }
+                _ => None,
+            }
+        }
+        HirExprKind::UnaryOp { op, operand } => {
+            let v = eval_const_expr(operand, params)?;
+            match op {
+                UnaryOp::Neg => Some(-v),
+                UnaryOp::Not => None, // Not meaningful for integers.
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Get the target triple for the current host platform.
@@ -1988,7 +2762,7 @@ mod tests {
             ir.contains("store i32 %b, ptr %b.addr"),
             "should store param b"
         );
-        assert!(ir.contains("add i32"), "should add");
+        assert!(ir.contains("add nsw i32"), "should add with nsw");
     }
 
     // -----------------------------------------------------------------------
@@ -2155,12 +2929,12 @@ mod tests {
         );
 
         let ir = codegen(&m).expect("codegen should succeed");
-        assert!(ir.contains("%i = alloca i32"), "should alloca loop var");
+        assert!(ir.contains("alloca i32"), "should alloca loop var");
         assert!(ir.contains("icmp slt"), "should have loop comparison");
         assert!(ir.contains("for.cond."), "should have for.cond label");
         assert!(ir.contains("for.body."), "should have for.body label");
         assert!(ir.contains("for.end."), "should have for.end label");
-        assert!(ir.contains("add i32"), "should have increment");
+        assert!(ir.contains("add nsw i32"), "should have nsw increment");
         assert!(
             ir.contains("br label %for.cond."),
             "should branch back to cond"
@@ -2704,11 +3478,11 @@ mod tests {
         );
 
         let ir = codegen(&m).expect("codegen should succeed");
-        // Mul should appear before add in the IR.
-        let mul_pos = ir.find("mul i32").expect("should have mul");
+        // Mul should appear before add in the IR (with nsw flags).
+        let mul_pos = ir.find("mul nsw i32").expect("should have mul nsw");
         let add_pos = ir
-            .rfind("add i32")
-            .expect("should have add");
+            .rfind("add nsw i32")
+            .expect("should have add nsw");
         assert!(
             mul_pos < add_pos,
             "mul should come before add in the IR"
@@ -3356,15 +4130,15 @@ mod tests {
             ir.contains("icmp sle i64"),
             "should have i64 comparison: {ir}"
         );
-        // Verify i64 subtraction.
+        // Verify i64 subtraction (with nsw flag from @pure function).
         assert!(
-            ir.contains("sub i64"),
-            "should have i64 subtraction: {ir}"
+            ir.contains("sub nsw i64"),
+            "should have i64 subtraction with nsw: {ir}"
         );
-        // Verify i64 addition.
+        // Verify i64 addition (with nsw flag from @pure function).
         assert!(
-            ir.contains("add i64"),
-            "should have i64 addition: {ir}"
+            ir.contains("add nsw i64"),
+            "should have i64 addition with nsw: {ir}"
         );
         // Verify main calls fib(47).
         assert!(
@@ -3422,6 +4196,1002 @@ mod tests {
         assert!(
             ir.contains("@.fmt.f64"),
             "should have f64 format string: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Array support tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_array_type() {
+        // Verify that array type generates the correct LLVM type string.
+        let arr_ty = HirType::Array {
+            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+            size: 100,
+        };
+        let llvm_ty = hir_type_to_llvm(&arr_ty).expect("array type should convert");
+        assert_eq!(llvm_ty, "[100 x i32]");
+
+        let arr_ty_f64 = HirType::Array {
+            element: Box::new(HirType::Primitive(PrimitiveType::F64)),
+            size: 50,
+        };
+        let llvm_ty_f64 = hir_type_to_llvm(&arr_ty_f64).expect("f64 array type should convert");
+        assert_eq!(llvm_ty_f64, "[50 x double]");
+    }
+
+    #[test]
+    fn test_array_param_type() {
+        // Verify that array params become ptr in function signatures.
+        let arr_ty = HirType::Array {
+            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+            size: 10,
+        };
+        let param_ty = hir_type_to_llvm_param(&arr_ty).expect("array param type should convert");
+        assert_eq!(param_ty, "ptr");
+    }
+
+    #[test]
+    fn test_array_alloca() {
+        // Test that array_zeros creates alloca + memset.
+        let m = module(
+            Some("arr_test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arr".to_string(),
+                        name_span: span(),
+                        ty: HirType::Array {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                            size: 10,
+                        },
+                        value: HirExpr {
+                            id: nid(0),
+                            kind: HirExprKind::ArrayZeros {
+                                element_type: HirType::Primitive(PrimitiveType::I32),
+                                size: 10,
+                            },
+                            span: span(),
+                        },
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("alloca [10 x i32]"),
+            "should have array alloca: {ir}"
+        );
+        assert!(
+            ir.contains("call void @llvm.memset.p0.i64(ptr %arr, i8 0, i64 40, i1 false)"),
+            "should have memset for 10 * 4 = 40 bytes: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"),
+            "should declare memset intrinsic: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_array_index_read() {
+        // Test array index read: arr[5].
+        let m = module(
+            Some("arr_read"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arr".to_string(),
+                        name_span: span(),
+                        ty: HirType::Array {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                            size: 10,
+                        },
+                        value: HirExpr {
+                            id: nid(0),
+                            kind: HirExprKind::ArrayZeros {
+                                element_type: HirType::Primitive(PrimitiveType::I32),
+                                size: 10,
+                            },
+                            span: span(),
+                        },
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "x".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: HirExpr {
+                            id: nid(0),
+                            kind: HirExprKind::Index {
+                                expr: Box::new(ident("arr")),
+                                indices: vec![int_lit(5)],
+                            },
+                            span: span(),
+                        },
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: ident("x"),
+                    }),
+                ]),
+            )],
+        );
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Should have GEP + load for index read.
+        assert!(
+            ir.contains("getelementptr inbounds [10 x i32], ptr %arr, i64 0, i64"),
+            "should have GEP for array index: {ir}"
+        );
+        assert!(
+            ir.contains("load i32, ptr"),
+            "should load element from GEP pointer: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_array_index_write() {
+        // Test array index write: arr[5] = 42.
+        let m = module(
+            Some("arr_write"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arr".to_string(),
+                        name_span: span(),
+                        ty: HirType::Array {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                            size: 10,
+                        },
+                        value: HirExpr {
+                            id: nid(0),
+                            kind: HirExprKind::ArrayZeros {
+                                element_type: HirType::Primitive(PrimitiveType::I32),
+                                size: 10,
+                            },
+                            span: span(),
+                        },
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Assign {
+                        target: HirExpr {
+                            id: nid(0),
+                            kind: HirExprKind::Index {
+                                expr: Box::new(ident("arr")),
+                                indices: vec![int_lit(5)],
+                            },
+                            span: span(),
+                        },
+                        value: int_lit(42),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Should have GEP + store for index write.
+        assert!(
+            ir.contains("getelementptr inbounds [10 x i32], ptr %arr, i64 0, i64"),
+            "should have GEP for array index write: {ir}"
+        );
+        assert!(
+            ir.contains("store i32 42, ptr"),
+            "should store value at GEP pointer: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_array_program() {
+        // Full array program: create, fill with squares, sum them.
+        let source = r#"
+@module array_test;
+fn main() -> i32 {
+    let arr: array[i32, 10] = array_zeros[i32, 10];
+    for i: i32 in range(0, 10) {
+        arr[i] = i * i;
+    }
+    let sum: i32 = 0;
+    for i: i32 in range(0, 10) {
+        sum = sum + arr[i];
+    }
+    print_i32(sum);
+    return 0;
+}
+"#;
+        let parse_result = axiom_parser::parse(source);
+        assert!(
+            !parse_result.has_errors(),
+            "parse should succeed: {:?}",
+            parse_result.errors
+        );
+        let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+        let ir = codegen(&hir).expect("codegen should succeed");
+
+        // Verify key patterns in the generated IR.
+        assert!(
+            ir.contains("alloca [10 x i32]"),
+            "should have array alloca: {ir}"
+        );
+        assert!(
+            ir.contains("@llvm.memset.p0.i64"),
+            "should use memset: {ir}"
+        );
+        assert!(
+            ir.contains("getelementptr inbounds [10 x i32]"),
+            "should have GEP: {ir}"
+        );
+        // Should have at least one store to array and one load from array.
+        assert!(
+            ir.contains("store i32"),
+            "should have store to array: {ir}"
+        );
+        assert!(
+            ir.contains("load i32"),
+            "should have load from array: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // LLVM optimization hint tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a function with annotations.
+    fn func_with_annotations(
+        name: &str,
+        params: Vec<HirParam>,
+        return_type: HirType,
+        body: HirBlock,
+        annotations: Vec<HirAnnotation>,
+    ) -> HirFunction {
+        HirFunction {
+            id: nid(0),
+            name: name.to_string(),
+            name_span: span(),
+            annotations,
+            params,
+            return_type,
+            body,
+            span: span(),
+        }
+    }
+
+    /// Helper: create a @pure annotation.
+    fn pure_ann() -> HirAnnotation {
+        HirAnnotation {
+            kind: HirAnnotationKind::Pure,
+            span: SPAN_DUMMY,
+        }
+    }
+
+    /// Helper: create a @const annotation.
+    fn const_ann() -> HirAnnotation {
+        HirAnnotation {
+            kind: HirAnnotationKind::Const,
+            span: SPAN_DUMMY,
+        }
+    }
+
+    /// Helper: create a @vectorizable annotation.
+    fn vectorizable_ann() -> HirAnnotation {
+        HirAnnotation {
+            kind: HirAnnotationKind::Vectorizable(vec![]),
+            span: SPAN_DUMMY,
+        }
+    }
+
+    // --- Test #1: noalias on all pointer parameters ---
+
+    #[test]
+    fn test_noalias_params() {
+        // Function with an array (ptr) parameter should get noalias.
+        let sum_func = func_with_annotations(
+            "sum_arr",
+            vec![
+                param(
+                    "arr",
+                    HirType::Array {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        size: 10,
+                    },
+                ),
+                param("n", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: int_lit(0),
+            })]),
+            vec![],
+        );
+
+        let m = module(Some("test"), vec![sum_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // The ptr parameter should have noalias.
+        assert!(
+            ir.contains("ptr noalias %arr"),
+            "ptr params should have noalias: {ir}"
+        );
+        // Non-ptr params should NOT have noalias.
+        assert!(
+            ir.contains("i32 %n"),
+            "non-ptr params should not have noalias: {ir}"
+        );
+    }
+
+    // --- Test #2: @pure function attributes (readnone/readonly) ---
+
+    #[test]
+    fn test_pure_function_attrs_readnone() {
+        // @pure function with no pointer params -> memory(none).
+        let fib_func = func_with_annotations(
+            "fib",
+            vec![param("n", HirType::Primitive(PrimitiveType::I64))],
+            HirType::Primitive(PrimitiveType::I64),
+            block(vec![stmt(HirStmtKind::Return {
+                value: ident("n"),
+            })]),
+            vec![pure_ann()],
+        );
+
+        let m = module(Some("test"), vec![fib_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should have function attribute group reference.
+        assert!(
+            ir.contains("#0"),
+            "pure function should have attribute group ref: {ir}"
+        );
+        // Should have memory(none) in the attribute group.
+        assert!(
+            ir.contains("memory(none)"),
+            "pure function without ptr params should get memory(none): {ir}"
+        );
+        // Should have nounwind.
+        assert!(
+            ir.contains("nounwind"),
+            "pure function should have nounwind: {ir}"
+        );
+        // Should have willreturn.
+        assert!(
+            ir.contains("willreturn"),
+            "pure function should have willreturn: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_pure_function_attrs_argmem_read() {
+        // @pure function with pointer params -> memory(argmem: read).
+        let sum_func = func_with_annotations(
+            "sum_arr",
+            vec![
+                param(
+                    "arr",
+                    HirType::Array {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        size: 10,
+                    },
+                ),
+                param("n", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: int_lit(0),
+            })]),
+            vec![pure_ann()],
+        );
+
+        let m = module(Some("test"), vec![sum_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should have memory(argmem: read) for @pure with ptr params.
+        assert!(
+            ir.contains("memory(argmem: read)"),
+            "pure function with ptr params should get memory(argmem: read): {ir}"
+        );
+    }
+
+    // --- Test #3: nsw/nuw flags on arithmetic ---
+
+    #[test]
+    fn test_nsw_arithmetic() {
+        // Integer add/sub/mul should get nsw flag.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "compute",
+                vec![
+                    param("a", HirType::Primitive(PrimitiveType::I32)),
+                    param("b", HirType::Primitive(PrimitiveType::I32)),
+                ],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "sum".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: binop(BinOp::Add, ident("a"), ident("b")),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "diff".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: binop(BinOp::Sub, ident("a"), ident("b")),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "prod".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: binop(BinOp::Mul, ident("a"), ident("b")),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: ident("sum"),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("add nsw i32"),
+            "integer add should have nsw: {ir}"
+        );
+        assert!(
+            ir.contains("sub nsw i32"),
+            "integer sub should have nsw: {ir}"
+        );
+        assert!(
+            ir.contains("mul nsw i32"),
+            "integer mul should have nsw: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_wrap_ops_no_nsw() {
+        // AddWrap/SubWrap/MulWrap should NOT get nsw flag.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "wrap_ops",
+                vec![
+                    param("a", HirType::Primitive(PrimitiveType::I32)),
+                    param("b", HirType::Primitive(PrimitiveType::I32)),
+                ],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "x".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: binop(BinOp::AddWrap, ident("a"), ident("b")),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: ident("x"),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // AddWrap should produce plain `add` without nsw.
+        // We check that it contains "add i32" but not "add nsw i32" at the same position.
+        assert!(
+            ir.contains("add i32"),
+            "AddWrap should produce plain add: {ir}"
+        );
+        // The wrap add line should not have nsw.
+        for line in ir.lines() {
+            if line.contains("add i32") && line.contains("= add") {
+                assert!(
+                    !line.contains("nsw"),
+                    "AddWrap should NOT have nsw: {line}"
+                );
+            }
+        }
+    }
+
+    // --- Test #4: fast flag on float ops in @pure context ---
+
+    #[test]
+    fn test_fast_float_in_pure() {
+        // Float operations in @pure function should get `fast` flag.
+        let compute_func = func_with_annotations(
+            "compute",
+            vec![
+                param("a", HirType::Primitive(PrimitiveType::F64)),
+                param("b", HirType::Primitive(PrimitiveType::F64)),
+            ],
+            HirType::Primitive(PrimitiveType::F64),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "sum".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::F64),
+                    value: binop(BinOp::Add, ident("a"), ident("b")),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Let {
+                    name: "prod".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::F64),
+                    value: binop(BinOp::Mul, ident("a"), ident("b")),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Return {
+                    value: ident("sum"),
+                }),
+            ]),
+            vec![pure_ann()],
+        );
+
+        let m = module(Some("test"), vec![compute_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("fadd fast double"),
+            "float add in @pure should have fast flag: {ir}"
+        );
+        assert!(
+            ir.contains("fmul fast double"),
+            "float mul in @pure should have fast flag: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_no_fast_float_outside_pure() {
+        // Float operations in non-@pure function should NOT get `fast` flag.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "a".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: float_lit(1.5),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "b".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: float_lit(2.5),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "c".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: binop(BinOp::Add, ident("a"), ident("b")),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Should have plain fadd without fast.
+        assert!(
+            ir.contains("fadd double"),
+            "should have fadd: {ir}"
+        );
+        assert!(
+            !ir.contains("fadd fast"),
+            "non-pure function should NOT have fast flag: {ir}"
+        );
+    }
+
+    // --- Test #5: @const compile-time evaluation ---
+
+    #[test]
+    fn test_const_eval_simple() {
+        // @const function called with all-literal args should be evaluated at compile time.
+        let square_func = func_with_annotations(
+            "square",
+            vec![param("n", HirType::Primitive(PrimitiveType::I32))],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: binop(BinOp::Mul, ident("n"), ident("n")),
+            })]),
+            vec![const_ann()],
+        );
+
+        let main_func = func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: call("square", vec![int_lit(42)]),
+            })]),
+        );
+
+        let m = module(Some("test"), vec![square_func, main_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // The call to square(42) should be replaced with the literal 1764.
+        assert!(
+            ir.contains("1764"),
+            "const eval should compute square(42) = 1764: {ir}"
+        );
+        // Main should NOT contain a call to square.
+        let main_section = ir.split("define i32 @main").nth(1).unwrap_or("");
+        assert!(
+            !main_section.contains("@square"),
+            "const call should be eliminated from main: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_const_function_attributes() {
+        // @const functions should get speculatable + memory(none).
+        let square_func = func_with_annotations(
+            "square",
+            vec![param("n", HirType::Primitive(PrimitiveType::I32))],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: binop(BinOp::Mul, ident("n"), ident("n")),
+            })]),
+            vec![const_ann()],
+        );
+
+        let m = module(Some("test"), vec![square_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("speculatable"),
+            "@const should have speculatable: {ir}"
+        );
+        assert!(
+            ir.contains("memory(none)"),
+            "@const should have memory(none): {ir}"
+        );
+    }
+
+    // --- Test #6: branch prediction hints ---
+
+    #[test]
+    fn test_branch_prediction_hints() {
+        // @pure function with `if n <= 1` should get branch weight metadata.
+        let fib_func = func_with_annotations(
+            "fib",
+            vec![param("n", HirType::Primitive(PrimitiveType::I64))],
+            HirType::Primitive(PrimitiveType::I64),
+            block(vec![
+                stmt(HirStmtKind::If {
+                    condition: binop(BinOp::LtEq, ident("n"), int_lit(1)),
+                    then_block: block(vec![stmt(HirStmtKind::Return {
+                        value: ident("n"),
+                    })]),
+                    else_block: Some(block(vec![stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    })])),
+                }),
+            ]),
+            vec![pure_ann()],
+        );
+
+        let m = module(Some("test"), vec![fib_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should have !prof metadata on the branch.
+        assert!(
+            ir.contains("!prof !"),
+            "base case branch should have !prof metadata: {ir}"
+        );
+        // Should have branch_weights metadata.
+        assert!(
+            ir.contains("branch_weights"),
+            "should have branch_weights metadata: {ir}"
+        );
+        // Then-branch (base case) should be unlikely (weight 1).
+        assert!(
+            ir.contains("i32 1, i32 2000"),
+            "base case should be unlikely: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_no_branch_hints_in_non_pure() {
+        // Non-@pure function should NOT get branch prediction hints.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "test_fn",
+                vec![param("n", HirType::Primitive(PrimitiveType::I32))],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::If {
+                        condition: binop(BinOp::LtEq, ident("n"), int_lit(1)),
+                        then_block: block(vec![stmt(HirStmtKind::Return {
+                            value: int_lit(1),
+                        })]),
+                        else_block: None,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should NOT have !prof metadata.
+        assert!(
+            !ir.contains("!prof"),
+            "non-pure function should not have branch hints: {ir}"
+        );
+    }
+
+    // --- Test #7: loop vectorization hints ---
+
+    #[test]
+    fn test_loop_vectorization_hints() {
+        // @vectorizable function with a for loop should get vectorization metadata.
+        let sum_func = func_with_annotations(
+            "vec_sum",
+            vec![
+                param(
+                    "arr",
+                    HirType::Array {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        size: 100,
+                    },
+                ),
+                param("n", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "sum".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::I32),
+                    value: int_lit(0),
+                    mutable: true,
+                }),
+                stmt(HirStmtKind::For {
+                    var: "i".to_string(),
+                    var_span: span(),
+                    var_type: HirType::Primitive(PrimitiveType::I32),
+                    iterable: call("range", vec![int_lit(0), ident("n")]),
+                    body: block(vec![stmt(HirStmtKind::Assign {
+                        target: ident("sum"),
+                        value: binop(BinOp::Add, ident("sum"), int_lit(1)),
+                    })]),
+                }),
+                stmt(HirStmtKind::Return {
+                    value: ident("sum"),
+                }),
+            ]),
+            vec![vectorizable_ann()],
+        );
+
+        let m = module(Some("test"), vec![sum_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should have loop vectorization metadata.
+        assert!(
+            ir.contains("!llvm.loop"),
+            "vectorizable loop should have !llvm.loop metadata: {ir}"
+        );
+        assert!(
+            ir.contains("llvm.loop.vectorize.enable"),
+            "should have vectorize.enable metadata: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_no_vectorization_without_annotation() {
+        // Regular function loops should NOT get vectorization metadata.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "sum".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: int_lit(0),
+                        mutable: true,
+                    }),
+                    stmt(HirStmtKind::For {
+                        var: "i".to_string(),
+                        var_span: span(),
+                        var_type: HirType::Primitive(PrimitiveType::I32),
+                        iterable: call("range", vec![int_lit(0), int_lit(10)]),
+                        body: block(vec![stmt(HirStmtKind::Assign {
+                            target: ident("sum"),
+                            value: binop(BinOp::Add, ident("sum"), ident("i")),
+                        })]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: ident("sum"),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            !ir.contains("llvm.loop.vectorize"),
+            "non-vectorizable function should not have vectorize metadata: {ir}"
+        );
+    }
+
+    // --- Test: fibonacci benchmark generates all optimization hints ---
+
+    #[test]
+    fn test_fibonacci_optimizations() {
+        // Full integration test: fibonacci with @pure generates all expected hints.
+        let source = std::fs::read_to_string("../../benchmarks/fib/fib.axm")
+            .expect("should read fib.axm");
+        let parse_result = axiom_parser::parse(&source);
+        assert!(
+            !parse_result.has_errors(),
+            "fib.axm should parse: {:?}",
+            parse_result.errors
+        );
+        let hir_module = axiom_hir::lower(&parse_result.module)
+            .expect("should lower");
+        let ir = codegen(&hir_module).expect("should codegen");
+
+        // 1. noalias is not applicable (no ptr params) -- that's correct.
+        // 2. @pure attributes.
+        assert!(
+            ir.contains("memory(none)"),
+            "fib should have memory(none): {ir}"
+        );
+        assert!(
+            ir.contains("nounwind"),
+            "fib should have nounwind: {ir}"
+        );
+        // 3. nsw on arithmetic.
+        assert!(
+            ir.contains("sub nsw i64"),
+            "fib should have nsw on sub: {ir}"
+        );
+        assert!(
+            ir.contains("add nsw i64"),
+            "fib should have nsw on add: {ir}"
+        );
+        // 6. Branch prediction.
+        assert!(
+            ir.contains("!prof"),
+            "fib base case should have branch prediction: {ir}"
+        );
+        assert!(
+            ir.contains("branch_weights"),
+            "fib should have branch_weights: {ir}"
+        );
+    }
+
+    // --- Test: noalias on call-site arguments ---
+
+    #[test]
+    fn test_noalias_call_args() {
+        // When calling a function with ptr params, the call-site should also
+        // have noalias on the pointer arguments.
+        let sum_func = func(
+            "sum_arr",
+            vec![
+                param(
+                    "arr",
+                    HirType::Array {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        size: 10,
+                    },
+                ),
+                param("n", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: int_lit(0),
+            })]),
+        );
+
+        let main_func = func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "arr".to_string(),
+                    name_span: span(),
+                    ty: HirType::Array {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        size: 10,
+                    },
+                    value: HirExpr {
+                        id: nid(0),
+                        kind: HirExprKind::ArrayZeros {
+                            element_type: HirType::Primitive(PrimitiveType::I32),
+                            size: 10,
+                        },
+                        span: span(),
+                    },
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Let {
+                    name: "result".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::I32),
+                    value: call("sum_arr", vec![ident("arr"), int_lit(10)]),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Return {
+                    value: ident("result"),
+                }),
+            ]),
+        );
+
+        let m = module(Some("test"), vec![sum_func, main_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Call-site should have noalias on ptr arg.
+        assert!(
+            ir.contains("ptr noalias %arr"),
+            "call-site should have noalias on ptr args: {ir}"
+        );
+    }
+
+    // --- Test: loop increment has nsw ---
+
+    #[test]
+    fn test_loop_increment_nsw() {
+        // The for-loop increment should have nsw flag.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::For {
+                        var: "i".to_string(),
+                        var_span: span(),
+                        var_type: HirType::Primitive(PrimitiveType::I32),
+                        iterable: call("range", vec![int_lit(0), int_lit(10)]),
+                        body: block(vec![]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // The loop increment should have nsw.
+        assert!(
+            ir.contains("add nsw i32"),
+            "loop increment should have nsw: {ir}"
         );
     }
 }

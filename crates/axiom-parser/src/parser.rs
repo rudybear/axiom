@@ -1718,6 +1718,22 @@ impl<'src> Parser<'src> {
                 self.advance();
                 Expr::BoolLiteral(b)
             }
+            TokenKind::Ident(ref name) if name == "array_zeros" => {
+                self.advance();
+                // Parse array_zeros[T, N]
+                if self.eat(&TokenKind::LBracket) {
+                    let elem_type = self.parse_type_expr();
+                    self.expect(&TokenKind::Comma, "','");
+                    let size = self.parse_expr();
+                    self.expect(&TokenKind::RBracket, "']'");
+                    Expr::ArrayZeros {
+                        element_type: elem_type,
+                        size: Box::new(size),
+                    }
+                } else {
+                    Expr::Ident("array_zeros".to_string())
+                }
+            }
             TokenKind::Ident(ref name) => {
                 let name = name.clone();
                 self.advance();
@@ -3006,5 +3022,92 @@ fn main() -> i32 {
         ));
         assert!(matches!(result.module.items[1].node, Item::Function(_)));
         assert!(matches!(result.module.items[2].node, Item::Function(_)));
+    }
+
+    // ── Array support tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_array_type_expr() {
+        let source = "fn test(data: array[i32, 100]) -> i32 { return 0; }";
+        let module = parse_ok(source);
+        match &module.items[0].node {
+            Item::Function(f) => {
+                assert!(
+                    matches!(&f.params[0].ty, TypeExpr::Array(elem, size)
+                        if matches!(**elem, TypeExpr::Named(ref n) if n == "i32")
+                        && matches!(**size, Expr::IntLiteral(100))
+                    ),
+                    "expected array[i32, 100] type, got {:?}",
+                    f.params[0].ty
+                );
+            }
+            _ => panic!("expected function"),
+        }
+    }
+
+    #[test]
+    fn test_array_zeros_expr() {
+        let stmt = parse_stmt_from("let arr: array[i32, 10] = array_zeros[i32, 10];");
+        match stmt {
+            Stmt::Let { ty, value, .. } => {
+                assert!(
+                    matches!(&ty, TypeExpr::Array(_, _)),
+                    "expected array type, got {:?}",
+                    ty
+                );
+                assert!(
+                    matches!(&value, Expr::ArrayZeros { element_type, size }
+                        if matches!(element_type, TypeExpr::Named(ref n) if n == "i32")
+                        && matches!(**size, Expr::IntLiteral(10))
+                    ),
+                    "expected array_zeros[i32, 10], got {:?}",
+                    value
+                );
+            }
+            _ => panic!("expected let statement"),
+        }
+    }
+
+    #[test]
+    fn test_array_index_expr() {
+        let expr = parse_expr_from("arr[5]");
+        assert!(
+            matches!(&expr, Expr::Index { expr: base, indices }
+                if matches!(**base, Expr::Ident(ref n) if n == "arr")
+                && indices.len() == 1
+                && matches!(indices[0], Expr::IntLiteral(5))
+            ),
+            "expected arr[5] index expr, got {:?}",
+            expr
+        );
+    }
+
+    #[test]
+    fn test_array_full_program_parse() {
+        let source = r#"
+@module array_test;
+fn main() -> i32 {
+    let arr: array[i32, 10] = array_zeros[i32, 10];
+    for i: i32 in range(0, 10) {
+        arr[i] = i * i;
+    }
+    let sum: i32 = 0;
+    for i: i32 in range(0, 10) {
+        sum = sum + arr[i];
+    }
+    print_i32(sum);
+    return 0;
+}
+"#;
+        let result = parse(source);
+        assert!(
+            !result.has_errors(),
+            "array program should parse without errors: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            result.module.name.as_ref().map(|n| n.node.as_str()),
+            Some("array_test")
+        );
     }
 }

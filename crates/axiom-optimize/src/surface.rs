@@ -447,12 +447,13 @@ fn walk_expr_for_holes(expr: &HirExpr, holes: &mut Vec<OptHole>) {
                 walk_expr_for_holes(arg, holes);
             }
         }
-        // Literals and idents have no holes
+        // Literals, idents, and array constructors have no holes
         HirExprKind::IntLiteral { .. }
         | HirExprKind::FloatLiteral { .. }
         | HirExprKind::StringLiteral { .. }
         | HirExprKind::BoolLiteral { .. }
-        | HirExprKind::Ident { .. } => {}
+        | HirExprKind::Ident { .. }
+        | HirExprKind::ArrayZeros { .. } => {}
     }
 }
 
