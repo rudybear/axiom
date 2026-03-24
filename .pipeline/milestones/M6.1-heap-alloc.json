@@ -1,0 +1,12 @@
+{
+  "id": "M6.1-heap-alloc",
+  "name": "Heap Allocation Builtins",
+  "description": "Add heap_alloc/heap_free builtins, link against mimalloc for 1.5-2x faster than system malloc. Enable dynamic-sized data structures.",
+  "depends_on": ["M5.1-self-hosting"],
+  "crates_affected": ["axiom-codegen", "axiom-driver", "axiom-parser"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {"id": "AC-6.1.1", "description": "heap_alloc and heap_free builtins compile to LLVM IR", "check_command": "cargo test -p axiom-codegen test_heap 2>&1", "check_pattern": "test result: ok", "check_type": "command_output_contains"},
+    {"id": "AC-6.1.2", "description": "All workspace tests pass", "check_command": "cargo test --workspace 2>&1", "check_pattern": "failures", "check_type": "command_output_not_contains"}
+  ]
+}

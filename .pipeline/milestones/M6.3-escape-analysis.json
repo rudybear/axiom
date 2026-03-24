@@ -1,0 +1,12 @@
+{
+  "id": "M6.3-escape-analysis",
+  "name": "Escape Analysis via @pure",
+  "description": "Heap allocations inside @pure functions automatically promoted to stack (alloca). @pure proves non-escape without complex analysis. Add LLVM allocator attributes.",
+  "depends_on": ["M6.2-arena-alloc"],
+  "crates_affected": ["axiom-codegen"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {"id": "AC-6.3.1", "description": "Escape analysis test passes", "check_command": "cargo test -p axiom-codegen test_escape 2>&1", "check_pattern": "test result: ok", "check_type": "command_output_contains"},
+    {"id": "AC-6.3.2", "description": "All workspace tests pass", "check_command": "cargo test --workspace 2>&1", "check_pattern": "failures", "check_type": "command_output_not_contains"}
+  ]
+}

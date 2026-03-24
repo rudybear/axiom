@@ -1,0 +1,12 @@
+{
+  "id": "M6.2-arena-alloc",
+  "name": "Arena Allocator with @arena Annotation",
+  "description": "Built-in bump arena allocator. @arena(name) annotation groups allocations. arena_reset frees all at once. 50-200x faster than malloc for batch patterns.",
+  "depends_on": ["M6.1-heap-alloc"],
+  "crates_affected": ["axiom-codegen", "axiom-hir"],
+  "status": "not_started",
+  "acceptance_criteria": [
+    {"id": "AC-6.2.1", "description": "Arena allocator builtins work", "check_command": "cargo test -p axiom-codegen test_arena 2>&1", "check_pattern": "test result: ok", "check_type": "command_output_contains"},
+    {"id": "AC-6.2.2", "description": "All workspace tests pass", "check_command": "cargo test --workspace 2>&1", "check_pattern": "failures", "check_type": "command_output_not_contains"}
+  ]
+}
