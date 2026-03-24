@@ -4528,6 +4528,7 @@ fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError> {
             ty: "fn".to_string(),
             context: "function types not yet supported".to_string(),
         }),
+        HirType::Unknown(name) if name == "void" => Ok("void".to_string()),
         HirType::Unknown(name) => Err(CodegenError::UnsupportedType {
             ty: name.clone(),
             context: "unknown type".to_string(),
