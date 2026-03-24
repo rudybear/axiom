@@ -197,6 +197,36 @@ fn compute(data: ptr[f64], n: i32) -> f64 { ... }
 5. RECORD    →  Store results in @optimization_log
 ```
 
+### LLM Self-Optimization Pipeline (The Core Differentiator)
+
+The `axiom optimize` command feeds source + LLVM IR + assembly + benchmark data to an LLM, which analyzes the generated code and suggests improvements:
+
+```bash
+# Dry run — see the prompt the LLM would receive
+axiom optimize program.axm --dry-run
+
+# Full optimization loop with Claude API
+ANTHROPIC_API_KEY=sk-... axiom optimize program.axm --iterations 5
+
+# Profile a program (compile + time + surface extraction)
+axiom profile program.axm --iterations 10
+```
+
+**Demonstrated result:** The LLM analyzed the assembly output of a prime-counting program, identified a `divl` bottleneck (~25 cycles per integer division), and suggested wheel factorization (6k±1). Result: **37% speedup**, identical output, verified against C.
+
+```
+v1 (naive):  18.7ms  →  v2 (LLM-optimized):  13.6ms  =  1.37x faster
+Both: AXIOM matches C exactly (1.00x on both algorithms)
+```
+
+The optimization loop:
+1. Compile → LLVM IR + assembly
+2. Benchmark → timing data
+3. Build prompt (source + IR + asm + timing + ?params + history)
+4. LLM analyzes, suggests ?param values and code changes
+5. Apply, recompile, re-benchmark, record in @optimization_log
+6. Repeat — LLM sees history of what worked and what didn't
+
 ### Agent Session API (Rust)
 ```rust
 let session = AgentSession::from_file("matmul.axm")?;
@@ -241,6 +271,12 @@ axiom/
 │   ├── nbody/              # N-body gravitational simulation
 │   ├── numerical/          # Pi, root finding, integration
 │   ├── crypto/             # Caesar cipher
+│   ├── ecs/                # Entity-Component-System game demo
+│   ├── vulkan/             # Triangle rendering (stub → Vulkan planned)
+│   ├── particle_galaxy/    # 10K particle galaxy (windowed renderer)
+│   ├── game_loop/          # Frame allocator, zero per-frame allocs
+│   ├── self_opt/           # LLM optimization demos (primes, matmul)
+│   ├── multi_agent/        # Multi-agent handoff demo
 │   └── self_host/          # AXIOM lexer written in AXIOM
 ├── tests/samples/          # 14 test programs
 └── docs/                   # Research documents
@@ -248,12 +284,30 @@ axiom/
 
 ## Stats
 
-- **21,846 lines of Rust** across 7 crates
-- **357 tests** (all passing)
+- **26,116 lines of Rust** across 7 crates
+- **401 tests** (all passing)
 - **197 benchmarks** (100% compile rate)
-- **70 git commits** across 6 development phases
-- **14 sample programs**, **11 example programs**
+- **~100 git commits** across 7 development phases
+- **20 example programs**, **19 sample programs**
 - **5 formal specification documents**
+- **8 research documents** (optimization, memory, game engine, multithreading, Lux integration)
+
+## Roadmap
+
+### Immediate (correctness)
+- Fix multithreading soundness (current `@pure` + `noalias` on shared pointers is UB)
+- Implement proper data dependency annotations for parallel regions
+
+### Next (platform optimization)
+- Platform-specific codegen: detect CPU features (AVX2, AVX-512) and emit optimal instructions
+- Constraint-driven optimization: `@constraint { optimize_for: "performance" | "memory" | "size" }`
+- LLM optimizer reads actual hardware counters (cache misses, branch mispredictions)
+
+### Rendering (real Vulkan)
+- Replace stub renderer with real Vulkan via Rust `ash` crate
+- Lux shader integration (load SPIR-V compiled from `.lux` files)
+- GPU vertex buffer upload from AXIOM arrays
+- See `docs/RENDERING_PLAN.md` for 5-phase plan
 
 ## Development Pipeline
 

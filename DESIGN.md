@@ -127,19 +127,91 @@ The planned MLIR integration (via `melior` crate) will add an intermediate
 MIR (Mid-level IR) stage between HIR and LLVM IR, enabling custom dialect
 operations for tensor, GPU, and async patterns.
 
+## LLM Self-Optimization Pipeline
+
+AXIOM's core differentiator: the compiler can feed source + LLVM IR + assembly + benchmarks to an LLM, which analyzes the generated code and suggests improvements.
+
+```
+Source (.axm) → Compile → LLVM IR + Assembly
+                              ↓
+                    LLM (Claude API / CLI)
+                    Analyzes: IR patterns, asm bottlenecks,
+                              cache behavior, vectorization misses
+                              ↓
+                    Suggestion: ?param values, code restructuring,
+                                new @annotations
+                              ↓
+                    Apply → Recompile → Re-benchmark → Record
+                              ↓
+                    Iterate (LLM sees history of what worked)
+```
+
+**Demonstrated:** LLM analyzed `divl` bottleneck in prime-counting assembly, suggested 6k±1 wheel factorization → 37% speedup. Both AXIOM and C produce identical output at identical speed (1.00x).
+
+**Commands:**
+- `axiom optimize program.axm --iterations 5` — full LLM optimization loop
+- `axiom optimize program.axm --dry-run` — preview the prompt
+- `axiom profile program.axm` — compile, benchmark, extract surfaces
+
+## Platform-Specific Optimization (Planned)
+
+AXIOM should detect and utilize the host CPU's full feature set:
+
+```axiom
+@target { cpu: "native" }  // Use all available CPU features
+@target { cpu: "x86_64-v4" }  // Require AVX-512
+@constraint { optimize_for: "performance" }  // vs "memory" vs "size"
+```
+
+The compiler would:
+1. Query CPUID / equivalent for available features (AVX2, AVX-512, etc.)
+2. Pass `-march=native` or specific `-mavx512f` flags to clang
+3. The LLM optimizer could also observe "this loop isn't vectorized" and suggest `@vectorizable` or restructuring
+4. `@constraint { optimize_for: "memory" }` would prefer `-Os`, smaller tile sizes, in-place algorithms
+
+## Constraint-Driven Compilation (Planned)
+
+Different optimization goals require different strategies:
+
+```axiom
+@constraint { optimize_for: "performance" }  // -O3, aggressive inlining, large tiles
+@constraint { optimize_for: "memory" }        // -Os, minimal allocations, streaming
+@constraint { optimize_for: "size" }           // -Oz, no loop unrolling
+@constraint { optimize_for: "latency" }        // minimize worst-case, avoid allocations
+@constraint { budget: "frame_time < 16.6ms" }  // game: must hit 60fps
+```
+
+The LLM optimizer would use these constraints to guide its suggestions — not just "make it fast" but "make it fast within 64KB of memory" or "minimize worst-case latency."
+
+## Known Correctness Issues
+
+### Multithreading (CRITICAL — see docs/MULTITHREADING_ANALYSIS.md)
+
+The current job system is **unsound**:
+- `@pure` on functions that write through pointers emits `memory(argmem: read)` → LLVM can delete stores (UB)
+- `noalias` on shared array pointers across threads is incorrect
+- No memory fences, no reduction support, no dependency tracking
+
+Fix plan: OpenMP-style `@parallel_for` with explicit data sharing clauses, then ownership-based slices, then dependency graphs.
+
 ## Open Questions
 
-- **Sum types**: The spec mentions `type Name = Variant1(T) | Variant2(T)`
-  but the parser does not yet implement sum type definitions. The `Pipe`
-  token exists in the lexer.
-- **`@arena` and `@lifetime`**: Mentioned in `CLAUDE.md` annotation list
-  but not yet implemented in parser or HIR.
-- **Pattern matching**: No `match` statement or pattern destructuring yet.
-- **Generic dimensions**: Tensor types support named dimensions (`M`, `N`)
-  but there is no generic/parametric polymorphism system to bind them.
-- **Complexity expressions**: Currently stored as freeform strings.
-  Structured complexity types (`O(n)`, `O(n log n)`, `O(n^k)`) are planned.
-- **MLIR integration**: The MIR layer and MLIR codegen are defined in the
-  project structure but not yet implemented.
-- **Unsafe blocks**: The `unsafe` keyword is reserved but unsafe blocks are
-  not yet parsed or enforced for `ptr[T]` usage.
+- **Sum types**: Parsed but not codegen'd. `Pipe` token exists.
+- **Pattern matching**: No `match` statement yet.
+- **Generic dimensions**: Tensor named dimensions (`M`, `N`) have no binding system.
+- **MLIR integration**: MIR layer planned but not implemented.
+- **Unsafe blocks**: `unsafe` keyword reserved but not enforced.
+- **Real Vulkan**: Stub renderer needs replacement with ash-based Rust crate (see `docs/RENDERING_PLAN.md`).
+
+## Research Documents
+
+| Document | Lines | Topic |
+|----------|-------|-------|
+| `docs/OPTIMIZATION_RESEARCH.md` | 1,600 | 20 LLVM optimization techniques to beat C |
+| `docs/MEMORY_ALLOCATION_RESEARCH.md` | 1,200 | Arena, bump, pool, escape analysis |
+| `docs/GAME_ENGINE_RESEARCH.md` | 2,014 | ECS, jobs, Vulkan, Lux integration |
+| `docs/MULTITHREADING_ANALYSIS.md` | 1,513 | LLVM memory model, safe parallelism, 3 correct designs |
+| `docs/LUX_INTEGRATION_RESEARCH.md` | 1,055 | Lux shader language convergence |
+| `docs/VULKAN_INTEGRATION_PLAN.md` | 200 | 5-phase Vulkan renderer plan |
+| `docs/PHASE7_GAME_ENGINE_PLAN.md` | 300 | 9-milestone game engine roadmap |
+| `docs/AXIOM_Language_Plan.md` | 400 | Original 5-phase language design |
