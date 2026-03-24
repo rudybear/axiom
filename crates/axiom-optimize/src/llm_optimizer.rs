@@ -37,6 +37,7 @@
 //!     iteration: 1,
 //!     max_iterations: 5,
 //!     target: "native".to_string(),
+//!     constraints: vec![],
 //! };
 //!
 //! let prompt = build_optimization_prompt(&ctx);
@@ -78,6 +79,17 @@ pub struct OptimizationContext {
     pub max_iterations: usize,
     /// Target architecture (e.g., "native", "x86_64-avx2").
     pub target: String,
+    /// Extracted `@constraint` annotations from the source.
+    pub constraints: Vec<ConstraintInfo>,
+}
+
+/// A parsed `@constraint` annotation for prompt display.
+#[derive(Debug, Clone)]
+pub struct ConstraintInfo {
+    /// Constraint key (e.g., "optimize_for", "budget").
+    pub key: String,
+    /// Constraint value as a string (e.g., "performance", "frame_time < 16.6ms").
+    pub value: String,
 }
 
 /// Simplified surface info for prompt building.
@@ -283,6 +295,60 @@ pub fn build_optimization_prompt(ctx: &OptimizationContext) -> String {
         p.push('\n');
     }
 
+    // Optimization constraints
+    if !ctx.constraints.is_empty() {
+        p.push_str("## Optimization Constraints\n\n");
+        for c in &ctx.constraints {
+            p.push_str(&format!("- {}: \"{}\"", c.key, c.value));
+            // Add human-readable hint for well-known constraint keys
+            match c.key.as_str() {
+                "optimize_for" => match c.value.as_str() {
+                    "performance" => p.push_str(" (prefer -O3, aggressive inlining, large tiles)"),
+                    "memory" => p.push_str(" (prefer smaller working sets, streaming algorithms)"),
+                    "size" => p.push_str(" (minimize binary and data footprint)"),
+                    "latency" => p.push_str(" (minimize worst-case paths, avoid allocations)"),
+                    _ => {}
+                },
+                "budget" => p.push_str(" (hard deadline constraint)"),
+                _ => {}
+            }
+            p.push('\n');
+        }
+        p.push('\n');
+
+        // Constraint-aware instructions for the LLM
+        p.push_str("### Constraint-Aware Optimization Guidance\n\n");
+        for c in &ctx.constraints {
+            if c.key == "optimize_for" {
+                match c.value.as_str() {
+                    "memory" => {
+                        p.push_str("When constraints specify \"memory\", prefer smaller working sets and streaming algorithms.\n");
+                        p.push_str("Favor tile sizes that fit in L1 cache. Avoid large temporaries.\n\n");
+                    }
+                    "latency" => {
+                        p.push_str("When constraints specify \"latency\", minimize worst-case paths and avoid allocations.\n");
+                        p.push_str("Prefer branch-free code, avoid dynamic dispatch, and minimize pipeline stalls.\n\n");
+                    }
+                    "performance" => {
+                        p.push_str("When constraints specify \"performance\", maximize throughput at all costs.\n");
+                        p.push_str("Prefer large tiles, aggressive unrolling, and SIMD vectorization.\n\n");
+                    }
+                    "size" => {
+                        p.push_str("When constraints specify \"size\", minimize code and data footprint.\n");
+                        p.push_str("Prefer smaller unroll factors and avoid code duplication.\n\n");
+                    }
+                    _ => {}
+                }
+            }
+            if c.key == "budget" {
+                p.push_str(&format!(
+                    "Hard budget constraint: {}. Ensure optimizations meet this deadline.\n\n",
+                    c.value
+                ));
+            }
+        }
+    }
+
     // Target info
     p.push_str(&format!("## Target Architecture\n\n`{}`\n\n", ctx.target));
 
@@ -409,6 +475,9 @@ pub fn build_context(
         });
     }
 
+    // Extract @constraint annotations from source text.
+    let constraints = extract_constraints_from_source(source);
+
     OptimizationContext {
         source: source.to_string(),
         llvm_ir: llvm_ir.to_string(),
@@ -419,6 +488,7 @@ pub fn build_context(
         iteration,
         max_iterations,
         target: target.to_string(),
+        constraints,
     }
 }
 
@@ -769,6 +839,68 @@ pub fn generate_assembly(llvm_ir: &str, target: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Constraint extraction
+// ---------------------------------------------------------------------------
+
+/// Extract `@constraint { key: value, ... }` annotations from AXIOM source text.
+///
+/// This performs a lightweight textual scan so the LLM optimizer does not need to
+/// depend on a full parse/HIR lower pass just to read constraints. The function
+/// recognises the pattern `@constraint { key: "value", ... }` and returns each
+/// key/value pair as a [`ConstraintInfo`].
+pub fn extract_constraints_from_source(source: &str) -> Vec<ConstraintInfo> {
+    let mut constraints = Vec::new();
+
+    // Find all @constraint { ... } blocks in the source.
+    let mut search_from = 0;
+    while let Some(start) = source[search_from..].find("@constraint") {
+        let abs_start = search_from + start;
+        search_from = abs_start + "@constraint".len();
+
+        // Find the opening brace
+        let after_kw = &source[search_from..];
+        let brace_start = match after_kw.find('{') {
+            Some(pos) => search_from + pos,
+            None => continue,
+        };
+
+        // Find matching closing brace (simple: first '}' after '{')
+        let brace_end = match source[brace_start..].find('}') {
+            Some(pos) => brace_start + pos,
+            None => continue,
+        };
+
+        let inner = &source[brace_start + 1..brace_end];
+        search_from = brace_end + 1;
+
+        // Parse key: value pairs. Handles both `key: "string"` and `key: ident`.
+        for pair in inner.split(',') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            if let Some(colon_pos) = pair.find(':') {
+                let key = pair[..colon_pos].trim().to_string();
+                let raw_value = pair[colon_pos + 1..].trim();
+                // Strip surrounding quotes if present
+                let value = if (raw_value.starts_with('"') && raw_value.ends_with('"'))
+                    || (raw_value.starts_with('\'') && raw_value.ends_with('\''))
+                {
+                    raw_value[1..raw_value.len() - 1].to_string()
+                } else {
+                    raw_value.to_string()
+                };
+                if !key.is_empty() {
+                    constraints.push(ConstraintInfo { key, value });
+                }
+            }
+        }
+    }
+
+    constraints
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -942,6 +1074,7 @@ mod tests {
             iteration: 3,
             max_iterations: 5,
             target: "native".to_string(),
+            constraints: vec![],
         }
     }
 
@@ -1272,5 +1405,96 @@ This should improve performance significantly."#;
         assert_eq!(suggestion.code_changes.len(), 2);
         assert_eq!(suggestion.code_changes[0].line, Some(10));
         assert!(suggestion.code_changes[1].line.is_none());
+    }
+
+    #[test]
+    fn test_extract_constraints_from_source_basic() {
+        let source = r#"
+@constraint { optimize_for: "performance", budget: "frame_time < 16.6ms" }
+fn render() -> i32 { return 0; }
+"#;
+        let constraints = extract_constraints_from_source(source);
+        assert_eq!(constraints.len(), 2);
+        assert_eq!(constraints[0].key, "optimize_for");
+        assert_eq!(constraints[0].value, "performance");
+        assert_eq!(constraints[1].key, "budget");
+        assert_eq!(constraints[1].value, "frame_time < 16.6ms");
+    }
+
+    #[test]
+    fn test_extract_constraints_from_source_ident_value() {
+        let source = r#"@constraint { optimize_for: memory }"#;
+        let constraints = extract_constraints_from_source(source);
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].key, "optimize_for");
+        assert_eq!(constraints[0].value, "memory");
+    }
+
+    #[test]
+    fn test_extract_constraints_from_source_multiple_blocks() {
+        let source = r#"
+@constraint { optimize_for: "performance" }
+fn fast_func() -> i32 { return 0; }
+
+@constraint { optimize_for: "size" }
+fn small_func() -> i32 { return 0; }
+"#;
+        let constraints = extract_constraints_from_source(source);
+        assert_eq!(constraints.len(), 2);
+        assert_eq!(constraints[0].value, "performance");
+        assert_eq!(constraints[1].value, "size");
+    }
+
+    #[test]
+    fn test_extract_constraints_from_source_no_constraints() {
+        let source = "fn main() -> i32 { return 0; }";
+        let constraints = extract_constraints_from_source(source);
+        assert!(constraints.is_empty());
+    }
+
+    #[test]
+    fn test_build_prompt_includes_constraints() {
+        let mut ctx = sample_context();
+        ctx.constraints = vec![
+            ConstraintInfo {
+                key: "optimize_for".to_string(),
+                value: "performance".to_string(),
+            },
+            ConstraintInfo {
+                key: "budget".to_string(),
+                value: "frame_time < 16.6ms".to_string(),
+            },
+        ];
+        let prompt = build_optimization_prompt(&ctx);
+        assert!(prompt.contains("## Optimization Constraints"));
+        assert!(prompt.contains("optimize_for"));
+        assert!(prompt.contains("performance"));
+        assert!(prompt.contains("prefer -O3, aggressive inlining, large tiles"));
+        assert!(prompt.contains("budget"));
+        assert!(prompt.contains("frame_time < 16.6ms"));
+        assert!(prompt.contains("Constraint-Aware Optimization Guidance"));
+        assert!(prompt.contains("maximize throughput"));
+    }
+
+    #[test]
+    fn test_build_prompt_constraint_memory_guidance() {
+        let mut ctx = sample_context();
+        ctx.constraints = vec![ConstraintInfo {
+            key: "optimize_for".to_string(),
+            value: "memory".to_string(),
+        }];
+        let prompt = build_optimization_prompt(&ctx);
+        assert!(prompt.contains("smaller working sets and streaming algorithms"));
+    }
+
+    #[test]
+    fn test_build_prompt_constraint_latency_guidance() {
+        let mut ctx = sample_context();
+        ctx.constraints = vec![ConstraintInfo {
+            key: "optimize_for".to_string(),
+            value: "latency".to_string(),
+        }];
+        let prompt = build_optimization_prompt(&ctx);
+        assert!(prompt.contains("minimize worst-case paths and avoid allocations"));
     }
 }

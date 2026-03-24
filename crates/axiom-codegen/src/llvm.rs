@@ -2710,6 +2710,8 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
                 };
             }
             // Then try evaluating the function body if we have it.
+            // Uses the full evaluator with access to all @const function bodies
+            // for recursive call support.
             if let Some(const_func) = ctx.const_func_bodies.get(name.as_str()).cloned() {
                 // Check if all args are integer literals.
                 let int_args: Option<Vec<i128>> = args
@@ -2723,7 +2725,12 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
                     })
                     .collect();
                 if let Some(int_args) = int_args {
-                    if let Some(result) = try_const_eval_body(&const_func, &int_args) {
+                    if let Some(result) = try_const_eval_body_with_funcs(
+                        &const_func,
+                        &int_args,
+                        &ctx.const_func_bodies,
+                        CONST_EVAL_MAX_DEPTH,
+                    ) {
                         return LlvmValue {
                             reg: format!("{result}"),
                             ty: func_info.return_type,
@@ -5274,40 +5281,125 @@ fn try_const_eval(func_name: &str, args: &[HirExpr]) -> Option<String> {
     None
 }
 
+/// Maximum recursion depth for compile-time const evaluation.
+///
+/// Prevents stack overflow from deeply recursive `@const` functions and
+/// ensures the compiler terminates even on accidentally infinite recursion.
+const CONST_EVAL_MAX_DEPTH: usize = 1000;
+
 /// Try to evaluate a `@const` function at compile time given the HIR function body.
 ///
 /// This is called during codegen for modules where we have access to the function body.
-/// For single-expression return functions with basic arithmetic on parameters,
-/// we can compute the result directly.
+/// Supports basic arithmetic, if/else branching, and recursive calls with a fuel counter.
 fn try_const_eval_body(
     func: &HirFunction,
     int_args: &[i128],
 ) -> Option<i128> {
-    // Only handle functions with a single return statement in the body.
-    if func.body.stmts.len() != 1 {
-        return None;
-    }
-    if let HirStmtKind::Return { ref value } = func.body.stmts[0].kind {
-        let param_map: HashMap<String, i128> = func
-            .params
-            .iter()
-            .zip(int_args.iter())
-            .map(|(p, &v)| (p.name.clone(), v))
-            .collect();
-        eval_const_expr(value, &param_map)
-    } else {
-        None
-    }
+    let param_map: HashMap<String, i128> = func
+        .params
+        .iter()
+        .zip(int_args.iter())
+        .map(|(p, &v)| (p.name.clone(), v))
+        .collect();
+    let funcs = HashMap::new();
+    eval_const_block(&func.body, &param_map, &funcs, CONST_EVAL_MAX_DEPTH)
 }
 
-/// Evaluate a constant expression given parameter bindings.
-fn eval_const_expr(expr: &HirExpr, params: &HashMap<String, i128>) -> Option<i128> {
+/// Try to evaluate a `@const` function at compile time, with access to other
+/// `@const` function bodies for recursive call support.
+fn try_const_eval_body_with_funcs(
+    func: &HirFunction,
+    int_args: &[i128],
+    all_const_funcs: &HashMap<String, HirFunction>,
+    fuel: usize,
+) -> Option<i128> {
+    if fuel == 0 {
+        return None; // Recursion depth exceeded.
+    }
+    let param_map: HashMap<String, i128> = func
+        .params
+        .iter()
+        .zip(int_args.iter())
+        .map(|(p, &v)| (p.name.clone(), v))
+        .collect();
+    eval_const_block(&func.body, &param_map, all_const_funcs, fuel)
+}
+
+/// Evaluate a block of statements, returning the value from the first `return` encountered.
+///
+/// Supports `let` bindings, `if/else` branching, and `return` statements.
+fn eval_const_block(
+    block: &HirBlock,
+    params: &HashMap<String, i128>,
+    funcs: &HashMap<String, HirFunction>,
+    fuel: usize,
+) -> Option<i128> {
+    // Use a mutable scope for local variable bindings.
+    let mut locals = params.clone();
+
+    for stmt in &block.stmts {
+        match &stmt.kind {
+            HirStmtKind::Return { ref value } => {
+                return eval_const_expr_full(value, &locals, funcs, fuel);
+            }
+            HirStmtKind::Let { name, value, .. } => {
+                if let Some(init_expr) = value {
+                    let val = eval_const_expr_full(init_expr, &locals, funcs, fuel)?;
+                    locals.insert(name.clone(), val);
+                } else {
+                    return None; // Uninitialized let, can't evaluate.
+                }
+            }
+            HirStmtKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                let cond_val = eval_const_expr_full(condition, &locals, funcs, fuel)?;
+                if cond_val != 0 {
+                    // Truthy: execute then_block
+                    if let Some(result) = eval_const_block(then_block, &locals, funcs, fuel) {
+                        return Some(result);
+                    }
+                } else if let Some(else_blk) = else_block {
+                    // Falsy: execute else_block
+                    if let Some(result) = eval_const_block(else_blk, &locals, funcs, fuel) {
+                        return Some(result);
+                    }
+                }
+                // Neither branch returned -- continue to next statement.
+            }
+            HirStmtKind::Assign { target, value } => {
+                // Handle simple ident assignment for mutable locals.
+                if let HirExprKind::Ident { name } = &target.kind {
+                    let val = eval_const_expr_full(value, &locals, funcs, fuel)?;
+                    locals.insert(name.clone(), val);
+                } else {
+                    return None; // Complex assignment target, bail.
+                }
+            }
+            _ => return None, // Unsupported statement kind (for, while, expr stmt).
+        }
+    }
+
+    None // No return found in block.
+}
+
+/// Evaluate a constant expression given parameter/local bindings and access to
+/// `@const` function bodies for recursive call support.
+fn eval_const_expr_full(
+    expr: &HirExpr,
+    params: &HashMap<String, i128>,
+    funcs: &HashMap<String, HirFunction>,
+    fuel: usize,
+) -> Option<i128> {
     match &expr.kind {
         HirExprKind::IntLiteral { value } => Some(*value),
+        HirExprKind::BoolLiteral { value } => Some(if *value { 1 } else { 0 }),
         HirExprKind::Ident { name } => params.get(name).copied(),
         HirExprKind::BinaryOp { op, lhs, rhs } => {
-            let l = eval_const_expr(lhs, params)?;
-            let r = eval_const_expr(rhs, params)?;
+            let l = eval_const_expr_full(lhs, params, funcs, fuel)?;
+            let r = eval_const_expr_full(rhs, params, funcs, fuel)?;
             match op {
                 BinOp::Add | BinOp::AddWrap => Some(l.wrapping_add(r)),
                 BinOp::Sub | BinOp::SubWrap => Some(l.wrapping_sub(r)),
@@ -5318,18 +5410,52 @@ fn eval_const_expr(expr: &HirExpr, params: &HashMap<String, i128>) -> Option<i12
                 BinOp::Mod => {
                     if r == 0 { None } else { Some(l % r) }
                 }
+                BinOp::Eq => Some(if l == r { 1 } else { 0 }),
+                BinOp::NotEq => Some(if l != r { 1 } else { 0 }),
+                BinOp::Lt => Some(if l < r { 1 } else { 0 }),
+                BinOp::Gt => Some(if l > r { 1 } else { 0 }),
+                BinOp::LtEq => Some(if l <= r { 1 } else { 0 }),
+                BinOp::GtEq => Some(if l >= r { 1 } else { 0 }),
+                BinOp::And => Some(if l != 0 && r != 0 { 1 } else { 0 }),
+                BinOp::Or => Some(if l != 0 || r != 0 { 1 } else { 0 }),
                 _ => None,
             }
         }
         HirExprKind::UnaryOp { op, operand } => {
-            let v = eval_const_expr(operand, params)?;
+            let v = eval_const_expr_full(operand, params, funcs, fuel)?;
             match op {
                 UnaryOp::Neg => Some(-v),
-                UnaryOp::Not => None, // Not meaningful for integers.
+                UnaryOp::Not => Some(if v == 0 { 1 } else { 0 }),
             }
+        }
+        HirExprKind::Call { func: callee, args } => {
+            // Handle recursive calls to other @const functions.
+            if fuel == 0 {
+                return None;
+            }
+            let func_name = match &callee.kind {
+                HirExprKind::Ident { name } => name.as_str(),
+                _ => return None,
+            };
+            let callee_func = funcs.get(func_name)?;
+            let call_args: Option<Vec<i128>> = args
+                .iter()
+                .map(|a| eval_const_expr_full(a, params, funcs, fuel))
+                .collect();
+            let call_args = call_args?;
+            try_const_eval_body_with_funcs(callee_func, &call_args, funcs, fuel - 1)
         }
         _ => None,
     }
+}
+
+/// Evaluate a constant expression given parameter bindings (legacy interface).
+///
+/// This is the simpler evaluator used when we do not have access to other function
+/// bodies. For full recursive support, use [`eval_const_expr_full`].
+fn eval_const_expr(expr: &HirExpr, params: &HashMap<String, i128>) -> Option<i128> {
+    let empty_funcs = HashMap::new();
+    eval_const_expr_full(expr, params, &empty_funcs, CONST_EVAL_MAX_DEPTH)
 }
 
 /// Get the target triple for the current host platform.
