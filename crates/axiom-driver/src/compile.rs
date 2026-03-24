@@ -3,6 +3,10 @@
 //! This module encapsulates compiler discovery and invocation. It writes LLVM IR
 //! to a temporary `.ll` file and invokes `clang` (or a versioned variant) to
 //! produce a native executable.
+//!
+//! When the generated IR references `@axiom_*` runtime helpers, the tiny C
+//! runtime (`runtime/axiom_rt.c`) is compiled and linked alongside the `.ll`
+//! file automatically.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,13 +29,23 @@ pub fn compile_to_binary(llvm_ir: &str, output_path: &str) -> miette::Result<()>
 
     let compiler = find_compiler()?;
 
-    let result = match &compiler {
-        CompilerKind::Clang(path) => invoke_clang(path, &temp_ll, output_path),
+    let needs_rt = axiom_codegen::needs_runtime(llvm_ir);
+    let rt_path = if needs_rt {
+        Some(write_runtime_c()?)
+    } else {
+        None
     };
 
-    // Clean up temp file on success; leave it on failure for debugging.
+    let result = match &compiler {
+        CompilerKind::Clang(path) => invoke_clang(path, &temp_ll, output_path, rt_path.as_deref()),
+    };
+
+    // Clean up temp files on success; leave them on failure for debugging.
     if result.is_ok() {
         let _ = std::fs::remove_file(&temp_ll);
+        if let Some(ref rp) = rt_path {
+            let _ = std::fs::remove_file(rp);
+        }
     } else {
         eprintln!("note: LLVM IR written to {} for debugging", temp_ll.display());
     }
@@ -65,6 +79,20 @@ fn find_compiler_name() -> Option<String> {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// The C runtime source, embedded at compile time.
+const AXIOM_RT_C: &str = include_str!("../runtime/axiom_rt.c");
+
+/// Write the embedded C runtime to a temp file and return its path.
+fn write_runtime_c() -> miette::Result<PathBuf> {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let tid = std::thread::current().id();
+    let path = dir.join(format!("axiom_rt_{pid}_{tid:?}.c"));
+    std::fs::write(&path, AXIOM_RT_C)
+        .map_err(|e| miette::miette!("failed to write runtime C file {}: {}", path.display(), e))?;
+    Ok(path)
+}
 
 /// Check whether a compiler is available by running `<name> --version`.
 fn compiler_exists(name: &str) -> bool {
@@ -103,19 +131,29 @@ fn find_compiler() -> miette::Result<CompilerKind> {
 }
 
 /// Invoke clang (or compatible compiler) to compile a `.ll` file to a native
-/// binary.
-fn invoke_clang(clang: &Path, ll_file: &Path, output: &str) -> miette::Result<()> {
+/// binary, optionally linking the C runtime alongside.
+fn invoke_clang(
+    clang: &Path,
+    ll_file: &Path,
+    output: &str,
+    runtime_c: Option<&Path>,
+) -> miette::Result<()> {
     // First try linking with mimalloc for faster heap allocation.
     // If mimalloc is not installed, fall back to system malloc.
-    if try_invoke_clang_with_mimalloc(clang, ll_file, output) {
+    if try_invoke_clang_with_mimalloc(clang, ll_file, output, runtime_c) {
         return Ok(());
     }
-    invoke_clang_core(clang, ll_file, output, &[])
+    invoke_clang_core(clang, ll_file, output, runtime_c, &[])
 }
 
 /// Try to compile with `-lmimalloc`. Returns `true` on success.
-fn try_invoke_clang_with_mimalloc(clang: &Path, ll_file: &Path, output: &str) -> bool {
-    invoke_clang_core(clang, ll_file, output, &["-lmimalloc"]).is_ok()
+fn try_invoke_clang_with_mimalloc(
+    clang: &Path,
+    ll_file: &Path,
+    output: &str,
+    runtime_c: Option<&Path>,
+) -> bool {
+    invoke_clang_core(clang, ll_file, output, runtime_c, &["-lmimalloc"]).is_ok()
 }
 
 /// Core clang invocation with optional extra linker flags.
@@ -123,13 +161,20 @@ fn invoke_clang_core(
     clang: &Path,
     ll_file: &Path,
     output: &str,
+    runtime_c: Option<&Path>,
     extra_args: &[&str],
 ) -> miette::Result<()> {
     let mut cmd = Command::new(clang);
     cmd.arg("-O2")
         .arg("-Wno-override-module")
-        .arg(ll_file)
-        .arg("-o")
+        .arg(ll_file);
+
+    // Link the C runtime if needed.
+    if let Some(rt) = runtime_c {
+        cmd.arg(rt);
+    }
+
+    cmd.arg("-o")
         .arg(output);
 
     for arg in extra_args {
@@ -215,5 +260,27 @@ mod tests {
         // We cannot guarantee a compiler is present in CI, but the function
         // should not panic regardless.
         let _result = find_compiler_name();
+    }
+
+    #[test]
+    fn test_needs_runtime_detection() {
+        // IR without runtime functions should not need the runtime.
+        let ir_no_rt = "declare i32 @puts(ptr)\ndefine i32 @main() {\n  ret i32 0\n}\n";
+        assert!(!axiom_codegen::needs_runtime(ir_no_rt));
+
+        // IR with a runtime function declaration should need the runtime.
+        let ir_with_rt = "declare i64 @axiom_clock_ns()\ndefine i32 @main() {\n  ret i32 0\n}\n";
+        assert!(axiom_codegen::needs_runtime(ir_with_rt));
+    }
+
+    #[test]
+    fn test_runtime_c_is_embedded() {
+        // The embedded C runtime should contain our function names.
+        assert!(AXIOM_RT_C.contains("axiom_file_read"));
+        assert!(AXIOM_RT_C.contains("axiom_file_write"));
+        assert!(AXIOM_RT_C.contains("axiom_file_size"));
+        assert!(AXIOM_RT_C.contains("axiom_clock_ns"));
+        assert!(AXIOM_RT_C.contains("axiom_get_argc"));
+        assert!(AXIOM_RT_C.contains("axiom_get_argv"));
     }
 }

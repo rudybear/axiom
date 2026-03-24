@@ -145,6 +145,9 @@ struct CodegenContext {
     /// Whether arena builtins are used (arena_create/arena_alloc/etc.).
     /// When true, `@malloc` and `@free` declarations are also emitted.
     needs_arena: bool,
+    /// Whether the AXIOM C runtime is needed (file I/O, clock, argc/argv).
+    /// When true, `axiom_rt.c` must be linked alongside the `.ll` file.
+    needs_runtime: bool,
     /// Registry of struct types (name → StructInfo).
     struct_registry: HashMap<String, StructInfo>,
     /// Collected errors.
@@ -202,6 +205,7 @@ impl CodegenContext {
             needs_realloc: false,
             needs_free: false,
             needs_arena: false,
+            needs_runtime: false,
             struct_registry: HashMap::new(),
             errors: Vec::new(),
             block_terminated: false,
@@ -514,6 +518,16 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         );
     }
 
+    // Emit AXIOM C runtime extern declarations.
+    if ctx.needs_runtime {
+        let _ = writeln!(ctx.output, "declare ptr @axiom_file_read(ptr, ptr)");
+        let _ = writeln!(ctx.output, "declare void @axiom_file_write(ptr, ptr, i64)");
+        let _ = writeln!(ctx.output, "declare i64 @axiom_file_size(ptr)");
+        let _ = writeln!(ctx.output, "declare i64 @axiom_clock_ns()");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_get_argc()");
+        let _ = writeln!(ctx.output, "declare ptr @axiom_get_argv(i32)");
+    }
+
     // Emit attribute groups.
     if !ctx.attribute_groups.is_empty() {
         ctx.emit_blank();
@@ -535,6 +549,18 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     }
 
     Ok(ctx.output)
+}
+
+/// Check whether the generated LLVM IR requires the AXIOM C runtime to be
+/// linked.  Returns `true` when the IR contains declarations for any
+/// `@axiom_*` runtime helper function.
+pub fn needs_runtime(ir: &str) -> bool {
+    ir.contains("@axiom_file_read")
+        || ir.contains("@axiom_file_write")
+        || ir.contains("@axiom_file_size")
+        || ir.contains("@axiom_clock_ns")
+        || ir.contains("@axiom_get_argc")
+        || ir.contains("@axiom_get_argv")
 }
 
 /// Register a struct type in the codegen context.
@@ -2306,6 +2332,13 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "arena_alloc" => return emit_builtin_arena_alloc(ctx, args),
             "arena_reset" => return emit_builtin_arena_reset(ctx, args),
             "arena_destroy" => return emit_builtin_arena_destroy(ctx, args),
+            // I/O runtime builtins (axiom_rt.c)
+            "file_read" => return emit_builtin_file_read(ctx, args),
+            "file_write" => return emit_builtin_file_write(ctx, args),
+            "file_size" => return emit_builtin_file_size(ctx, args),
+            "clock_ns" => return emit_builtin_clock_ns(ctx, args),
+            "get_argc" => return emit_builtin_get_argc(ctx, args),
+            "get_argv" => return emit_builtin_get_argv(ctx, args),
             _ => {}
         }
 
@@ -3463,6 +3496,187 @@ fn emit_builtin_arena_destroy(ctx: &mut CodegenContext, args: &[HirExpr]) -> Llv
     LlvmValue {
         reg: "0".to_string(),
         ty: "void".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I/O runtime builtins (axiom_rt.c)
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `file_read(path: ptr, out_size: ptr) -> ptr`.
+///
+/// Calls `axiom_file_read(path, out_size)` which reads an entire file into a
+/// malloc'd buffer and writes the byte count to `*out_size`.
+fn emit_builtin_file_read(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "file_read() requires exactly 2 arguments (path, out_size_ptr)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let path_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let out_size_val = emit_expr(ctx, &args[1], Some("ptr"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call ptr @axiom_file_read(ptr {}, ptr {})",
+        path_val.reg, out_size_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `file_write(path: ptr, data: ptr, len: i64)`.
+///
+/// Calls `axiom_file_write(path, data, len)` which writes `len` bytes to the
+/// file at `path`.
+fn emit_builtin_file_write(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "file_write() requires exactly 3 arguments (path, data, len)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let path_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let data_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let len_val = emit_expr(ctx, &args[2], Some("i64"));
+
+    ctx.emit(&format!(
+        "call void @axiom_file_write(ptr {}, ptr {}, i64 {})",
+        path_val.reg, data_val.reg, len_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `file_size(path: ptr) -> i64`.
+///
+/// Calls `axiom_file_size(path)` which returns the file size in bytes, or -1
+/// on error.
+fn emit_builtin_file_size(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "file_size() requires exactly 1 argument (path)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i64".to_string(),
+        };
+    }
+
+    let path_val = emit_expr(ctx, &args[0], Some("ptr"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i64 @axiom_file_size(ptr {})",
+        path_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i64".to_string(),
+    }
+}
+
+/// Emit built-in `clock_ns() -> i64`.
+///
+/// Calls `axiom_clock_ns()` which returns the current monotonic clock value in
+/// nanoseconds.
+fn emit_builtin_clock_ns(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+
+    if !args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "clock_ns() takes no arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i64".to_string(),
+        };
+    }
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{result_reg} = call i64 @axiom_clock_ns()"));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i64".to_string(),
+    }
+}
+
+/// Emit built-in `get_argc() -> i32`.
+///
+/// Calls `axiom_get_argc()` which returns the number of command-line arguments.
+fn emit_builtin_get_argc(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+
+    if !args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "get_argc() takes no arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{result_reg} = call i32 @axiom_get_argc()"));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `get_argv(i: i32) -> ptr`.
+///
+/// Calls `axiom_get_argv(i)` which returns a pointer to the i-th command-line
+/// argument string, or an empty string if out of range.
+fn emit_builtin_get_argv(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "get_argv() requires exactly 1 argument (index)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let idx_val = emit_expr(ctx, &args[0], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call ptr @axiom_get_argv(i32 {})",
+        idx_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
     }
 }
 
@@ -8089,6 +8303,257 @@ fn main() -> i32 {
         assert!(
             ir.contains("store i32 0, ptr"),
             "should zero-init: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // I/O runtime builtin tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_clock_ns_builtin() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "t".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: Some(call("clock_ns", vec![])),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call i64 @axiom_clock_ns()"),
+            "should call axiom_clock_ns: {ir}"
+        );
+        assert!(
+            ir.contains("declare i64 @axiom_clock_ns()"),
+            "should declare axiom_clock_ns: {ir}"
+        );
+        assert!(needs_runtime(&ir), "IR using clock_ns should need runtime");
+    }
+
+    #[test]
+    fn test_file_read_builtin() {
+        // file_read takes two ptr args; we use heap_alloc to get a ptr for out_size.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "sz_ptr".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I8)),
+                        },
+                        value: Some(call("heap_alloc", vec![int_lit(1), int_lit(8)])),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "buf".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I8)),
+                        },
+                        value: Some(call(
+                            "file_read",
+                            vec![str_lit("test.txt"), ident("sz_ptr")],
+                        )),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call ptr @axiom_file_read(ptr"),
+            "should call axiom_file_read: {ir}"
+        );
+        assert!(
+            ir.contains("declare ptr @axiom_file_read(ptr, ptr)"),
+            "should declare axiom_file_read: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_file_size_builtin() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "sz".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: Some(call("file_size", vec![str_lit("test.txt")])),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call i64 @axiom_file_size(ptr"),
+            "should call axiom_file_size: {ir}"
+        );
+        assert!(
+            ir.contains("declare i64 @axiom_file_size(ptr)"),
+            "should declare axiom_file_size: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_get_argc_builtin() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "n".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("get_argc", vec![])),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call i32 @axiom_get_argc()"),
+            "should call axiom_get_argc: {ir}"
+        );
+        assert!(
+            ir.contains("declare i32 @axiom_get_argc()"),
+            "should declare axiom_get_argc: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_get_argv_builtin() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arg0".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I8)),
+                        },
+                        value: Some(call("get_argv", vec![int_lit(0)])),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call ptr @axiom_get_argv(i32"),
+            "should call axiom_get_argv: {ir}"
+        );
+        assert!(
+            ir.contains("declare ptr @axiom_get_argv(i32)"),
+            "should declare axiom_get_argv: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_runtime_declarations_only_when_needed() {
+        // A module that doesn't use I/O builtins should not emit runtime declarations.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![stmt(HirStmtKind::Return {
+                    value: int_lit(0),
+                })]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            !ir.contains("@axiom_"),
+            "should NOT contain runtime declarations: {ir}"
+        );
+        assert!(
+            !needs_runtime(&ir),
+            "IR without I/O builtins should not need runtime"
+        );
+    }
+
+    #[test]
+    fn test_file_write_builtin() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Expr {
+                        expr: call(
+                            "file_write",
+                            vec![str_lit("out.bin"), str_lit("data"), int_lit(4)],
+                        ),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call void @axiom_file_write(ptr"),
+            "should call axiom_file_write: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @axiom_file_write(ptr, ptr, i64)"),
+            "should declare axiom_file_write: {ir}"
         );
     }
 }
