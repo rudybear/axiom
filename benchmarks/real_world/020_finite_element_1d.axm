@@ -13,38 +13,11 @@ fn taylor_sin(arg: f64, pi: f64) -> f64 {
     return a - a3 / 6.0 + a5 / 120.0 - a7 / 5040.0 + a9 / 362880.0;
 }
 
-fn main() -> i32 {
-    let n_elem: i32 = 2000;
-    let n_nodes: i32 = 2001;
-    let domain_len: f64 = 10.0;
-    let h: f64 = domain_len / to_f64(n_elem);
-
-    // We solve: -u''(x) + u(x) = f(x) on [0, 10], u(0)=0, u(10)=0
-    // f(x) = sin(pi*x/10) * (1 + pi^2/100)
-    // Exact solution: u(x) = sin(pi*x/10) (approximately, for Helmholtz with reaction term)
-
-    // Stiffness matrix K stored as tridiagonal: diag, upper, lower
-    let K_diag: array[f64, 2001] = array_zeros[f64, 2001];
-    let K_upper: array[f64, 2001] = array_zeros[f64, 2001];
-    let K_lower: array[f64, 2001] = array_zeros[f64, 2001];
-
-    // Mass matrix (for reaction term) - also tridiagonal
-    let M_diag: array[f64, 2001] = array_zeros[f64, 2001];
-    let M_upper: array[f64, 2001] = array_zeros[f64, 2001];
-    let M_lower: array[f64, 2001] = array_zeros[f64, 2001];
-
-    // Load vector
-    let F: array[f64, 2001] = array_zeros[f64, 2001];
-
-    // Solution vector
-    let u: array[f64, 2001] = array_zeros[f64, 2001];
-
-    let pi: f64 = 3.14159265358979;
-
-    // Assemble element matrices
-    // For linear elements on [-h/2, h/2]:
-    // Element stiffness: K_e = (1/h) * [[1, -1], [-1, 1]]
-    // Element mass:      M_e = (h/6) * [[2, 1], [1, 2]]
+@pure
+fn assemble_elements(K_diag: array[f64, 2001], K_upper: array[f64, 2001], K_lower: array[f64, 2001],
+                     M_diag: array[f64, 2001], M_upper: array[f64, 2001], M_lower: array[f64, 2001],
+                     F: array[f64, 2001],
+                     n_elem: i32, h: f64, pi: f64, domain_len: f64) -> f64 {
     let ke_diag: f64 = 1.0 / h;
     let ke_off: f64 = -1.0 / h;
     let me_diag: f64 = h * 2.0 / 6.0;
@@ -81,12 +54,14 @@ fn main() -> i32 {
         F[i] = F[i] + f_val * h / 2.0;
         F[j] = F[j] + f_val * h / 2.0;
     }
+    return 0.0;
+}
 
-    // Combine: A = K + M (Helmholtz equation)
-    let A_diag: array[f64, 2001] = array_zeros[f64, 2001];
-    let A_upper: array[f64, 2001] = array_zeros[f64, 2001];
-    let A_lower: array[f64, 2001] = array_zeros[f64, 2001];
-
+@pure
+fn combine_and_apply_bc(A_diag: array[f64, 2001], A_upper: array[f64, 2001], A_lower: array[f64, 2001],
+                        K_diag: array[f64, 2001], K_upper: array[f64, 2001], K_lower: array[f64, 2001],
+                        M_diag: array[f64, 2001], M_upper: array[f64, 2001], M_lower: array[f64, 2001],
+                        F: array[f64, 2001], n_nodes: i32) -> f64 {
     for i: i32 in range(0, n_nodes) {
         A_diag[i] = K_diag[i] + M_diag[i];
         A_upper[i] = K_upper[i] + M_upper[i];
@@ -94,7 +69,6 @@ fn main() -> i32 {
     }
 
     // Apply Dirichlet BCs: u(0) = 0, u(n_nodes-1) = 0
-    // Modify row 0 and row n_nodes-1
     A_diag[0] = 1.0;
     A_upper[0] = 0.0;
     F[0] = 0.0;
@@ -102,12 +76,14 @@ fn main() -> i32 {
     A_diag[n_nodes - 1] = 1.0;
     A_lower[n_nodes - 1] = 0.0;
     F[n_nodes - 1] = 0.0;
+    return 0.0;
+}
 
-    // Solve tridiagonal system via Thomas algorithm (Gaussian elimination for tridiagonal)
+@pure
+fn thomas_solve(u: array[f64, 2001], c_prime: array[f64, 2001], d_prime: array[f64, 2001],
+                A_diag: array[f64, 2001], A_upper: array[f64, 2001], A_lower: array[f64, 2001],
+                F: array[f64, 2001], n_nodes: i32) -> f64 {
     // Forward elimination
-    let c_prime: array[f64, 2001] = array_zeros[f64, 2001];
-    let d_prime: array[f64, 2001] = array_zeros[f64, 2001];
-
     c_prime[0] = A_upper[0] / A_diag[0];
     d_prime[0] = F[0] / A_diag[0];
 
@@ -124,8 +100,11 @@ fn main() -> i32 {
         u[i] = d_prime[i] - c_prime[i] * u[i + 1];
         i = i - 1;
     }
+    return 0.0;
+}
 
-    // Compute error vs exact solution u_exact(x) = sin(pi*x/10)
+@pure
+fn compute_error(u: array[f64, 2001], n_nodes: i32, h: f64, pi: f64, domain_len: f64) -> f64 {
     let error_l2: f64 = 0.0;
     let error_max: f64 = 0.0;
     for idx: i32 in range(0, n_nodes) {
@@ -141,22 +120,73 @@ fn main() -> i32 {
         }
     }
     error_l2 = sqrt(error_l2);
+    // Pack both values: error_l2 * 1e12 + error_max
+    return error_l2 * 1000000.0 + error_max * 100000.0;
+}
 
-    // Solution checksum: weighted sum
+@pure
+fn compute_checksum_parts(u: array[f64, 2001], n_nodes: i32) -> f64 {
     let u_sum: f64 = 0.0;
-    for idx: i32 in range(0, n_nodes) {
-        u_sum = u_sum + u[idx] * to_f64(idx + 1);
-    }
-
-    // Max solution value
     let u_max: f64 = 0.0;
     for idx: i32 in range(0, n_nodes) {
+        u_sum = u_sum + u[idx] * to_f64(idx + 1);
         if u[idx] > u_max {
             u_max = u[idx];
         }
     }
+    return u_sum + u_max * 10000.0;
+}
 
-    let checksum: f64 = u_sum + error_l2 * 1000000.0 + error_max * 100000.0 + u_max * 10000.0;
+fn main() -> i32 {
+    let n_elem: i32 = 2000;
+    let n_nodes: i32 = 2001;
+    let domain_len: f64 = 10.0;
+    let h: f64 = domain_len / to_f64(n_elem);
+
+    // We solve: -u''(x) + u(x) = f(x) on [0, 10], u(0)=0, u(10)=0
+    // f(x) = sin(pi*x/10) * (1 + pi^2/100)
+
+    // Stiffness matrix K stored as tridiagonal: diag, upper, lower
+    let K_diag: array[f64, 2001] = array_zeros[f64, 2001];
+    let K_upper: array[f64, 2001] = array_zeros[f64, 2001];
+    let K_lower: array[f64, 2001] = array_zeros[f64, 2001];
+
+    // Mass matrix (for reaction term) - also tridiagonal
+    let M_diag: array[f64, 2001] = array_zeros[f64, 2001];
+    let M_upper: array[f64, 2001] = array_zeros[f64, 2001];
+    let M_lower: array[f64, 2001] = array_zeros[f64, 2001];
+
+    // Load vector
+    let F: array[f64, 2001] = array_zeros[f64, 2001];
+
+    // Solution vector
+    let u: array[f64, 2001] = array_zeros[f64, 2001];
+
+    let pi: f64 = 3.14159265358979;
+
+    // Assemble element matrices
+    let _dummy1: f64 = assemble_elements(K_diag, K_upper, K_lower, M_diag, M_upper, M_lower, F, n_elem, h, pi, domain_len);
+
+    // Combine: A = K + M (Helmholtz equation) and apply BCs
+    let A_diag: array[f64, 2001] = array_zeros[f64, 2001];
+    let A_upper: array[f64, 2001] = array_zeros[f64, 2001];
+    let A_lower: array[f64, 2001] = array_zeros[f64, 2001];
+
+    let _dummy2: f64 = combine_and_apply_bc(A_diag, A_upper, A_lower, K_diag, K_upper, K_lower, M_diag, M_upper, M_lower, F, n_nodes);
+
+    // Solve tridiagonal system via Thomas algorithm
+    let c_prime: array[f64, 2001] = array_zeros[f64, 2001];
+    let d_prime: array[f64, 2001] = array_zeros[f64, 2001];
+
+    let _dummy3: f64 = thomas_solve(u, c_prime, d_prime, A_diag, A_upper, A_lower, F, n_nodes);
+
+    // Compute error vs exact solution
+    let error_part: f64 = compute_error(u, n_nodes, h, pi, domain_len);
+
+    // Solution checksum: weighted sum + max
+    let checksum_part: f64 = compute_checksum_parts(u, n_nodes);
+
+    let checksum: f64 = checksum_part + error_part;
     print_f64(checksum);
     return 0;
 }

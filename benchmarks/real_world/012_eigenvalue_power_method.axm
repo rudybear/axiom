@@ -19,6 +19,68 @@ fn vec_norm(a: array[f64, 500], n: i32) -> f64 {
     return sqrt(sum);
 }
 
+@pure
+fn matvec_multiply(A: array[f64, 250000], v: array[f64, 500], w: array[f64, 500], n: i32) -> f64 {
+    for i: i32 in range(0, n) {
+        let sum: f64 = 0.0;
+        for j: i32 in range(0, n) {
+            sum = sum + A[i * n + j] * v[j];
+        }
+        w[i] = sum;
+    }
+    return 0.0;
+}
+
+@pure
+fn normalize_vec(w: array[f64, 500], v: array[f64, 500], n: i32, norm: f64) -> f64 {
+    if norm > 0.0000001 {
+        for i: i32 in range(0, n) {
+            v[i] = w[i] / norm;
+        }
+    }
+    return 0.0;
+}
+
+@pure
+fn power_iteration(A: array[f64, 250000], v: array[f64, 500], w: array[f64, 500], n: i32, n_iters: i32) -> f64 {
+    let eigenvalue: f64 = 0.0;
+    for iter: i32 in range(0, n_iters) {
+        // w = A * v
+        let _d1: f64 = matvec_multiply(A, v, w, n);
+
+        // Compute eigenvalue estimate: v^T * w (Rayleigh quotient numerator)
+        eigenvalue = dot_product(v, w, n);
+
+        // Normalize w -> v
+        let norm: f64 = vec_norm(w, n);
+        let _d2: f64 = normalize_vec(w, v, n, norm);
+    }
+    return eigenvalue;
+}
+
+@pure
+fn compute_residual(A: array[f64, 250000], v: array[f64, 500], n: i32, eigenvalue: f64) -> f64 {
+    let residual: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let av_i: f64 = 0.0;
+        for j: i32 in range(0, n) {
+            av_i = av_i + A[i * n + j] * v[j];
+        }
+        let diff: f64 = av_i - eigenvalue * v[i];
+        residual = residual + diff * diff;
+    }
+    return sqrt(residual);
+}
+
+@pure
+fn vec_weighted_sum(v: array[f64, 500], n: i32) -> f64 {
+    let v_sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        v_sum = v_sum + v[i] * to_f64(i + 1);
+    }
+    return v_sum;
+}
+
 fn main() -> i32 {
     let n: i32 = 500;
     let n_sq: i32 = 250000;
@@ -52,49 +114,14 @@ fn main() -> i32 {
         v[i] = inv_sqrt_n;
     }
 
-    let eigenvalue: f64 = 0.0;
-
     // Power iteration: 200 iterations
-    for iter: i32 in range(0, 200) {
-        // w = A * v
-        for i: i32 in range(0, n) {
-            let sum: f64 = 0.0;
-            for j: i32 in range(0, n) {
-                sum = sum + A[i * n + j] * v[j];
-            }
-            w[i] = sum;
-        }
-
-        // Compute eigenvalue estimate: v^T * w (Rayleigh quotient numerator)
-        eigenvalue = dot_product(v, w, n);
-
-        // Normalize w -> v
-        let norm: f64 = vec_norm(w, n);
-
-        if norm > 0.0000001 {
-            for i: i32 in range(0, n) {
-                v[i] = w[i] / norm;
-            }
-        }
-    }
+    let eigenvalue: f64 = power_iteration(A, v, w, n, 200);
 
     // Verify: compute ||Av - lambda*v||
-    let residual: f64 = 0.0;
-    for i: i32 in range(0, n) {
-        let av_i: f64 = 0.0;
-        for j: i32 in range(0, n) {
-            av_i = av_i + A[i * n + j] * v[j];
-        }
-        let diff: f64 = av_i - eigenvalue * v[i];
-        residual = residual + diff * diff;
-    }
-    residual = sqrt(residual);
+    let residual: f64 = compute_residual(A, v, n, eigenvalue);
 
     // Eigenvector checksum
-    let v_sum: f64 = 0.0;
-    for i: i32 in range(0, n) {
-        v_sum = v_sum + v[i] * to_f64(i + 1);
-    }
+    let v_sum: f64 = vec_weighted_sum(v, n);
 
     let checksum: f64 = eigenvalue * 100.0 + residual + v_sum;
     print_f64(checksum);

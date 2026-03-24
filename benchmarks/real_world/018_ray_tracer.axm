@@ -41,6 +41,119 @@ fn clamp01(v: f64) -> f64 {
     return v;
 }
 
+@pure
+fn trace_pixel(ray_dx_in: f64, ray_dy_in: f64, ray_dz_in: f64,
+               sphere_cx: array[f64, 3], sphere_cy: array[f64, 3], sphere_cz: array[f64, 3],
+               sphere_rad: array[f64, 3],
+               sphere_r: array[f64, 3], sphere_g: array[f64, 3], sphere_b: array[f64, 3],
+               sphere_spec: array[f64, 3],
+               light_x: f64, light_y: f64, light_z: f64, light_intensity: f64,
+               ambient: f64,
+               img_r: array[i32, 65536], img_g: array[i32, 65536], img_b: array[i32, 65536],
+               pixel_idx: i32) -> f64 {
+    // Normalize ray direction
+    let ray_len: f64 = vec_length(ray_dx_in, ray_dy_in, ray_dz_in);
+    let ray_dx: f64 = ray_dx_in / ray_len;
+    let ray_dy: f64 = ray_dy_in / ray_len;
+    let ray_dz: f64 = ray_dz_in / ray_len;
+
+    // Find closest sphere intersection
+    let closest_t: f64 = 99999.0;
+    let hit_sphere: i32 = -1;
+
+    for s: i32 in range(0, 3) {
+        let t: f64 = ray_sphere_t(0.0, 0.0, 0.0, ray_dx, ray_dy, ray_dz,
+                                   sphere_cx[s], sphere_cy[s], sphere_cz[s], sphere_rad[s]);
+        if t > 0.0 and t < closest_t {
+            closest_t = t;
+            hit_sphere = s;
+        }
+    }
+
+    let fr: f64 = 0.0;
+    let fg: f64 = 0.0;
+    let fb: f64 = 0.0;
+
+    if hit_sphere >= 0 {
+        // Hit point
+        let hx: f64 = closest_t * ray_dx;
+        let hy: f64 = closest_t * ray_dy;
+        let hz: f64 = closest_t * ray_dz;
+
+        // Normal at hit point
+        let nx: f64 = (hx - sphere_cx[hit_sphere]) / sphere_rad[hit_sphere];
+        let ny: f64 = (hy - sphere_cy[hit_sphere]) / sphere_rad[hit_sphere];
+        let nz: f64 = (hz - sphere_cz[hit_sphere]) / sphere_rad[hit_sphere];
+
+        // Light direction
+        let lx: f64 = light_x - hx;
+        let ly: f64 = light_y - hy;
+        let lz: f64 = light_z - hz;
+        let l_len: f64 = vec_length(lx, ly, lz);
+        lx = lx / l_len;
+        ly = ly / l_len;
+        lz = lz / l_len;
+
+        // Shadow ray check
+        let in_shadow: i32 = 0;
+        for s2: i32 in range(0, 3) {
+            if s2 != hit_sphere {
+                let st: f64 = ray_sphere_t(hx, hy, hz, lx, ly, lz,
+                                            sphere_cx[s2], sphere_cy[s2], sphere_cz[s2], sphere_rad[s2]);
+                if st > 0.0 and st < l_len {
+                    in_shadow = 1;
+                }
+            }
+        }
+
+        // Diffuse (Lambertian)
+        let ndotl: f64 = dot3(nx, ny, nz, lx, ly, lz);
+        if ndotl < 0.0 { ndotl = 0.0; }
+
+        // Specular (Phong)
+        // Reflect: R = 2*(N.L)*N - L
+        let rx: f64 = 2.0 * ndotl * nx - lx;
+        let ry: f64 = 2.0 * ndotl * ny - ly;
+        let rz: f64 = 2.0 * ndotl * nz - lz;
+        // View direction (from hit point to camera)
+        let vx: f64 = 0.0 - ray_dx;
+        let vy: f64 = 0.0 - ray_dy;
+        let vz: f64 = 0.0 - ray_dz;
+        let rdotv: f64 = dot3(rx, ry, rz, vx, vy, vz);
+        if rdotv < 0.0 { rdotv = 0.0; }
+        let spec: f64 = pow(rdotv, sphere_spec[hit_sphere]);
+
+        let shadow_factor: f64 = 1.0;
+        if in_shadow == 1 { shadow_factor = 0.0; }
+
+        fr = sphere_r[hit_sphere] * (ambient + shadow_factor * light_intensity * ndotl) + shadow_factor * spec * 0.5;
+        fg = sphere_g[hit_sphere] * (ambient + shadow_factor * light_intensity * ndotl) + shadow_factor * spec * 0.5;
+        fb = sphere_b[hit_sphere] * (ambient + shadow_factor * light_intensity * ndotl) + shadow_factor * spec * 0.5;
+
+        fr = clamp01(fr);
+        fg = clamp01(fg);
+        fb = clamp01(fb);
+    }
+
+    img_r[pixel_idx] = truncate(fr * 255.0);
+    img_g[pixel_idx] = truncate(fg * 255.0);
+    img_b[pixel_idx] = truncate(fb * 255.0);
+    return 0.0;
+}
+
+@pure
+fn compute_image_checksum(img_r: array[i32, 65536], img_g: array[i32, 65536], img_b: array[i32, 65536], total: i32) -> i64 {
+    let r_sum: i64 = 0;
+    let g_sum: i64 = 0;
+    let b_sum: i64 = 0;
+    for i: i32 in range(0, total) {
+        r_sum = r_sum + widen(img_r[i]);
+        g_sum = g_sum + widen(img_g[i]);
+        b_sum = b_sum + widen(img_b[i]);
+    }
+    return r_sum * 10000 + g_sum * 100 + b_sum;
+}
+
 fn main() -> i32 {
     let width: i32 = 256;
     let height: i32 = 256;
@@ -91,112 +204,23 @@ fn main() -> i32 {
 
     for py: i32 in range(0, height) {
         for px: i32 in range(0, width) {
-            // Ray direction
+            // Ray direction (unnormalized - trace_pixel will normalize)
             let ray_dx: f64 = (to_f64(px) - to_f64(width) / 2.0) / to_f64(width) * fov_scale;
             let ray_dy: f64 = (to_f64(py) - to_f64(height) / 2.0) / to_f64(height) * fov_scale;
             let ray_dz: f64 = 1.0;
-            // Normalize ray direction
-            let ray_len: f64 = vec_length(ray_dx, ray_dy, ray_dz);
-            ray_dx = ray_dx / ray_len;
-            ray_dy = ray_dy / ray_len;
-            ray_dz = ray_dz / ray_len;
-
-            // Find closest sphere intersection
-            let closest_t: f64 = 99999.0;
-            let hit_sphere: i32 = -1;
-
-            for s: i32 in range(0, 3) {
-                let t: f64 = ray_sphere_t(0.0, 0.0, 0.0, ray_dx, ray_dy, ray_dz,
-                                           sphere_cx[s], sphere_cy[s], sphere_cz[s], sphere_rad[s]);
-                if t > 0.0 and t < closest_t {
-                    closest_t = t;
-                    hit_sphere = s;
-                }
-            }
-
-            let fr: f64 = 0.0;
-            let fg: f64 = 0.0;
-            let fb: f64 = 0.0;
-
-            if hit_sphere >= 0 {
-                // Hit point
-                let hx: f64 = closest_t * ray_dx;
-                let hy: f64 = closest_t * ray_dy;
-                let hz: f64 = closest_t * ray_dz;
-
-                // Normal at hit point
-                let nx: f64 = (hx - sphere_cx[hit_sphere]) / sphere_rad[hit_sphere];
-                let ny: f64 = (hy - sphere_cy[hit_sphere]) / sphere_rad[hit_sphere];
-                let nz: f64 = (hz - sphere_cz[hit_sphere]) / sphere_rad[hit_sphere];
-
-                // Light direction
-                let lx: f64 = light_x - hx;
-                let ly: f64 = light_y - hy;
-                let lz: f64 = light_z - hz;
-                let l_len: f64 = vec_length(lx, ly, lz);
-                lx = lx / l_len;
-                ly = ly / l_len;
-                lz = lz / l_len;
-
-                // Shadow ray check
-                let in_shadow: i32 = 0;
-                for s2: i32 in range(0, 3) {
-                    if s2 != hit_sphere {
-                        let st: f64 = ray_sphere_t(hx, hy, hz, lx, ly, lz,
-                                                    sphere_cx[s2], sphere_cy[s2], sphere_cz[s2], sphere_rad[s2]);
-                        if st > 0.0 and st < l_len {
-                            in_shadow = 1;
-                        }
-                    }
-                }
-
-                // Diffuse (Lambertian)
-                let ndotl: f64 = dot3(nx, ny, nz, lx, ly, lz);
-                if ndotl < 0.0 { ndotl = 0.0; }
-
-                // Specular (Phong)
-                // Reflect: R = 2*(N.L)*N - L
-                let rx: f64 = 2.0 * ndotl * nx - lx;
-                let ry: f64 = 2.0 * ndotl * ny - ly;
-                let rz: f64 = 2.0 * ndotl * nz - lz;
-                // View direction (from hit point to camera)
-                let vx: f64 = 0.0 - ray_dx;
-                let vy: f64 = 0.0 - ray_dy;
-                let vz: f64 = 0.0 - ray_dz;
-                let rdotv: f64 = dot3(rx, ry, rz, vx, vy, vz);
-                if rdotv < 0.0 { rdotv = 0.0; }
-                let spec: f64 = pow(rdotv, sphere_spec[hit_sphere]);
-
-                let shadow_factor: f64 = 1.0;
-                if in_shadow == 1 { shadow_factor = 0.0; }
-
-                fr = sphere_r[hit_sphere] * (ambient + shadow_factor * light_intensity * ndotl) + shadow_factor * spec * 0.5;
-                fg = sphere_g[hit_sphere] * (ambient + shadow_factor * light_intensity * ndotl) + shadow_factor * spec * 0.5;
-                fb = sphere_b[hit_sphere] * (ambient + shadow_factor * light_intensity * ndotl) + shadow_factor * spec * 0.5;
-
-                fr = clamp01(fr);
-                fg = clamp01(fg);
-                fb = clamp01(fb);
-            }
 
             let idx: i32 = py * width + px;
-            img_r[idx] = truncate(fr * 255.0);
-            img_g[idx] = truncate(fg * 255.0);
-            img_b[idx] = truncate(fb * 255.0);
+            let _d: f64 = trace_pixel(ray_dx, ray_dy, ray_dz,
+                                       sphere_cx, sphere_cy, sphere_cz, sphere_rad,
+                                       sphere_r, sphere_g, sphere_b, sphere_spec,
+                                       light_x, light_y, light_z, light_intensity,
+                                       ambient,
+                                       img_r, img_g, img_b, idx);
         }
     }
 
     // Checksum
-    let r_sum: i64 = 0;
-    let g_sum: i64 = 0;
-    let b_sum: i64 = 0;
-    for i: i32 in range(0, total) {
-        r_sum = r_sum + widen(img_r[i]);
-        g_sum = g_sum + widen(img_g[i]);
-        b_sum = b_sum + widen(img_b[i]);
-    }
-
-    let checksum: i64 = r_sum * 10000 + g_sum * 100 + b_sum;
+    let checksum: i64 = compute_image_checksum(img_r, img_g, img_b, total);
     print_i64(checksum);
     return 0;
 }

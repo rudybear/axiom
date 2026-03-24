@@ -1,27 +1,67 @@
 @module jpeg_dct;
 @intent("8x8 Discrete Cosine Transform on 50000 blocks, core of JPEG compression");
 
+@pure
+fn taylor_cos(angle: f64, pi: f64) -> f64 {
+    let twopi: f64 = 2.0 * pi;
+    let a: f64 = angle;
+    a = a - to_f64(truncate(a / twopi)) * twopi;
+    if a > pi { a = a - twopi; }
+    if a < 0.0 - pi { a = a + twopi; }
+    let a2: f64 = a * a;
+    return 1.0 - a2 / 2.0 + a2 * a2 / 24.0 - a2 * a2 * a2 / 720.0 + a2 * a2 * a2 * a2 / 40320.0;
+}
+
+@pure
+fn init_cos_table(cos_table: array[f64, 64], pi: f64) -> f64 {
+    for u: i32 in range(0, 8) {
+        for x: i32 in range(0, 8) {
+            let angle: f64 = pi * to_f64(2 * x + 1) * to_f64(u) / 16.0;
+            cos_table[u * 8 + x] = taylor_cos(angle, pi);
+        }
+    }
+    return 0.0;
+}
+
+@pure
+fn dct_block(block_in: array[f64, 64], block_out: array[f64, 64], cos_table: array[f64, 64], c0: f64) -> f64 {
+    // 2D DCT: F(u,v) = (1/4) * C(u) * C(v) * sum_{x=0}^{7} sum_{y=0}^{7} f(x,y) * cos(pi*(2x+1)*u/16) * cos(pi*(2y+1)*v/16)
+    for u: i32 in range(0, 8) {
+        for v: i32 in range(0, 8) {
+            let sum: f64 = 0.0;
+            for x: i32 in range(0, 8) {
+                for y: i32 in range(0, 8) {
+                    sum = sum + block_in[x * 8 + y] * cos_table[u * 8 + x] * cos_table[v * 8 + y];
+                }
+            }
+
+            let cu: f64 = 1.0;
+            let cv: f64 = 1.0;
+            if u == 0 { cu = c0; }
+            if v == 0 { cv = c0; }
+
+            block_out[u * 8 + v] = 0.25 * cu * cv * sum;
+        }
+    }
+    return 0.0;
+}
+
+@pure
+fn accumulate_energy(block_out: array[f64, 64]) -> f64 {
+    let energy: f64 = 0.0;
+    for i: i32 in range(0, 64) {
+        energy = energy + block_out[i] * block_out[i];
+    }
+    return energy;
+}
+
 fn main() -> i32 {
     let nblocks: i32 = 50000;
     let pi: f64 = 3.14159265358979;
 
     // Precompute cosine table: cos(pi * (2*x+1) * u / 16) for x,u in 0..7
     let cos_table: array[f64, 64] = array_zeros[f64, 64];
-    for u: i32 in range(0, 8) {
-        for x: i32 in range(0, 8) {
-            let angle: f64 = pi * to_f64(2 * x + 1) * to_f64(u) / 16.0;
-            // cos via Taylor: cos(a) = 1 - a^2/2 + a^4/24 - a^6/720 + a^8/40320
-            // Reduce angle to [-pi, pi]
-            let a: f64 = angle;
-            let twopi: f64 = 2.0 * pi;
-            a = a - to_f64(truncate(a / twopi)) * twopi;
-            if a > pi { a = a - twopi; }
-            if a < 0.0 - pi { a = a + twopi; }
-            let a2: f64 = a * a;
-            let cos_val: f64 = 1.0 - a2 / 2.0 + a2 * a2 / 24.0 - a2 * a2 * a2 / 720.0 + a2 * a2 * a2 * a2 / 40320.0;
-            cos_table[u * 8 + x] = cos_val;
-        }
-    }
+    let _d1: f64 = init_cos_table(cos_table, pi);
 
     // Normalization factors: C(0) = 1/sqrt(2), C(u) = 1 for u > 0
     let c0: f64 = 1.0 / sqrt(2.0);
@@ -45,30 +85,12 @@ fn main() -> i32 {
             block_in[i] = to_f64_i64(seed % 256) - 128.0;
         }
 
-        // 2D DCT: F(u,v) = (1/4) * C(u) * C(v) * sum_{x=0}^{7} sum_{y=0}^{7} f(x,y) * cos(pi*(2x+1)*u/16) * cos(pi*(2y+1)*v/16)
-        for u: i32 in range(0, 8) {
-            for v: i32 in range(0, 8) {
-                let sum: f64 = 0.0;
-                for x: i32 in range(0, 8) {
-                    for y: i32 in range(0, 8) {
-                        sum = sum + block_in[x * 8 + y] * cos_table[u * 8 + x] * cos_table[v * 8 + y];
-                    }
-                }
-
-                let cu: f64 = 1.0;
-                let cv: f64 = 1.0;
-                if u == 0 { cu = c0; }
-                if v == 0 { cv = c0; }
-
-                block_out[u * 8 + v] = 0.25 * cu * cv * sum;
-            }
-        }
+        // Compute 2D DCT
+        let _d2: f64 = dct_block(block_in, block_out, cos_table, c0);
 
         // Accumulate DC coefficient and total energy
         total_dc = total_dc + block_out[0];
-        for i: i32 in range(0, 64) {
-            total_energy = total_energy + block_out[i] * block_out[i];
-        }
+        total_energy = total_energy + accumulate_energy(block_out);
     }
 
     // Quantize last block using standard JPEG luminance quantization table

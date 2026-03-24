@@ -1,12 +1,9 @@
 @module run_length_encode;
 @intent("RLE encode/decode 500000 pseudo-random bytes with varying repetition patterns");
 
-fn main() -> i32 {
-    let data_size: i32 = 500000;
-
-    // Generate data with runs of varying lengths
-    let data: array[i32, 500000] = array_zeros[i32, 500000];
-    let seed: i64 = 42;
+@pure
+fn generate_data(data: array[i32, 500000], data_size: i32, init_seed: i64) -> i64 {
+    let seed: i64 = init_seed;
     let lcg_a: i64 = 1103515245;
     let lcg_c: i64 = 12345;
     let lcg_m: i64 = 2147483648;
@@ -32,12 +29,13 @@ fn main() -> i32 {
             j = j + 1;
         }
     }
+    return seed;
+}
 
-    // RLE Encode: output pairs (value, count)
-    let enc_val: array[i32, 500000] = array_zeros[i32, 500000];
-    let enc_cnt: array[i32, 500000] = array_zeros[i32, 500000];
+@pure
+fn rle_encode(data: array[i32, 500000], data_size: i32,
+              enc_val: array[i32, 500000], enc_cnt: array[i32, 500000]) -> i32 {
     let enc_size: i32 = 0;
-
     let pos: i32 = 0;
     while pos < data_size {
         let val: i32 = data[pos];
@@ -50,9 +48,12 @@ fn main() -> i32 {
         enc_size = enc_size + 1;
         pos = pos + count;
     }
+    return enc_size;
+}
 
-    // RLE Decode: reconstruct from encoded data
-    let decoded: array[i32, 500000] = array_zeros[i32, 500000];
+@pure
+fn rle_decode(enc_val: array[i32, 500000], enc_cnt: array[i32, 500000], enc_size: i32,
+              decoded: array[i32, 500000], data_size: i32) -> i32 {
     let dec_pos: i32 = 0;
     for ei: i32 in range(0, enc_size) {
         let val: i32 = enc_val[ei];
@@ -64,7 +65,12 @@ fn main() -> i32 {
             j = j + 1;
         }
     }
+    return dec_pos;
+}
 
+@pure
+fn verify_and_stats(data: array[i32, 500000], decoded: array[i32, 500000], data_size: i32,
+                    enc_cnt: array[i32, 500000], enc_size: i32) -> i64 {
     // Verify decode matches original
     let errors: i32 = 0;
     for idx: i32 in range(0, data_size) {
@@ -100,6 +106,26 @@ fn main() -> i32 {
     }
 
     let checksum: i64 = widen(enc_size) * 10000 + widen(compressed_size) * 100 + total_run + widen(max_run) * 1000 + widen(errors) + hist_sum;
+    return checksum;
+}
+
+fn main() -> i32 {
+    let data_size: i32 = 500000;
+
+    // Generate data with runs of varying lengths
+    let data: array[i32, 500000] = array_zeros[i32, 500000];
+    let _seed: i64 = generate_data(data, data_size, 42);
+
+    // RLE Encode: output pairs (value, count)
+    let enc_val: array[i32, 500000] = array_zeros[i32, 500000];
+    let enc_cnt: array[i32, 500000] = array_zeros[i32, 500000];
+    let enc_size: i32 = rle_encode(data, data_size, enc_val, enc_cnt);
+
+    // RLE Decode: reconstruct from encoded data
+    let decoded: array[i32, 500000] = array_zeros[i32, 500000];
+    let _dec_pos: i32 = rle_decode(enc_val, enc_cnt, enc_size, decoded, data_size);
+
+    let checksum: i64 = verify_and_stats(data, decoded, data_size, enc_cnt, enc_size);
     print_i64(checksum);
     return 0;
 }

@@ -855,10 +855,12 @@ fn register_struct(ctx: &mut CodegenContext, s: &HirStruct) {
     );
 }
 
-/// Scan a function body for `ptr_write_*` calls, indicating the function writes through pointers.
+/// Scan a function body for writes through pointers (array index assignments or ptr_write_* calls).
 ///
-/// Walks the HIR block recursively, checking for calls to `ptr_write_i32`, `ptr_write_i64`,
-/// or `ptr_write_f64` builtins. Returns `true` if any such call is found.
+/// Walks the HIR block recursively, checking for:
+/// - calls to `ptr_write_i32`, `ptr_write_i64`, or `ptr_write_f64` builtins
+/// - array index assignments like `arr[i] = val` (which write through a pointer to arg memory)
+/// Returns `true` if any such write is found.
 fn function_writes_through_ptrs(body: &HirBlock) -> bool {
     fn expr_has_ptr_write(expr: &HirExpr) -> bool {
         match &expr.kind {
@@ -903,6 +905,10 @@ fn function_writes_through_ptrs(body: &HirBlock) -> bool {
                 value.as_ref().is_some_and(expr_has_ptr_write)
             }
             HirStmtKind::Assign { target, value } => {
+                // Array index assignment (arr[i] = val) writes through a pointer.
+                if matches!(target.kind, HirExprKind::Index { .. }) {
+                    return true;
+                }
                 expr_has_ptr_write(target) || expr_has_ptr_write(value)
             }
             HirStmtKind::Return { value } => expr_has_ptr_write(value),
