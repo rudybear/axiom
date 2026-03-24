@@ -1,58 +1,76 @@
 {
-  "pipeline_version": "1.0",
+  "pipeline_version": "2.0",
   "project": "axiom",
-  "description": "Multi-agent development pipeline for the AXIOM compiler",
+  "description": "7-agent development pipeline with design review and QA verification",
 
   "agents": {
     "architect": {
-      "description": "Designs specifications, API signatures, and acceptance criteria",
+      "description": "Designs specifications, execution plan, test requirements",
       "template": "templates/architect.md",
       "creates_branch": true,
       "branch_prefix": "architect"
     },
+    "optimistic_design_reviewer": {
+      "description": "Validates plan against existing solutions, AXIOM goals, feasibility",
+      "template": "templates/optimistic_design_reviewer.md",
+      "creates_branch": false
+    },
+    "pessimistic_design_reviewer": {
+      "description": "Finds correctness holes, principle violations, edge cases, UB risks",
+      "template": "templates/pessimistic_design_reviewer.md",
+      "creates_branch": false
+    },
     "coder": {
-      "description": "Implements Rust code from architect specifications",
+      "description": "Implements the agreed plan exactly",
       "template": "templates/coder.md",
       "creates_branch": true,
       "branch_prefix": "coder"
     },
-    "reviewer": {
-      "description": "Reviews code against spec and project conventions",
-      "template": "templates/reviewer.md",
-      "creates_branch": false,
-      "branch_prefix": null
+    "qa_agent": {
+      "description": "Verifies test conformance to agreed requirements, coverage completeness",
+      "template": "templates/qa_agent.md",
+      "creates_branch": false
     },
-    "tester": {
-      "description": "Writes and runs tests to verify implementation",
-      "template": "templates/tester.md",
-      "creates_branch": true,
-      "branch_prefix": "tester"
+    "optimistic_code_reviewer": {
+      "description": "Verifies implementation matches spec, patterns, quality",
+      "template": "templates/optimistic_code_reviewer.md",
+      "creates_branch": false
     },
-    "benchmark": {
-      "description": "Measures performance and detects regressions",
-      "template": "templates/benchmark.md",
-      "creates_branch": false,
-      "branch_prefix": null
+    "pessimistic_code_reviewer": {
+      "description": "Finds bugs, UB, race conditions, correctness issues in implementation",
+      "template": "templates/pessimistic_code_reviewer.md",
+      "creates_branch": false
     }
   },
 
   "workflow": {
-    "sequence": ["architect", "coder", "reviewer", "tester", "benchmark"],
-    "retry_policy": {
-      "max_coder_retries": 3,
-      "max_architect_retries": 2,
-      "max_reviewer_cycles": 3
+    "phases": {
+      "design": {
+        "sequence": ["architect", "optimistic_design_reviewer", "pessimistic_design_reviewer"],
+        "loop": "architect revises until both reviewers APPROVE",
+        "output": "agreed plan saved to docs, DESIGN.md updated"
+      },
+      "implementation": {
+        "sequence": ["coder", "qa_agent"],
+        "loop": "coder revises until QA passes"
+      },
+      "code_review": {
+        "sequence": ["optimistic_code_reviewer", "pessimistic_code_reviewer"],
+        "on_issues": "back to architect for resolution, not coder",
+        "on_complete": "merge + final doc update"
+      }
     },
-    "on_reviewer_request_changes": "retry_coder",
-    "on_reviewer_reject": "retry_architect",
-    "on_tester_fail": "retry_coder",
-    "on_benchmark_regression": "retry_coder"
+    "retry_policy": {
+      "max_design_review_cycles": 3,
+      "max_coder_retries": 3,
+      "max_code_review_cycles": 2
+    }
   },
 
   "git": {
     "strategy": "branch_and_merge",
     "merge_strategy": "--no-ff",
-    "protected_branch": "main",
+    "protected_branch": "master",
     "branch_naming": "{agent}/{run_id}/{milestone_id}",
     "pr_mode": false
   },
