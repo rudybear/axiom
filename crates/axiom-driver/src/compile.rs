@@ -17,12 +17,46 @@ enum CompilerKind {
     Clang(PathBuf),
 }
 
-/// Compile LLVM IR text to a native executable binary.
+/// Options controlling the native compilation step.
+///
+/// These options allow the caller to influence the target architecture and
+/// optimization level used by the backend compiler (clang).
+#[derive(Debug, Clone, Default)]
+pub struct CompileOptions {
+    /// Target architecture for `-march=`. When `None` (the default), the
+    /// compiler uses `-march=native` to auto-detect the host CPU features
+    /// (AVX2, AVX-512, etc.).  When `Some("x86-64-v4")` for example, the
+    /// specified architecture is used verbatim.
+    pub target_arch: Option<String>,
+
+    /// Optimization profile derived from `@constraint { optimize_for: X }`.
+    /// Maps to different clang `-O` flags:
+    /// - `"performance"` -> `-O3`
+    /// - `"memory"` -> `-Os`
+    /// - `"size"` -> `-Oz`
+    /// - `"latency"` -> `-O3 -fno-exceptions`
+    /// - anything else / `None` -> default `-O2`
+    pub optimize_for: Option<String>,
+}
+
+/// Compile LLVM IR text to a native executable binary with default options.
 ///
 /// Writes the IR to a temporary file, invokes the discovered compiler, and
 /// cleans up the temp file on success. On failure the temp file is left in
 /// place for debugging and its path is printed to stderr.
 pub fn compile_to_binary(llvm_ir: &str, output_path: &str) -> miette::Result<()> {
+    compile_to_binary_with_options(llvm_ir, output_path, &CompileOptions::default())
+}
+
+/// Compile LLVM IR text to a native executable binary with explicit options.
+///
+/// This is the full-featured entry point that respects `@constraint` and
+/// `@target` annotations via [`CompileOptions`].
+pub fn compile_to_binary_with_options(
+    llvm_ir: &str,
+    output_path: &str,
+    options: &CompileOptions,
+) -> miette::Result<()> {
     let temp_ll = temp_ll_path();
     std::fs::write(&temp_ll, llvm_ir)
         .map_err(|e| miette::miette!("failed to write temp file {}: {}", temp_ll.display(), e))?;
@@ -37,7 +71,7 @@ pub fn compile_to_binary(llvm_ir: &str, output_path: &str) -> miette::Result<()>
     };
 
     let result = match &compiler {
-        CompilerKind::Clang(path) => invoke_clang(path, &temp_ll, output_path, rt_path.as_deref()),
+        CompilerKind::Clang(path) => invoke_clang(path, &temp_ll, output_path, rt_path.as_deref(), options),
     };
 
     // Clean up temp files on success; leave them on failure for debugging.
@@ -137,13 +171,14 @@ fn invoke_clang(
     ll_file: &Path,
     output: &str,
     runtime_c: Option<&Path>,
+    options: &CompileOptions,
 ) -> miette::Result<()> {
     // First try linking with mimalloc for faster heap allocation.
     // If mimalloc is not installed, fall back to system malloc.
-    if try_invoke_clang_with_mimalloc(clang, ll_file, output, runtime_c) {
+    if try_invoke_clang_with_mimalloc(clang, ll_file, output, runtime_c, options) {
         return Ok(());
     }
-    invoke_clang_core(clang, ll_file, output, runtime_c, &[])
+    invoke_clang_core(clang, ll_file, output, runtime_c, &[], options)
 }
 
 /// Try to compile with `-lmimalloc`. Returns `true` on success.
@@ -152,8 +187,27 @@ fn try_invoke_clang_with_mimalloc(
     ll_file: &Path,
     output: &str,
     runtime_c: Option<&Path>,
+    options: &CompileOptions,
 ) -> bool {
-    invoke_clang_core(clang, ll_file, output, runtime_c, &["-lmimalloc"]).is_ok()
+    invoke_clang_core(clang, ll_file, output, runtime_c, &["-lmimalloc"], options).is_ok()
+}
+
+/// Resolve the `-O` flag from the `optimize_for` constraint.
+///
+/// Maps well-known constraint values to clang optimization flags:
+/// - `"performance"` -> `-O3`
+/// - `"memory"` -> `-Os`
+/// - `"size"` -> `-Oz`
+/// - `"latency"` -> `-O3` (with `-fno-exceptions` added separately)
+/// - anything else / `None` -> `-O2`
+fn resolve_opt_level(optimize_for: Option<&str>) -> &'static str {
+    match optimize_for {
+        Some("performance") => "-O3",
+        Some("memory") => "-Os",
+        Some("size") => "-Oz",
+        Some("latency") => "-O3",
+        _ => "-O2",
+    }
 }
 
 /// Core clang invocation with optional extra linker flags.
@@ -163,11 +217,29 @@ fn invoke_clang_core(
     output: &str,
     runtime_c: Option<&Path>,
     extra_args: &[&str],
+    options: &CompileOptions,
 ) -> miette::Result<()> {
+    let opt_level = resolve_opt_level(options.optimize_for.as_deref());
+
     let mut cmd = Command::new(clang);
-    cmd.arg("-O2")
+    cmd.arg(opt_level)
         .arg("-Wno-override-module")
         .arg(ll_file);
+
+    // P1: Pass -march flag for target CPU feature selection.
+    // When no target arch is specified, use -march=native to auto-detect host
+    // CPU features (AVX2, AVX-512, etc.). When a specific arch is given (e.g.
+    // via `axiom compile --target=x86-64-v4`), use that verbatim.
+    let march = match &options.target_arch {
+        Some(arch) => format!("-march={arch}"),
+        None => "-march=native".to_string(),
+    };
+    cmd.arg(&march);
+
+    // P4: For "latency" constraint, also add -fno-exceptions to minimize overhead.
+    if options.optimize_for.as_deref() == Some("latency") {
+        cmd.arg("-fno-exceptions");
+    }
 
     // Link the C runtime if needed.
     if let Some(rt) = runtime_c {
@@ -305,5 +377,42 @@ mod tests {
         assert!(AXIOM_RT_C.contains("axiom_coro_yield"));
         assert!(AXIOM_RT_C.contains("axiom_coro_is_done"));
         assert!(AXIOM_RT_C.contains("axiom_coro_destroy"));
+    }
+
+    #[test]
+    fn test_resolve_opt_level_default() {
+        assert_eq!(resolve_opt_level(None), "-O2");
+    }
+
+    #[test]
+    fn test_resolve_opt_level_performance() {
+        assert_eq!(resolve_opt_level(Some("performance")), "-O3");
+    }
+
+    #[test]
+    fn test_resolve_opt_level_memory() {
+        assert_eq!(resolve_opt_level(Some("memory")), "-Os");
+    }
+
+    #[test]
+    fn test_resolve_opt_level_size() {
+        assert_eq!(resolve_opt_level(Some("size")), "-Oz");
+    }
+
+    #[test]
+    fn test_resolve_opt_level_latency() {
+        assert_eq!(resolve_opt_level(Some("latency")), "-O3");
+    }
+
+    #[test]
+    fn test_resolve_opt_level_unknown() {
+        assert_eq!(resolve_opt_level(Some("unknown")), "-O2");
+    }
+
+    #[test]
+    fn test_compile_options_default() {
+        let opts = CompileOptions::default();
+        assert!(opts.target_arch.is_none());
+        assert!(opts.optimize_for.is_none());
     }
 }

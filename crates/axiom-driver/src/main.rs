@@ -26,6 +26,11 @@ enum Commands {
         /// Emit intermediate representation instead of binary
         #[arg(long, value_parser = ["tokens", "ast", "hir", "mir", "mlir", "llvm-ir"])]
         emit: Option<String>,
+
+        /// Target CPU architecture (e.g., "native", "x86-64-v4", "znver3").
+        /// Overrides @target annotation. Defaults to native.
+        #[arg(long)]
+        target: Option<String>,
     },
 
     /// Tokenize an AXIOM source file (debug tool)
@@ -161,7 +166,7 @@ fn main() -> miette::Result<()> {
 
         Commands::Profile { input, iterations } => run_profile(&input, iterations),
 
-        Commands::Compile { input, output, emit } => {
+        Commands::Compile { input, output, emit, target } => {
             let source = std::fs::read_to_string(&input)
                 .map_err(|e| miette::miette!("Failed to read {}: {}", input, e))?;
 
@@ -272,7 +277,17 @@ fn main() -> miette::Result<()> {
                         }
                     });
 
-                    compile::compile_to_binary(&llvm_ir, &output_path)?;
+                    // Build compile options from CLI flags and source annotations.
+                    let constraints = axiom_optimize::llm_optimizer::extract_constraints_from_source(&source);
+                    let optimize_for = constraints.iter()
+                        .find(|c| c.key == "optimize_for")
+                        .map(|c| c.value.clone());
+                    let compile_opts = compile::CompileOptions {
+                        target_arch: target.clone(),
+                        optimize_for,
+                    };
+
+                    compile::compile_to_binary_with_options(&llvm_ir, &output_path, &compile_opts)?;
                     eprintln!("compiled {} -> {}", input, output_path);
                 }
             }
