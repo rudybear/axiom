@@ -2,17 +2,20 @@
 @intent("3x3 median filter on 512x512 image using sorting network for 9 elements");
 
 @pure
+@inline(always)
 fn lcg_next(seed: i64) -> i64 {
     return (1103515245 * seed + 12345) % 2147483648;
 }
 
 @pure
+@inline(always)
 fn min_i32(a: i32, b: i32) -> i32 {
     if a < b { return a; }
     return b;
 }
 
 @pure
+@inline(always)
 fn max_i32(a: i32, b: i32) -> i32 {
     if a > b { return a; }
     return b;
@@ -23,8 +26,8 @@ fn main() -> i32 {
     let height: i32 = 512;
     let total: i32 = 262144;
 
-    let image: array[i32, 262144] = array_zeros[i32, 262144];
-    let output: array[i32, 262144] = array_zeros[i32, 262144];
+    let image: ptr[i32] = heap_alloc_zeroed(262144, 4);
+    let output: ptr[i32] = heap_alloc_zeroed(262144, 4);
 
     // Generate noisy image
     let seed: i64 = 54321;
@@ -38,13 +41,13 @@ fn main() -> i32 {
         if base > 255 { base = 255; }
         let noise: i64 = seed % 100;
         if noise < 5 {
-            image[i] = 0;
+            ptr_write_i32(image, i, 0);
         }
         if noise >= 5 and noise < 10 {
-            image[i] = 255;
+            ptr_write_i32(image, i, 255);
         }
         if noise >= 10 {
-            image[i] = base;
+            ptr_write_i32(image, i, base);
         }
     }
 
@@ -55,15 +58,15 @@ fn main() -> i32 {
     for y: i32 in range(1, height - 1) {
         for x: i32 in range(1, width - 1) {
             // Gather 3x3 neighborhood
-            window[0] = image[(y - 1) * width + (x - 1)];
-            window[1] = image[(y - 1) * width + x];
-            window[2] = image[(y - 1) * width + (x + 1)];
-            window[3] = image[y * width + (x - 1)];
-            window[4] = image[y * width + x];
-            window[5] = image[y * width + (x + 1)];
-            window[6] = image[(y + 1) * width + (x - 1)];
-            window[7] = image[(y + 1) * width + x];
-            window[8] = image[(y + 1) * width + (x + 1)];
+            window[0] = ptr_read_i32(image, (y - 1) * width + (x - 1));
+            window[1] = ptr_read_i32(image, (y - 1) * width + x);
+            window[2] = ptr_read_i32(image, (y - 1) * width + (x + 1));
+            window[3] = ptr_read_i32(image, y * width + (x - 1));
+            window[4] = ptr_read_i32(image, y * width + x);
+            window[5] = ptr_read_i32(image, y * width + (x + 1));
+            window[6] = ptr_read_i32(image, (y + 1) * width + (x - 1));
+            window[7] = ptr_read_i32(image, (y + 1) * width + x);
+            window[8] = ptr_read_i32(image, (y + 1) * width + (x + 1));
 
             // Optimal 9-element sorting network (25 compare-and-swaps)
             // We only need the median (element 4 after sorting)
@@ -105,32 +108,35 @@ fn main() -> i32 {
             if window[5] > window[6] { t = window[5]; window[5] = window[6]; window[6] = t; }
 
             // Median is window[4]
-            output[y * width + x] = window[4];
+            ptr_write_i32(output, y * width + x, window[4]);
         }
     }
 
     // Copy border pixels
     for x: i32 in range(0, width) {
-        output[x] = image[x];
-        output[(height - 1) * width + x] = image[(height - 1) * width + x];
+        ptr_write_i32(output, x, ptr_read_i32(image, x));
+        ptr_write_i32(output, (height - 1) * width + x, ptr_read_i32(image, (height - 1) * width + x));
     }
     for y: i32 in range(0, height) {
-        output[y * width] = image[y * width];
-        output[y * width + width - 1] = image[y * width + width - 1];
+        ptr_write_i32(output, y * width, ptr_read_i32(image, y * width));
+        ptr_write_i32(output, y * width + width - 1, ptr_read_i32(image, y * width + width - 1));
     }
 
     // Checksum
     let checksum: i64 = 0;
     for i: i32 in range(0, total) {
-        checksum = checksum + widen(output[i]);
+        checksum = checksum + widen(ptr_read_i32(output, i));
     }
     // Also check noise removal quality
     let diff_sum: i64 = 0;
     for i: i32 in range(0, total) {
-        let d: i32 = output[i] - image[i];
+        let d: i32 = ptr_read_i32(output, i) - ptr_read_i32(image, i);
         diff_sum = diff_sum + widen(abs(d));
     }
     checksum = checksum * 100 + diff_sum;
     print_i64(checksum);
+
+    heap_free(image);
+    heap_free(output);
     return 0;
 }

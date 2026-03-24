@@ -18,7 +18,7 @@ use std::fmt::Write as _;
 use axiom_hir::{
     BinOp, HirAnnotation, HirAnnotationKind, HirBlock, HirExpr, HirExprKind,
     HirExternFunction, HirFunction, HirModule, HirParam, HirStmt, HirStmtKind, HirStruct,
-    HirType, PrimitiveType, UnaryOp,
+    HirType, InlineHint, PrimitiveType, UnaryOp,
 };
 
 use crate::error::CodegenError;
@@ -63,6 +63,8 @@ struct FuncAnnotations {
     writes_arg_memory: bool,
     /// Whether the function is annotated with `@lifetime(scope)`.
     is_lifetime_scope: bool,
+    /// Inline hint from `@inline(always|never|hint)`.
+    inline_hint: Option<InlineHint>,
 }
 
 /// Information about a function's signature.
@@ -949,6 +951,9 @@ fn extract_func_annotations(
             HirAnnotationKind::Lifetime(s) if s == "scope" => {
                 annots.is_lifetime_scope = true;
             }
+            HirAnnotationKind::Inline(hint) => {
+                annots.inline_hint = Some(hint.clone());
+            }
             _ => {}
         }
     }
@@ -1089,10 +1094,6 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
 ///
 /// For `@const` functions: `memory(none) nounwind willreturn nosync speculatable`
 fn build_func_attr_suffix(ctx: &mut CodegenContext, annots: &FuncAnnotations) -> String {
-    if !annots.is_pure && !annots.is_const {
-        return String::new();
-    }
-
     let mut attrs = Vec::new();
 
     if annots.is_const {
@@ -1120,6 +1121,18 @@ fn build_func_attr_suffix(ctx: &mut CodegenContext, annots: &FuncAnnotations) ->
         attrs.push("nounwind");
         // NOTE: no willreturn — cannot prove termination for @pure functions with loops.
         // NOTE: no nosync — @pure functions may be called from parallel worker threads.
+    }
+
+    // @inline attribute: alwaysinline, noinline, or inlinehint.
+    match &annots.inline_hint {
+        Some(InlineHint::Always) => attrs.push("alwaysinline"),
+        Some(InlineHint::Never) => attrs.push("noinline"),
+        Some(InlineHint::Hint) => attrs.push("inlinehint"),
+        None => {}
+    }
+
+    if attrs.is_empty() {
+        return String::new();
     }
 
     let attrs_str = attrs.join(" ");

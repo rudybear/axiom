@@ -2,7 +2,8 @@
 @intent("RLE encode/decode 500000 pseudo-random bytes with varying repetition patterns");
 
 @pure
-fn generate_data(data: array[i32, 500000], data_size: i32, init_seed: i64) -> i64 {
+@inline(always)
+fn generate_data(data: ptr[i32], data_size: i32, init_seed: i64) -> i64 {
     let seed: i64 = init_seed;
     let lcg_a: i64 = 1103515245;
     let lcg_c: i64 = 12345;
@@ -24,7 +25,7 @@ fn generate_data(data: array[i32, 500000], data_size: i32, init_seed: i64) -> i6
 
         let j: i32 = 0;
         while j < run_len and i < data_size {
-            data[i] = val;
+            ptr_write_i32(data, i, val);
             i = i + 1;
             j = j + 1;
         }
@@ -33,18 +34,19 @@ fn generate_data(data: array[i32, 500000], data_size: i32, init_seed: i64) -> i6
 }
 
 @pure
-fn rle_encode(data: array[i32, 500000], data_size: i32,
-              enc_val: array[i32, 500000], enc_cnt: array[i32, 500000]) -> i32 {
+@inline(always)
+fn rle_encode(data: ptr[i32], data_size: i32,
+              enc_val: ptr[i32], enc_cnt: ptr[i32]) -> i32 {
     let enc_size: i32 = 0;
     let pos: i32 = 0;
     while pos < data_size {
-        let val: i32 = data[pos];
+        let val: i32 = ptr_read_i32(data, pos);
         let count: i32 = 1;
-        while pos + count < data_size and data[pos + count] == val and count < 255 {
+        while pos + count < data_size and ptr_read_i32(data, pos + count) == val and count < 255 {
             count = count + 1;
         }
-        enc_val[enc_size] = val;
-        enc_cnt[enc_size] = count;
+        ptr_write_i32(enc_val, enc_size, val);
+        ptr_write_i32(enc_cnt, enc_size, count);
         enc_size = enc_size + 1;
         pos = pos + count;
     }
@@ -52,15 +54,16 @@ fn rle_encode(data: array[i32, 500000], data_size: i32,
 }
 
 @pure
-fn rle_decode(enc_val: array[i32, 500000], enc_cnt: array[i32, 500000], enc_size: i32,
-              decoded: array[i32, 500000], data_size: i32) -> i32 {
+@inline(always)
+fn rle_decode(enc_val: ptr[i32], enc_cnt: ptr[i32], enc_size: i32,
+              decoded: ptr[i32], data_size: i32) -> i32 {
     let dec_pos: i32 = 0;
     for ei: i32 in range(0, enc_size) {
-        let val: i32 = enc_val[ei];
-        let count: i32 = enc_cnt[ei];
+        let val: i32 = ptr_read_i32(enc_val, ei);
+        let count: i32 = ptr_read_i32(enc_cnt, ei);
         let j: i32 = 0;
         while j < count and dec_pos < data_size {
-            decoded[dec_pos] = val;
+            ptr_write_i32(decoded, dec_pos, val);
             dec_pos = dec_pos + 1;
             j = j + 1;
         }
@@ -69,12 +72,13 @@ fn rle_decode(enc_val: array[i32, 500000], enc_cnt: array[i32, 500000], enc_size
 }
 
 @pure
-fn verify_and_stats(data: array[i32, 500000], decoded: array[i32, 500000], data_size: i32,
-                    enc_cnt: array[i32, 500000], enc_size: i32) -> i64 {
+@inline(always)
+fn verify_and_stats(data: ptr[i32], decoded: ptr[i32], data_size: i32,
+                    enc_cnt: ptr[i32], enc_size: i32) -> i64 {
     // Verify decode matches original
     let errors: i32 = 0;
     for idx: i32 in range(0, data_size) {
-        if decoded[idx] != data[idx] {
+        if ptr_read_i32(decoded, idx) != ptr_read_i32(data, idx) {
             errors = errors + 1;
         }
     }
@@ -83,10 +87,10 @@ fn verify_and_stats(data: array[i32, 500000], decoded: array[i32, 500000], data_
     let max_run: i32 = 0;
     let total_run: i64 = 0;
     for ei: i32 in range(0, enc_size) {
-        if enc_cnt[ei] > max_run {
-            max_run = enc_cnt[ei];
+        if ptr_read_i32(enc_cnt, ei) > max_run {
+            max_run = ptr_read_i32(enc_cnt, ei);
         }
-        total_run = total_run + widen(enc_cnt[ei]);
+        total_run = total_run + widen(ptr_read_i32(enc_cnt, ei));
     }
 
     // Compression ratio: original=data_size bytes, compressed=enc_size*2 bytes
@@ -95,7 +99,7 @@ fn verify_and_stats(data: array[i32, 500000], decoded: array[i32, 500000], data_
     // Histogram of run lengths
     let hist: array[i32, 256] = array_zeros[i32, 256];
     for ei: i32 in range(0, enc_size) {
-        let bin: i32 = enc_cnt[ei];
+        let bin: i32 = ptr_read_i32(enc_cnt, ei);
         if bin > 255 { bin = 255; }
         hist[bin] = hist[bin] + 1;
     }
@@ -113,19 +117,24 @@ fn main() -> i32 {
     let data_size: i32 = 500000;
 
     // Generate data with runs of varying lengths
-    let data: array[i32, 500000] = array_zeros[i32, 500000];
+    let data: ptr[i32] = heap_alloc_zeroed(500000, 4);
     let _seed: i64 = generate_data(data, data_size, 42);
 
     // RLE Encode: output pairs (value, count)
-    let enc_val: array[i32, 500000] = array_zeros[i32, 500000];
-    let enc_cnt: array[i32, 500000] = array_zeros[i32, 500000];
+    let enc_val: ptr[i32] = heap_alloc_zeroed(500000, 4);
+    let enc_cnt: ptr[i32] = heap_alloc_zeroed(500000, 4);
     let enc_size: i32 = rle_encode(data, data_size, enc_val, enc_cnt);
 
     // RLE Decode: reconstruct from encoded data
-    let decoded: array[i32, 500000] = array_zeros[i32, 500000];
+    let decoded: ptr[i32] = heap_alloc_zeroed(500000, 4);
     let _dec_pos: i32 = rle_decode(enc_val, enc_cnt, enc_size, decoded, data_size);
 
     let checksum: i64 = verify_and_stats(data, decoded, data_size, enc_cnt, enc_size);
     print_i64(checksum);
+
+    heap_free(data);
+    heap_free(enc_val);
+    heap_free(enc_cnt);
+    heap_free(decoded);
     return 0;
 }
