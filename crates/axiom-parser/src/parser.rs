@@ -670,6 +670,10 @@ impl<'src> Parser<'src> {
                 let dims = self.parse_ident_list_in_parens();
                 Annotation::Parallel(dims)
             }
+            "parallel_for" => {
+                // @parallel_for(shared_read: [a, b], shared_write: [c], reduction(+: sum), private: [tmp])
+                self.parse_parallel_for_annotation()
+            }
             "layout" => {
                 // @layout(row_major|col_major|custom)
                 if self.eat(&TokenKind::LParen) {
@@ -745,6 +749,105 @@ impl<'src> Parser<'src> {
                 }
             }
             self.expect(&TokenKind::RParen, "')'");
+        }
+        names
+    }
+
+    /// Parse the `@parallel_for(...)` annotation with data sharing clauses.
+    ///
+    /// Syntax:
+    /// ```text
+    /// @parallel_for(shared_read: [a, b], shared_write: [c], reduction(+: sum), private: [tmp])
+    /// ```
+    fn parse_parallel_for_annotation(&mut self) -> Annotation {
+        use crate::ast::ParallelForConfig;
+
+        let mut config = ParallelForConfig {
+            shared_read: Vec::new(),
+            shared_write: Vec::new(),
+            reductions: Vec::new(),
+            private: Vec::new(),
+        };
+
+        if !self.eat(&TokenKind::LParen) {
+            return Annotation::ParallelFor(config);
+        }
+
+        loop {
+            if self.check(&TokenKind::RParen) || self.at_end() {
+                break;
+            }
+
+            if self.check_ident("shared_read") {
+                self.advance();
+                if self.eat(&TokenKind::Colon) {
+                    config.shared_read = self.parse_ident_list_in_brackets();
+                }
+            } else if self.check_ident("shared_write") {
+                self.advance();
+                if self.eat(&TokenKind::Colon) {
+                    config.shared_write = self.parse_ident_list_in_brackets();
+                }
+            } else if self.check_ident("private") {
+                self.advance();
+                if self.eat(&TokenKind::Colon) {
+                    config.private = self.parse_ident_list_in_brackets();
+                }
+            } else if self.check_ident("reduction") {
+                self.advance();
+                // reduction(+: sum) or reduction(*: product)
+                if self.eat(&TokenKind::LParen) {
+                    // Parse operator: +, *, min, max
+                    let op = match self.peek() {
+                        TokenKind::Plus => { self.advance(); "+".to_string() }
+                        TokenKind::Star => { self.advance(); "*".to_string() }
+                        _ => {
+                            if let Some((name, _)) = self.eat_ident() {
+                                name
+                            } else {
+                                self.advance();
+                                "?".to_string()
+                            }
+                        }
+                    };
+                    self.expect(&TokenKind::Colon, "':'");
+                    // Parse variable name
+                    if let Some((var_name, _)) = self.eat_ident() {
+                        config.reductions.push((op, var_name));
+                    }
+                    self.expect(&TokenKind::RParen, "')'");
+                }
+            } else {
+                // Unknown clause — skip
+                self.advance();
+            }
+
+            // Commas between clauses are optional
+            self.eat(&TokenKind::Comma);
+        }
+
+        self.expect(&TokenKind::RParen, "')'");
+        Annotation::ParallelFor(config)
+    }
+
+    /// Parse a bracketed list of identifiers: `[a, b, c]`.
+    fn parse_ident_list_in_brackets(&mut self) -> Vec<String> {
+        let mut names = Vec::new();
+        if self.eat(&TokenKind::LBracket) {
+            loop {
+                if self.check(&TokenKind::RBracket) || self.at_end() {
+                    break;
+                }
+                if let Some((name, _)) = self.eat_ident() {
+                    names.push(name);
+                } else {
+                    break;
+                }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RBracket, "']'");
         }
         names
     }
@@ -1446,6 +1549,10 @@ impl<'src> Parser<'src> {
 
         let mut stmts = Vec::new();
         let mut block_annotations = Vec::new();
+        // Annotations that should be attached to the next for-loop statement
+        // (e.g., @parallel_for). These are kept separate so they can be injected
+        // into the for-loop's body block annotations for correct association.
+        let mut pending_for_annotations: Vec<Spanned<Annotation>> = Vec::new();
 
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
             self.skip_error_tokens();
@@ -1458,10 +1565,11 @@ impl<'src> Parser<'src> {
                 // Peek ahead to see if this annotation precedes a statement or
                 // is standalone (like @strategy { ... })
                 if let Some(ann) = self.parse_annotation() {
-                    // If we just parsed an annotation and the next token can start
-                    // a statement, this is a statement annotation (collect for the
-                    // next statement). Otherwise it's a block annotation.
-                    if matches!(ann.node, Annotation::Strategy(_)) {
+                    // @parallel_for annotations are statement-level: they attach
+                    // to the next for-loop rather than the enclosing block.
+                    if matches!(ann.node, Annotation::ParallelFor(_)) {
+                        pending_for_annotations.push(ann);
+                    } else if matches!(ann.node, Annotation::Strategy(_)) {
                         block_annotations.push(ann);
                     } else {
                         // For now, just store as block annotation
@@ -1472,7 +1580,16 @@ impl<'src> Parser<'src> {
                 }
             }
 
-            if let Some(stmt) = self.parse_stmt() {
+            if let Some(mut stmt) = self.parse_stmt() {
+                // Attach pending @parallel_for annotations to for-loops.
+                if matches!(stmt.node, Stmt::For { .. }) && !pending_for_annotations.is_empty() {
+                    if let Stmt::For { ref mut body, .. } = &mut stmt.node {
+                        // Prepend the pending annotations to the for-loop's body block.
+                        let mut merged = pending_for_annotations.drain(..).collect::<Vec<_>>();
+                        merged.append(&mut body.annotations);
+                        body.annotations = merged;
+                    }
+                }
                 stmts.push(stmt);
             } else {
                 self.synchronize_stmt();
@@ -1488,6 +1605,10 @@ impl<'src> Parser<'src> {
         }
 
         self.depth -= 1;
+
+        // If any @parallel_for annotations were not consumed (no for-loop followed),
+        // add them to block annotations as a fallback.
+        block_annotations.extend(pending_for_annotations);
 
         Block {
             annotations: block_annotations,
@@ -3117,6 +3238,123 @@ fn main() -> i32 {
         assert_eq!(
             result.module.name.as_ref().map(|n| n.node.as_str()),
             Some("array_test")
+        );
+    }
+
+    #[test]
+    fn test_parallel_for_annotation() {
+        let source = r#"
+@module pf_test;
+
+fn main() -> i32 {
+    let n: i32 = 100;
+    let data: ptr[f64] = heap_alloc(n, 8);
+    let results: ptr[f64] = heap_alloc(n, 8);
+
+    @parallel_for(shared_read: [data], shared_write: [results])
+    for i: i32 in range(0, n) {
+        let val: f64 = ptr_read_f64(data, i);
+        ptr_write_f64(results, i, val * val);
+    }
+
+    return 0;
+}
+"#;
+        let result = parse(source);
+        assert!(
+            !result.has_errors(),
+            "parallel_for should parse without errors: {:?}",
+            result.errors
+        );
+
+        // The @parallel_for annotation should be injected into the for-loop's body block.
+        let func = match &result.module.items[0].node {
+            Item::Function(f) => f,
+            _ => panic!("expected function"),
+        };
+
+        // Find the for-loop statement.
+        let for_stmt = func.body.stmts.iter().find(|s| matches!(s.node, Stmt::For { .. }));
+        assert!(for_stmt.is_some(), "expected a for statement");
+
+        if let Stmt::For { body, .. } = &for_stmt.as_ref().expect("for stmt").node {
+            let pf_ann = body.annotations.iter().find(|a| {
+                matches!(a.node, Annotation::ParallelFor(_))
+            });
+            assert!(pf_ann.is_some(), "expected @parallel_for annotation on for-loop body");
+
+            if let Annotation::ParallelFor(ref config) = pf_ann.expect("pf_ann").node {
+                assert_eq!(config.shared_read, vec!["data".to_string()]);
+                assert_eq!(config.shared_write, vec!["results".to_string()]);
+                assert!(config.reductions.is_empty());
+                assert!(config.private.is_empty());
+            } else {
+                panic!("expected ParallelFor annotation");
+            }
+        } else {
+            panic!("expected for statement");
+        }
+    }
+
+    #[test]
+    fn test_parallel_for_with_reduction() {
+        let source = r#"
+fn compute() -> i32 {
+    let sum: f64 = 0.0;
+    @parallel_for(shared_read: [data], reduction(+: sum), private: [tmp])
+    for i: i32 in range(0, 100) {
+        sum = sum + 1.0;
+    }
+    return 0;
+}
+"#;
+        let result = parse(source);
+        assert!(
+            !result.has_errors(),
+            "parallel_for with reduction should parse: {:?}",
+            result.errors
+        );
+
+        let func = match &result.module.items[0].node {
+            Item::Function(f) => f,
+            _ => panic!("expected function"),
+        };
+
+        let for_stmt = func.body.stmts.iter().find(|s| matches!(s.node, Stmt::For { .. }));
+        assert!(for_stmt.is_some(), "expected a for statement");
+
+        if let Stmt::For { body, .. } = &for_stmt.as_ref().expect("for stmt").node {
+            let pf_ann = body.annotations.iter().find_map(|a| {
+                if let Annotation::ParallelFor(ref config) = a.node {
+                    Some(config.clone())
+                } else {
+                    None
+                }
+            });
+            let config = pf_ann.expect("expected @parallel_for annotation");
+            assert_eq!(config.shared_read, vec!["data".to_string()]);
+            assert_eq!(config.reductions, vec![("+".to_string(), "sum".to_string())]);
+            assert_eq!(config.private, vec!["tmp".to_string()]);
+        }
+    }
+
+    #[test]
+    fn test_parallel_for_empty() {
+        // @parallel_for with no clauses
+        let source = r#"
+fn foo() -> i32 {
+    @parallel_for
+    for i: i32 in range(0, 10) {
+        return 0;
+    }
+    return 0;
+}
+"#;
+        let result = parse(source);
+        assert!(
+            !result.has_errors(),
+            "empty parallel_for should parse: {:?}",
+            result.errors
         );
     }
 }

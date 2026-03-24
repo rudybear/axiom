@@ -490,6 +490,29 @@ impl fmt::Display for HirAnnotation {
             }
             HirAnnotationKind::Export => write!(f, "@export"),
             HirAnnotationKind::Lifetime(scope) => write!(f, "@lifetime({scope})"),
+            HirAnnotationKind::ParallelFor(config) => {
+                write!(f, "@parallel_for(")?;
+                let mut first = true;
+                if !config.shared_read.is_empty() {
+                    write!(f, "shared_read: [{}]", config.shared_read.join(", "))?;
+                    first = false;
+                }
+                if !config.shared_write.is_empty() {
+                    if !first { write!(f, ", ")?; }
+                    write!(f, "shared_write: [{}]", config.shared_write.join(", "))?;
+                    first = false;
+                }
+                for (op, var) in &config.reductions {
+                    if !first { write!(f, ", ")?; }
+                    write!(f, "reduction({op}: {var})")?;
+                    first = false;
+                }
+                if !config.private.is_empty() {
+                    if !first { write!(f, ", ")?; }
+                    write!(f, "private: [{}]", config.private.join(", "))?;
+                }
+                write!(f, ")")
+            }
             HirAnnotationKind::Custom(name, args) => {
                 write!(f, "@{name}")?;
                 if !args.is_empty() {

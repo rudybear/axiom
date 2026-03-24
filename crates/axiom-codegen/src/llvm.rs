@@ -1148,7 +1148,7 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
             iterable,
             body,
             ..
-        } => emit_for(ctx, var, var_type, iterable, body),
+        } => emit_for(ctx, var, var_type, iterable, body, &stmt.annotations),
         HirStmtKind::While { condition, body } => emit_while(ctx, condition, body),
         HirStmtKind::Expr { expr } => {
             emit_expr(ctx, expr, None);
@@ -1711,12 +1711,22 @@ fn detect_base_case_pattern(condition: &HirExpr) -> Option<(u32, u32)> {
 }
 
 /// Emit a for loop with range() recognition.
+/// Check whether the given annotations include `@parallel_for`.
+///
+/// Returns `true` if at least one annotation is `HirAnnotationKind::ParallelFor`.
+fn has_parallel_for(annotations: &[HirAnnotation]) -> bool {
+    annotations
+        .iter()
+        .any(|a| matches!(&a.kind, HirAnnotationKind::ParallelFor(_)))
+}
+
 fn emit_for(
     ctx: &mut CodegenContext,
     var: &str,
     var_type: &HirType,
     iterable: &HirExpr,
     body: &HirBlock,
+    annotations: &[HirAnnotation],
 ) {
     let loop_type = match hir_type_to_llvm(var_type) {
         Ok(t) => t,
@@ -1725,6 +1735,9 @@ fn emit_for(
             return;
         }
     };
+
+    // Detect @parallel_for annotation on this for loop.
+    let is_parallel = has_parallel_for(annotations);
 
     // Recognize range(start, end) or range(end) pattern.
     let (start_expr, end_expr) = match &iterable.kind {
@@ -1842,15 +1855,49 @@ fn emit_for(
             "store {loop_type} {inc_add}, ptr {alloca_name}"
         ));
 
-        // Optimization #7: Loop vectorization hints for @vectorizable functions.
-        if ctx.current_func_is_vectorizable {
+        // Emit LLVM loop metadata.
+        // @parallel_for loops get parallel access metadata + vectorize hints.
+        // @vectorizable functions get vectorize hints on all loops.
+        let needs_parallel_md = is_parallel;
+        let needs_vec_md = ctx.current_func_is_vectorizable || is_parallel;
+
+        if needs_parallel_md || needs_vec_md {
             let loop_md_id = ctx.fresh_metadata_id();
-            let vec_enable_id = ctx.fresh_metadata_id();
+            let mut md_operands = vec![format!("!{loop_md_id}")];
+
+            if needs_parallel_md {
+                // Emit access group metadata for parallel loop.
+                let access_group_id = ctx.fresh_metadata_id();
+                let parallel_accesses_id = ctx.fresh_metadata_id();
+                ctx.metadata_entries.push(format!(
+                    "!{access_group_id} = distinct !{{}}"
+                ));
+                ctx.metadata_entries.push(format!(
+                    "!{parallel_accesses_id} = !{{!\"llvm.loop.parallel_accesses\", !{access_group_id}}}"
+                ));
+                md_operands.push(format!("!{parallel_accesses_id}"));
+            }
+
+            if needs_vec_md {
+                let vec_enable_id = ctx.fresh_metadata_id();
+                ctx.metadata_entries.push(format!(
+                    "!{vec_enable_id} = !{{!\"llvm.loop.vectorize.enable\", i1 true}}"
+                ));
+                md_operands.push(format!("!{vec_enable_id}"));
+            }
+
+            if is_parallel {
+                // Also hint that loop iterations are independent (safe to reorder).
+                let distribute_id = ctx.fresh_metadata_id();
+                ctx.metadata_entries.push(format!(
+                    "!{distribute_id} = !{{!\"llvm.loop.distribute.enable\", i1 true}}"
+                ));
+                md_operands.push(format!("!{distribute_id}"));
+            }
+
             ctx.metadata_entries.push(format!(
-                "!{loop_md_id} = distinct !{{!{loop_md_id}, !{vec_enable_id}}}"
-            ));
-            ctx.metadata_entries.push(format!(
-                "!{vec_enable_id} = !{{!\"llvm.loop.vectorize.enable\", i1 true}}"
+                "!{loop_md_id} = distinct !{{{}}}",
+                md_operands.join(", ")
             ));
             ctx.emit(&format!(
                 "br label %{cond_label}, !llvm.loop !{loop_md_id}"
@@ -5344,7 +5391,7 @@ mod tests {
     use axiom_hir::{
         HirAnnotation, HirAnnotationKind, HirBlock, HirExpr, HirExprKind,
         HirExternFunction, HirFunction, HirModule, HirParam, HirStmt, HirStmtKind,
-        HirType, NodeId, PrimitiveType, SPAN_DUMMY,
+        HirType, NodeId, ParallelForConfig, PrimitiveType, SPAN_DUMMY,
     };
 
     /// Helper: create a dummy span.
@@ -10573,6 +10620,119 @@ fn main() -> i32 {
         assert!(
             ir.contains("warning: pointer argument 'data' passed as both param 0 and param 1 to 'swap'"),
             "should emit aliasing warning for swap(data, data): {ir}"
+        );
+    }
+
+    // --- @parallel_for annotation tests ---
+
+    #[test]
+    fn test_parallel_for_loop_metadata() {
+        // A for-loop with @parallel_for should get parallel loop metadata.
+        let pf_config = ParallelForConfig {
+            shared_read: vec!["data".to_string()],
+            shared_write: vec!["results".to_string()],
+            reductions: vec![],
+            private: vec![],
+        };
+        let pf_ann = HirAnnotation {
+            kind: HirAnnotationKind::ParallelFor(pf_config),
+            span: SPAN_DUMMY,
+        };
+
+        let main_func = func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "sum".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::I32),
+                    value: Some(int_lit(0)),
+                    mutable: true,
+                }),
+                stmt_with_annotations(
+                    HirStmtKind::For {
+                        var: "i".to_string(),
+                        var_span: span(),
+                        var_type: HirType::Primitive(PrimitiveType::I32),
+                        iterable: call("range", vec![int_lit(0), int_lit(100)]),
+                        body: block(vec![stmt(HirStmtKind::Assign {
+                            target: ident("sum"),
+                            value: binop(BinOp::Add, ident("sum"), int_lit(1)),
+                        })]),
+                    },
+                    vec![pf_ann],
+                ),
+                stmt(HirStmtKind::Return {
+                    value: ident("sum"),
+                }),
+            ]),
+        );
+
+        let m = module(Some("test"), vec![main_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should have parallel access metadata.
+        assert!(
+            ir.contains("llvm.loop.parallel_accesses"),
+            "parallel_for loop should have parallel_accesses metadata: {ir}"
+        );
+        // Should have vectorize enable hint.
+        assert!(
+            ir.contains("llvm.loop.vectorize.enable"),
+            "parallel_for loop should have vectorize.enable metadata: {ir}"
+        );
+        // Should have distribute enable hint.
+        assert!(
+            ir.contains("llvm.loop.distribute.enable"),
+            "parallel_for loop should have distribute.enable metadata: {ir}"
+        );
+        // Should have !llvm.loop on backedge branch.
+        assert!(
+            ir.contains("!llvm.loop"),
+            "parallel_for loop should have !llvm.loop on backedge: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_non_parallel_for_no_parallel_metadata() {
+        // A regular for-loop (no @parallel_for) should NOT get parallel metadata.
+        let main_func = func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "sum".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::I32),
+                    value: Some(int_lit(0)),
+                    mutable: true,
+                }),
+                stmt(HirStmtKind::For {
+                    var: "i".to_string(),
+                    var_span: span(),
+                    var_type: HirType::Primitive(PrimitiveType::I32),
+                    iterable: call("range", vec![int_lit(0), int_lit(100)]),
+                    body: block(vec![stmt(HirStmtKind::Assign {
+                        target: ident("sum"),
+                        value: binop(BinOp::Add, ident("sum"), int_lit(1)),
+                    })]),
+                }),
+                stmt(HirStmtKind::Return {
+                    value: ident("sum"),
+                }),
+            ]),
+        );
+
+        let m = module(Some("test"), vec![main_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should NOT have parallel access metadata.
+        assert!(
+            !ir.contains("llvm.loop.parallel_accesses"),
+            "regular loop should not have parallel_accesses metadata: {ir}"
         );
     }
 }

@@ -371,12 +371,19 @@ impl LoweringContext {
     }
 
     /// Lower a block of statements.
+    ///
+    /// `@parallel_for` annotations that were placed before a for-loop in the source
+    /// are injected into the for-loop's body block by the parser. The `lower_stmt`
+    /// method extracts them from the body block and attaches them to the `HirStmt`.
     fn lower_block(&mut self, block: &ast::Block, outer_span: Span) -> HirBlock {
         let id = self.id_gen.next_id();
 
+        // Filter out @parallel_for from block annotations: they belong on For statements,
+        // not on blocks. The parser may inject them here as a transport mechanism.
         let annotations: Vec<HirAnnotation> = block
             .annotations
             .iter()
+            .filter(|a| !matches!(&a.node, ast::Annotation::ParallelFor(_)))
             .map(|a| self.lower_annotation(a))
             .collect();
         self.validate_annotations(&annotations, AnnotationTarget::Block);
@@ -395,6 +402,7 @@ impl LoweringContext {
     fn lower_stmt(&mut self, stmt: &ast::Spanned<ast::Stmt>) -> HirStmt {
         let id = self.id_gen.next_id();
         let span = stmt.span;
+        let mut stmt_annotations: Vec<HirAnnotation> = Vec::new();
 
         let kind = match &stmt.node {
             ast::Stmt::Let {
@@ -432,13 +440,25 @@ impl LoweringContext {
                 var_type,
                 iterable,
                 body,
-            } => HirStmtKind::For {
-                var: var.node.clone(),
-                var_span: var.span,
-                var_type: self.lower_type(var_type, var.span),
-                iterable: self.lower_expr(iterable, span),
-                body: self.lower_block(body, span),
-            },
+            } => {
+                // Extract @parallel_for annotations from the body block annotations
+                // and save them to be attached to this For statement.
+                let parallel_for_anns: Vec<HirAnnotation> = body
+                    .annotations
+                    .iter()
+                    .filter(|a| matches!(&a.node, ast::Annotation::ParallelFor(_)))
+                    .map(|a| self.lower_annotation(a))
+                    .collect();
+                stmt_annotations = parallel_for_anns;
+
+                HirStmtKind::For {
+                    var: var.node.clone(),
+                    var_span: var.span,
+                    var_type: self.lower_type(var_type, var.span),
+                    iterable: self.lower_expr(iterable, span),
+                    body: self.lower_block(body, span),
+                }
+            }
             ast::Stmt::While { condition, body } => HirStmtKind::While {
                 condition: self.lower_expr(condition, span),
                 body: self.lower_block(body, span),
@@ -452,7 +472,7 @@ impl LoweringContext {
             id,
             kind,
             span,
-            annotations: Vec::new(),
+            annotations: stmt_annotations,
         }
     }
 
@@ -625,6 +645,9 @@ impl LoweringContext {
             }
             ast::Annotation::Export => HirAnnotationKind::Export,
             ast::Annotation::Lifetime(scope) => HirAnnotationKind::Lifetime(scope.clone()),
+            ast::Annotation::ParallelFor(config) => {
+                HirAnnotationKind::ParallelFor(config.clone())
+            }
             ast::Annotation::Custom(name, args) => {
                 HirAnnotationKind::Custom(name.clone(), args.clone())
             }
@@ -715,6 +738,7 @@ fn annotation_valid_targets(kind: &HirAnnotationKind) -> (&str, Vec<AnnotationTa
         HirAnnotationKind::OptimizationLog(_) => ("optimization_log", vec![Function]),
         HirAnnotationKind::Export => ("export", vec![Function]),
         HirAnnotationKind::Lifetime(_) => ("lifetime", vec![Function, Block]),
+        HirAnnotationKind::ParallelFor(_) => ("parallel_for", vec![Block]),
         HirAnnotationKind::Custom(_, _) => (
             "custom",
             vec![Function, Module, Param, StructDef, StructField, Block],
@@ -1613,5 +1637,65 @@ fn main() -> i32 {
             .annotations
             .iter()
             .any(|a| matches!(a.kind, HirAnnotationKind::Export)));
+    }
+
+    #[test]
+    fn test_parallel_for_annotation_lowered() {
+        let source = r#"
+@module pf_test;
+
+fn main() -> i32 {
+    let n: i32 = 100;
+    let data: ptr[f64] = heap_alloc(n, 8);
+    let results: ptr[f64] = heap_alloc(n, 8);
+
+    for i: i32 in range(0, n) {
+        ptr_write_f64(data, i, to_f64(i));
+    }
+
+    @parallel_for(shared_read: [data], shared_write: [results])
+    for i: i32 in range(0, n) {
+        let val: f64 = ptr_read_f64(data, i);
+        ptr_write_f64(results, i, val * val);
+    }
+
+    return 0;
+}
+"#;
+        let hir = parse_and_lower(source).expect("lowering should succeed");
+        let func = &hir.functions[0];
+        assert_eq!(func.name, "main");
+
+        // Find the second for-loop (which should have the @parallel_for annotation).
+        let for_stmts: Vec<_> = func
+            .body
+            .stmts
+            .iter()
+            .filter(|s| matches!(s.kind, HirStmtKind::For { .. }))
+            .collect();
+        assert_eq!(for_stmts.len(), 2, "expected two for statements");
+
+        // First for-loop should NOT have @parallel_for.
+        assert!(
+            !for_stmts[0]
+                .annotations
+                .iter()
+                .any(|a| matches!(a.kind, HirAnnotationKind::ParallelFor(_))),
+            "first for-loop should not have @parallel_for"
+        );
+
+        // Second for-loop SHOULD have @parallel_for.
+        let pf_ann = for_stmts[1]
+            .annotations
+            .iter()
+            .find(|a| matches!(a.kind, HirAnnotationKind::ParallelFor(_)));
+        assert!(pf_ann.is_some(), "second for-loop should have @parallel_for");
+
+        if let HirAnnotationKind::ParallelFor(ref config) = pf_ann.expect("pf").kind {
+            assert_eq!(config.shared_read, vec!["data".to_string()]);
+            assert_eq!(config.shared_write, vec!["results".to_string()]);
+        } else {
+            panic!("expected ParallelFor");
+        }
     }
 }

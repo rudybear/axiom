@@ -8,8 +8,8 @@ use axiom_lexer::Span;
 
 // Re-export AST types that are identical between AST and HIR.
 pub use axiom_parser::ast::{
-    AnnotationValue, BinOp, InlineHint, LayoutKind, OptLogEntry, StrategyBlock, StrategyValue,
-    TransferBlock, UnaryOp,
+    AnnotationValue, BinOp, InlineHint, LayoutKind, OptLogEntry, ParallelForConfig,
+    StrategyBlock, StrategyValue, TransferBlock, UnaryOp,
 };
 
 /// Dummy span used for expressions that lack source location information.
@@ -524,6 +524,9 @@ pub enum HirAnnotationKind {
     Export,
     /// `@lifetime(scope|static|manual)` - declares allocation lifetime for escape analysis.
     Lifetime(String),
+    /// `@parallel_for(shared_read: [...], shared_write: [...], reduction(...: ...), private: [...])`
+    /// — marks a for loop for parallel execution with data sharing clauses.
+    ParallelFor(ParallelForConfig),
     /// `@custom(name, args)` - extensibility.
     Custom(String, Vec<AnnotationValue>),
 }
