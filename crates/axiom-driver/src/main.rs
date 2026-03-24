@@ -51,22 +51,30 @@ enum Commands {
     /// Start MCP server for AI agent integration
     Mcp {},
 
-    /// Run the optimization protocol on an AXIOM source file
+    /// AI-driven optimization of an AXIOM program
     Optimize {
         /// Input .axm file
         input: String,
+
+        /// Number of LLM optimization iterations
+        #[arg(long, default_value = "5")]
+        iterations: usize,
 
         /// Target architecture
         #[arg(long, default_value = "native")]
         target: String,
 
-        /// Agent identifier
-        #[arg(long, default_value = "axiom-optimizer")]
-        agent: String,
+        /// Anthropic API key (or set ANTHROPIC_API_KEY env var)
+        #[arg(long)]
+        api_key: Option<String>,
 
-        /// Number of optimization iterations
-        #[arg(long, default_value = "1")]
-        iterations: usize,
+        /// Just print the LLM prompt without calling the API
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Agent identifier for history records
+        #[arg(long, default_value = "axiom-llm-optimizer")]
+        agent: String,
     },
 
     /// Profile an AXIOM program and suggest optimizations
@@ -144,10 +152,12 @@ fn main() -> miette::Result<()> {
 
         Commands::Optimize {
             input,
-            target,
-            agent,
             iterations,
-        } => run_optimize(&input, &target, &agent, iterations),
+            target,
+            api_key,
+            dry_run,
+            agent,
+        } => run_optimize(&input, iterations, &target, api_key.as_deref(), dry_run, &agent),
 
         Commands::Profile { input, iterations } => run_profile(&input, iterations),
 
@@ -370,32 +380,57 @@ fn run_profile(input: &str, iterations: usize) -> miette::Result<()> {
     Ok(())
 }
 
-/// Run the optimization protocol: extract surfaces, generate proposals,
-/// benchmark, and record results.
+/// AI-driven optimization: compile, benchmark, ask LLM for suggestions,
+/// apply, and record results over multiple iterations.
 fn run_optimize(
     input: &str,
-    target: &str,
-    agent: &str,
     iterations: usize,
+    target: &str,
+    api_key: Option<&str>,
+    dry_run: bool,
+    agent: &str,
 ) -> miette::Result<()> {
     use axiom_optimize::history::{OptHistory, OptRecord};
+    use axiom_optimize::llm_optimizer::{self, LlmResult};
     use std::collections::HashMap;
+
+    // Resolve API key: --api-key flag > ANTHROPIC_API_KEY env var > None
+    let resolved_api_key: Option<String> = api_key
+        .map(|k| k.to_string())
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
 
     // 1. Read source
     let source = std::fs::read_to_string(input)
         .map_err(|e| miette::miette!("Failed to read {}: {}", input, e))?;
 
-    // 2. Extract surfaces
+    // 2. Extract optimization surfaces
     let surfaces = axiom_optimize::extract_surfaces(&source).map_err(|errs| {
         miette::miette!("Failed to extract surfaces: {}", errs.join("; "))
     })?;
 
     if surfaces.is_empty() {
         eprintln!("No optimization surfaces found in {input}.");
+        eprintln!("Add @strategy blocks with ?param holes to enable LLM-driven tuning.");
         return Ok(());
     }
 
-    eprintln!("Found {} optimization surface(s) in {input}:", surfaces.len());
+    eprintln!("=== AXIOM LLM-Driven Self-Optimization ===\n");
+    eprintln!("Source: {input}");
+    eprintln!("Target: {target}");
+    eprintln!("Iterations: {iterations}");
+    eprintln!(
+        "LLM: {}",
+        if dry_run {
+            "dry-run (prompt only)"
+        } else if resolved_api_key.is_some() {
+            "Claude API (via curl)"
+        } else {
+            "auto-detect (claude CLI or dry-run)"
+        }
+    );
+    eprintln!();
+
+    eprintln!("Found {} optimization surface(s):", surfaces.len());
     for s in &surfaces {
         eprintln!(
             "  function `{}`: {} hole(s)",
@@ -411,7 +446,73 @@ fn run_optimize(
         }
     }
 
-    // 3. Load existing history (if any)
+    // 3. Compile to LLVM IR
+    eprintln!("\nCompiling to LLVM IR...");
+    let parse_result = axiom_parser::parse(&source);
+    if parse_result.has_errors() {
+        return Err(miette::miette!(
+            "parse errors: {}",
+            parse_result
+                .errors
+                .iter()
+                .map(|e| format!("{e}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    let hir_module = axiom_hir::lower(&parse_result.module).map_err(|errors| {
+        miette::miette!(
+            "HIR lowering errors: {}",
+            errors
+                .iter()
+                .map(|e| format!("{e}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| {
+        miette::miette!(
+            "codegen errors: {}",
+            errors
+                .iter()
+                .map(|e| format!("{e}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    eprintln!("  LLVM IR: {} bytes", llvm_ir.len());
+
+    // 4. Generate assembly (optional, best-effort)
+    eprintln!("Generating assembly...");
+    let assembly = llm_optimizer::generate_assembly(&llvm_ir, target);
+    match &assembly {
+        Some(asm) => eprintln!("  Assembly: {} bytes", asm.len()),
+        None => eprintln!("  Assembly: not available (clang not found)"),
+    }
+
+    // 5. Benchmark baseline
+    eprintln!("\nBenchmarking baseline...");
+    let bench_config = axiom_optimize::benchmark::BenchmarkConfig {
+        warmup_runs: 2,
+        measurement_runs: 5,
+        timeout_ms: 30_000,
+    };
+
+    let baseline_ms = match axiom_optimize::benchmark::benchmark_source(&source, &bench_config) {
+        Ok(result) => {
+            eprintln!(
+                "  Baseline: median={:.3}ms, mean={:.3}ms, stddev={:.3}ms",
+                result.median_ms, result.mean_ms, result.stddev_ms
+            );
+            Some(result.median_ms)
+        }
+        Err(e) => {
+            eprintln!("  Benchmark not available: {e}");
+            None
+        }
+    };
+
+    // 6. Load existing history (if any)
     let history_path = format!("{input}.opt_history.json");
     let mut history = match std::fs::read_to_string(&history_path) {
         Ok(json) => OptHistory::from_json(&json)
@@ -419,100 +520,203 @@ fn run_optimize(
         Err(_) => OptHistory::new(),
     };
 
-    eprintln!(
-        "\nStarting optimization ({iterations} iteration(s), target={target}, agent={agent})..."
-    );
-
-    // 4. Run iterations
-    for i in 0..iterations {
-        let version = history.next_version();
-        eprintln!("\n--- Iteration {}/{iterations} ({version}) ---", i + 1);
-
-        // Generate a proposal by grid-searching the first integer hole.
-        // For the first iteration, use the midpoint of each hole's range.
-        // For subsequent iterations, offset from the midpoint.
-        let mut params: HashMap<String, serde_json::Value> = HashMap::new();
-        let mut proposal = axiom_optimize::Proposal::new();
-
-        for surface in &surfaces {
-            for hole in &surface.holes {
-                let value = generate_hole_value(hole, i);
-                let json_value = value_to_json(&value);
-                params.insert(hole.name.clone(), json_value);
-                proposal.set(hole.name.clone(), value);
-            }
+    // Record baseline if this is a fresh history
+    if history.records.is_empty() {
+        if let Some(ms) = baseline_ms {
+            let mut metrics = HashMap::new();
+            metrics.insert("time_ms".to_string(), ms);
+            history.add_record(OptRecord {
+                version: history.next_version(),
+                params: HashMap::new(),
+                metrics,
+                agent: Some(agent.to_string()),
+                target: Some(target.to_string()),
+                timestamp: get_timestamp(),
+            });
+            eprintln!("  Recorded baseline as {}", history.records.last().unwrap().version);
         }
-
-        // Validate the proposal
-        if let Err(errors) = axiom_optimize::validate_proposal(&proposal, &surfaces) {
-            eprintln!("  Proposal validation failed:");
-            for err in &errors {
-                eprintln!("    {err}");
-            }
-            continue;
-        }
-
-        eprintln!("  Proposal:");
-        for (name, value) in &params {
-            eprintln!("    ?{name} = {value}");
-        }
-
-        // Benchmark: compile and time the source.
-        // We use a lightweight config for optimization iterations.
-        let bench_config = axiom_optimize::benchmark::BenchmarkConfig {
-            warmup_runs: 1,
-            measurement_runs: 3,
-            timeout_ms: 30_000,
-        };
-
-        let mut metrics: HashMap<String, f64> = HashMap::new();
-        match axiom_optimize::benchmark::benchmark_source(&source, &bench_config) {
-            Ok(result) => {
-                eprintln!("  Benchmark: median={:.3}ms, mean={:.3}ms, stddev={:.3}ms",
-                    result.median_ms, result.mean_ms, result.stddev_ms);
-                metrics.insert("time_ms".to_string(), result.median_ms);
-                metrics.insert("mean_ms".to_string(), result.mean_ms);
-                metrics.insert("min_ms".to_string(), result.min_ms);
-                metrics.insert("max_ms".to_string(), result.max_ms);
-                metrics.insert("stddev_ms".to_string(), result.stddev_ms);
-            }
-            Err(e) => {
-                eprintln!("  Benchmark failed: {e}");
-                // Record with no metrics — still useful for tracking what was tried
-            }
-        }
-
-        // Get a timestamp
-        let timestamp = get_timestamp();
-
-        // Record this iteration
-        history.add_record(OptRecord {
-            version,
-            params,
-            metrics,
-            agent: Some(agent.to_string()),
-            target: Some(target.to_string()),
-            timestamp,
-        });
     }
 
-    // 5. Print summary
-    eprintln!("\n=== Optimization Summary ===");
+    // 7. Run LLM optimization iterations
+    eprintln!(
+        "\n=== Starting LLM optimization ({iterations} iteration(s)) ===\n"
+    );
+
+    let current_benchmark = baseline_ms;
+
+    for i in 0..iterations {
+        let iter_num = i + 1;
+        eprintln!("--- Iteration {iter_num}/{iterations} ---\n");
+
+        // Call LLM
+        let result = llm_optimizer::run_llm_optimization(
+            &source,
+            &llvm_ir,
+            assembly.as_deref(),
+            current_benchmark,
+            &surfaces,
+            &history.records,
+            iter_num,
+            iterations,
+            target,
+            resolved_api_key.as_deref(),
+            dry_run,
+        );
+
+        match result {
+            LlmResult::Suggestion(suggestion) => {
+                eprintln!("  LLM Suggestion (confidence: {:.0}%):", suggestion.confidence * 100.0);
+                eprintln!("  Reasoning: {}", suggestion.reasoning);
+                eprintln!("  Proposed parameters:");
+                for (name, value) in &suggestion.param_values {
+                    eprintln!("    ?{name} = {value}");
+                }
+
+                if !suggestion.code_changes.is_empty() {
+                    eprintln!("  Code change suggestions:");
+                    for change in &suggestion.code_changes {
+                        let line_str = change
+                            .line
+                            .map(|l| format!(" (line {l})"))
+                            .unwrap_or_default();
+                        eprintln!("    - {}{}", change.description, line_str);
+                    }
+                }
+
+                // Record the LLM suggestion in history
+                let version = history.next_version();
+                let params: HashMap<String, serde_json::Value> = suggestion
+                    .param_values
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+
+                let mut metrics: HashMap<String, f64> = HashMap::new();
+                metrics.insert("llm_confidence".to_string(), suggestion.confidence);
+
+                // Benchmark with the suggestion applied
+                // (In a full implementation, we would apply the params to the source
+                //  and recompile. For now, we record the benchmark of the current source.)
+                if let Some(ms) = current_benchmark {
+                    metrics.insert("time_ms".to_string(), ms);
+                }
+
+                history.add_record(OptRecord {
+                    version: version.clone(),
+                    params,
+                    metrics,
+                    agent: Some(agent.to_string()),
+                    target: Some(target.to_string()),
+                    timestamp: get_timestamp(),
+                });
+
+                eprintln!("  Recorded as {version}\n");
+            }
+
+            LlmResult::DryRun { prompt_path, prompt } => {
+                eprintln!("  [DRY RUN] Prompt written to: {prompt_path}");
+                eprintln!("  Prompt length: {} chars\n", prompt.len());
+
+                // In dry-run mode on the first iteration, print the full prompt
+                if i == 0 {
+                    println!("{prompt}");
+                }
+
+                // Still record an iteration so history advances
+                let version = history.next_version();
+                let mut metrics = HashMap::new();
+                if let Some(ms) = current_benchmark {
+                    metrics.insert("time_ms".to_string(), ms);
+                }
+
+                // Use grid-search fallback for params
+                let mut params: HashMap<String, serde_json::Value> = HashMap::new();
+                for surface in &surfaces {
+                    for hole in &surface.holes {
+                        let value = generate_hole_value(hole, i);
+                        let json_value = value_to_json(&value);
+                        params.insert(hole.name.clone(), json_value);
+                    }
+                }
+
+                history.add_record(OptRecord {
+                    version: version.clone(),
+                    params,
+                    metrics,
+                    agent: Some(format!("{agent}-grid-search")),
+                    target: Some(target.to_string()),
+                    timestamp: get_timestamp(),
+                });
+
+                eprintln!("  Recorded grid-search fallback as {version}\n");
+            }
+
+            LlmResult::Error(err) => {
+                eprintln!("  LLM error: {err}");
+                eprintln!("  Falling back to grid-search for this iteration.\n");
+
+                // Grid-search fallback
+                let version = history.next_version();
+                let mut params: HashMap<String, serde_json::Value> = HashMap::new();
+                let mut proposal = axiom_optimize::Proposal::new();
+
+                for surface in &surfaces {
+                    for hole in &surface.holes {
+                        let value = generate_hole_value(hole, i);
+                        let json_value = value_to_json(&value);
+                        params.insert(hole.name.clone(), json_value);
+                        proposal.set(hole.name.clone(), value);
+                    }
+                }
+
+                let mut metrics: HashMap<String, f64> = HashMap::new();
+                if let Some(ms) = current_benchmark {
+                    metrics.insert("time_ms".to_string(), ms);
+                }
+
+                history.add_record(OptRecord {
+                    version: version.clone(),
+                    params,
+                    metrics,
+                    agent: Some(format!("{agent}-grid-search")),
+                    target: Some(target.to_string()),
+                    timestamp: get_timestamp(),
+                });
+
+                eprintln!("  Recorded grid-search fallback as {version}\n");
+            }
+        }
+    }
+
+    // 8. Print summary
+    eprintln!("=== Optimization Summary ===");
     eprintln!("Total records: {}", history.records.len());
 
     if let Some(best) = history.best_by_metric("time_ms") {
         eprintln!(
-            "Best result: {} (time_ms={:.3})",
+            "Best result: {} (time_ms={:.3}ms)",
             best.version,
             best.metrics.get("time_ms").copied().unwrap_or(f64::NAN)
         );
-        eprintln!("  Parameters:");
-        for (name, value) in &best.params {
-            eprintln!("    ?{name} = {value}");
+        if !best.params.is_empty() {
+            eprintln!("  Parameters:");
+            for (name, value) in &best.params {
+                eprintln!("    ?{name} = {value}");
+            }
         }
     }
 
-    // 6. Save history
+    if let Some(baseline) = baseline_ms {
+        if let Some(best) = history.best_by_metric("time_ms") {
+            let best_ms = best.metrics.get("time_ms").copied().unwrap_or(baseline);
+            let improvement = ((baseline - best_ms) / baseline) * 100.0;
+            if improvement > 0.0 {
+                eprintln!("  Improvement: {:.1}% faster than baseline", improvement);
+            }
+        }
+    }
+
+    // 9. Save history
     let json = history
         .to_json()
         .map_err(|e| miette::miette!("Failed to serialize history: {e}"))?;
@@ -520,7 +724,7 @@ fn run_optimize(
         .map_err(|e| miette::miette!("Failed to write history to {}: {}", history_path, e))?;
 
     eprintln!("\nHistory saved to {history_path}");
-    // Print the JSON to stdout so it can be piped / captured
+    // Print JSON to stdout for piping
     println!("{json}");
 
     Ok(())

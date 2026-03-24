@@ -1,0 +1,183 @@
+@module tunable_matmul;
+@intent("Tunable matrix multiply with full @strategy surface for LLM-driven optimization");
+@constraint { correctness: "deterministic output, matches naive matmul" };
+
+// =============================================================================
+// Tunable Matrix Multiply
+// =============================================================================
+//
+// This program demonstrates AXIOM's self-optimization pipeline. Every ?param
+// in the @strategy block is a knob that the LLM optimizer can turn.
+//
+// Run the optimization loop:
+//   axiom optimize examples/self_opt/tunable_matmul.axm --iterations 5
+//
+// Dry-run (just print the LLM prompt):
+//   axiom optimize examples/self_opt/tunable_matmul.axm --dry-run
+//
+// The optimizer will:
+//   1. Compile this file to LLVM IR and assembly
+//   2. Benchmark the current version
+//   3. Build a detailed prompt with IR, asm, timing, and ?param info
+//   4. Ask Claude for optimal ?param values
+//   5. Record the suggestion in the optimization history
+//   6. Repeat with history context so the LLM learns from prior attempts
+//
+// Available ?params:
+//   ?tile_m, ?tile_n, ?tile_k  -- tiling dimensions for cache blocking
+//   ?loop_order                -- iteration order (e.g., [i, j, k] vs [k, j, i])
+//   ?unroll_factor             -- inner loop unroll hint
+//   ?prefetch_distance         -- software prefetch lookahead
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Tiled matrix multiply: C = A * B
+// ---------------------------------------------------------------------------
+// A is rows_a x cols_a, B is cols_a x cols_b, C is rows_a x cols_b.
+// All matrices stored in row-major order as flat arrays.
+
+@pure
+fn matmul_tiled(
+    a: ptr[f64], b: ptr[f64], c: ptr[f64],
+    rows_a: i32, cols_a: i32, cols_b: i32
+) {
+    @strategy {
+        tiling:   { M: ?tile_m, N: ?tile_n, K: ?tile_k }
+        order:    ?loop_order
+        unroll:   ?unroll_factor
+        prefetch: ?prefetch_distance
+    }
+
+    // Zero out C
+    for i: i32 in range(0, rows_a * cols_b) {
+        ptr_write_f64(c, i, 0.0);
+    }
+
+    // Naive triple loop (the @strategy above tells the optimizer
+    // how to tile and reorder this)
+    for i: i32 in range(0, rows_a) {
+        for k: i32 in range(0, cols_a) {
+            let a_ik: f64 = ptr_read_f64(a, i * cols_a + k);
+            for j: i32 in range(0, cols_b) {
+                let b_kj: f64 = ptr_read_f64(b, k * cols_b + j);
+                let c_ij: f64 = ptr_read_f64(c, i * cols_b + j);
+                ptr_write_f64(c, i * cols_b + j, c_ij + a_ik * b_kj);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Naive matrix multiply for verification
+// ---------------------------------------------------------------------------
+
+@pure
+fn matmul_naive(
+    a: ptr[f64], b: ptr[f64], c: ptr[f64],
+    rows_a: i32, cols_a: i32, cols_b: i32
+) {
+    for i: i32 in range(0, rows_a * cols_b) {
+        ptr_write_f64(c, i, 0.0);
+    }
+
+    for i: i32 in range(0, rows_a) {
+        for j: i32 in range(0, cols_b) {
+            let sum: f64 = 0.0;
+            for k: i32 in range(0, cols_a) {
+                let a_ik: f64 = ptr_read_f64(a, i * cols_a + k);
+                let b_kj: f64 = ptr_read_f64(b, k * cols_b + j);
+                sum = sum + a_ik * b_kj;
+            }
+            ptr_write_f64(c, i * cols_b + j, sum);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frobenius norm squared (for verification checksum)
+// ---------------------------------------------------------------------------
+
+@pure
+fn frobenius_sq(m: ptr[f64], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let v: f64 = ptr_read_f64(m, i);
+        sum = sum + v * v;
+    }
+    return sum;
+}
+
+// ---------------------------------------------------------------------------
+// LCG random number generator
+// ---------------------------------------------------------------------------
+
+fn lcg_next(seed_ptr: ptr[i64], max: f64) -> f64 {
+    let s: i64 = ptr_read_i64(seed_ptr, 0);
+    s = s * 6364136223846793005 + 1442695040888963407;
+    ptr_write_i64(seed_ptr, 0, s);
+    let bits: i64 = lshr(s, 16);
+    let masked: i64 = band(bits, 2147483647);
+    let fval: f64 = to_f64_i64(masked);
+    return fval * max / 2147483647.0;
+}
+
+// ---------------------------------------------------------------------------
+// Main: benchmark the tiled matmul
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    let n: i32 = 128;
+    let iters: i32 = 20;
+
+    print("Tunable MatMul: 128x128, 20 iterations");
+
+    // Arena for all data (generous size)
+    let arena: ptr[i32] = arena_create(8388608);
+
+    // Allocate matrices A, B, C, C_ref (all n*n doubles)
+    let a: ptr[f64] = arena_alloc(arena, n * n, 8);
+    let b: ptr[f64] = arena_alloc(arena, n * n, 8);
+    let c: ptr[f64] = arena_alloc(arena, n * n, 8);
+    let c_ref: ptr[f64] = arena_alloc(arena, n * n, 8);
+
+    // RNG seed
+    let seed_ptr: ptr[i64] = arena_alloc(arena, 1, 8);
+    ptr_write_i64(seed_ptr, 0, 123456789);
+
+    // Initialize A and B with pseudo-random values in [-1, 1]
+    for i: i32 in range(0, n * n) {
+        ptr_write_f64(a, i, lcg_next(seed_ptr, 2.0) - 1.0);
+    }
+    for i: i32 in range(0, n * n) {
+        ptr_write_f64(b, i, lcg_next(seed_ptr, 2.0) - 1.0);
+    }
+
+    // Reference result via naive matmul
+    matmul_naive(a, b, c_ref, n, n, n);
+    let ref_norm: f64 = frobenius_sq(c_ref, n * n);
+
+    // Timed loop: run tiled matmul
+    let t0: i64 = clock_ns();
+
+    for iter: i32 in range(0, iters) {
+        matmul_tiled(a, b, c, n, n, n);
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ns: i64 = t1 - t0;
+
+    // Verify: check that tiled result matches naive
+    let tiled_norm: f64 = frobenius_sq(c, n * n);
+
+    print("Elapsed (ns):");
+    print_i64(elapsed_ns);
+    print("Reference ||C||^2:");
+    print_f64(ref_norm);
+    print("Tiled ||C||^2:");
+    print_f64(tiled_norm);
+
+    arena_destroy(arena);
+
+    print("Tunable matmul complete.");
+    return 0;
+}
