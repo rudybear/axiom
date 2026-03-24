@@ -271,4 +271,4 @@ Each milestone goes through all 5 agents with git branch isolation and retry loo
 
 ## License
 
-MIT OR Apache-2.0
+MIT
