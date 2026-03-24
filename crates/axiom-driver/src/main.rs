@@ -68,6 +68,16 @@ enum Commands {
         #[arg(long, default_value = "1")]
         iterations: usize,
     },
+
+    /// Profile an AXIOM program and suggest optimizations
+    Profile {
+        /// Input .axm file
+        input: String,
+
+        /// Number of profiling iterations
+        #[arg(long, default_value = "10")]
+        iterations: usize,
+    },
 }
 
 fn main() -> miette::Result<()> {
@@ -138,6 +148,8 @@ fn main() -> miette::Result<()> {
             agent,
             iterations,
         } => run_optimize(&input, &target, &agent, iterations),
+
+        Commands::Profile { input, iterations } => run_profile(&input, iterations),
 
         Commands::Compile { input, output, emit } => {
             let source = std::fs::read_to_string(&input)
@@ -258,6 +270,104 @@ fn main() -> miette::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Profile an AXIOM program: compile, run multiple times, collect timing data,
+/// extract optimization surfaces, and suggest tuning parameters.
+fn run_profile(input: &str, iterations: usize) -> miette::Result<()> {
+    // 1. Read and compile source
+    let source = std::fs::read_to_string(input)
+        .map_err(|e| miette::miette!("Failed to read {}: {}", input, e))?;
+
+    eprintln!("Profiling {input} ({iterations} iteration(s))...\n");
+
+    // 2. Verify compilation succeeds
+    let result = axiom_parser::parse(&source);
+    if result.has_errors() {
+        eprintln!("--- Parse Errors ---");
+        for err in &result.errors {
+            eprintln!("  {err}");
+        }
+        return Err(miette::miette!(
+            "parsing failed with {} error(s)",
+            result.errors.len()
+        ));
+    }
+    let hir_module = axiom_hir::lower(&result.module).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("HIR lowering failed with {} error(s)", errors.len())
+    })?;
+    let _llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("codegen failed with {} error(s)", errors.len())
+    })?;
+
+    eprintln!("  Compilation: OK\n");
+
+    // 3. Benchmark: run the program multiple times
+    let bench_config = axiom_optimize::benchmark::BenchmarkConfig {
+        warmup_runs: 2,
+        measurement_runs: iterations,
+        ..Default::default()
+    };
+
+    eprintln!("  Timing ({iterations} runs):");
+    match axiom_optimize::benchmark::benchmark_source(&source, &bench_config) {
+        Ok(bench_result) => {
+            eprintln!("    min:    {:.3} ms", bench_result.min_ms);
+            eprintln!("    max:    {:.3} ms", bench_result.max_ms);
+            eprintln!("    mean:   {:.3} ms", bench_result.mean_ms);
+            eprintln!("    median: {:.3} ms", bench_result.median_ms);
+            eprintln!("    stddev: {:.3} ms", bench_result.stddev_ms);
+            println!("{bench_result}");
+        }
+        Err(e) => {
+            eprintln!("    Benchmark failed: {e}");
+            eprintln!("    (Timing data unavailable -- compilation-only profile)");
+        }
+    }
+
+    // 4. Extract optimization surfaces
+    eprintln!("\n  Optimization surfaces:");
+    match axiom_optimize::extract_surfaces(&source) {
+        Ok(surfaces) if surfaces.is_empty() => {
+            eprintln!("    (none found -- add @strategy blocks to enable tuning)");
+        }
+        Ok(surfaces) => {
+            for s in &surfaces {
+                eprintln!(
+                    "    function `{}`: {} hole(s)",
+                    s.function_name,
+                    s.holes.len()
+                );
+                for h in &s.holes {
+                    let range_str = match h.range {
+                        Some((lo, hi)) => format!(" [{lo}..{hi}]"),
+                        None => String::new(),
+                    };
+                    eprintln!("      ?{}: {}{}", h.name, h.hole_type, range_str);
+                }
+            }
+        }
+        Err(errs) => {
+            eprintln!(
+                "    (extraction failed: {})",
+                errs.join("; ")
+            );
+        }
+    }
+
+    // 5. Suggestions
+    eprintln!("\n  Suggestions:");
+    eprintln!("    - Run `axiom optimize {input}` to auto-tune ?params");
+    eprintln!("    - Add @strategy blocks to expose tunable parameters");
+    eprintln!("    - Use @pure on hot functions to enable LLVM optimizations");
+
+    Ok(())
 }
 
 /// Run the optimization protocol: extract surfaces, generate proposals,

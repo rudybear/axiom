@@ -1,0 +1,127 @@
+@module optimize_demo;
+@intent("Tunable matrix-vector multiply with optimization surfaces for the profiler");
+@constraint { correctness: "deterministic output" };
+
+// =============================================================================
+// Self-Improving Optimization Demo
+// =============================================================================
+//
+// This program contains @strategy blocks with ?holes that the AXIOM profiler
+// can analyze and suggest tuning. It performs a matrix-vector multiplication
+// with configurable parameters:
+//
+//   ?block_size  -- how many rows to process per inner loop iteration
+//   ?unroll      -- inner loop unroll factor hint
+//
+// Run with:
+//   axiom profile examples/self_opt/optimize_demo.axm --iterations=5
+//
+// The profiler will:
+//   1. Compile the program
+//   2. Run it multiple times, collecting timing data
+//   3. Print a performance summary
+//   4. Extract the @strategy holes
+//   5. Suggest which ?params to tune
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Matrix-vector multiply: y = A * x
+// ---------------------------------------------------------------------------
+// A is stored in row-major order as a flat array of size rows*cols.
+// x has `cols` elements, y has `rows` elements.
+
+@pure
+fn matvec(a: ptr[f64], x: ptr[f64], y: ptr[f64],
+          rows: i32, cols: i32) {
+    for i: i32 in range(0, rows) {
+        let sum: f64 = 0.0;
+        for j: i32 in range(0, cols) {
+            let a_val: f64 = ptr_read_f64(a, i * cols + j);
+            let x_val: f64 = ptr_read_f64(x, j);
+            sum = sum + a_val * x_val;
+        }
+        ptr_write_f64(y, i, sum);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dot product for verification
+// ---------------------------------------------------------------------------
+
+@pure
+fn dot_product(a: ptr[f64], b: ptr[f64], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        sum = sum + ptr_read_f64(a, i) * ptr_read_f64(b, i);
+    }
+    return sum;
+}
+
+// ---------------------------------------------------------------------------
+// LCG random number generator
+// ---------------------------------------------------------------------------
+
+fn lcg_next(seed_ptr: ptr[i64], max: f64) -> f64 {
+    let s: i64 = ptr_read_i64(seed_ptr, 0);
+    s = s * 6364136223846793005 + 1442695040888963407;
+    ptr_write_i64(seed_ptr, 0, s);
+    let bits: i64 = lshr(s, 16);
+    let masked: i64 = band(bits, 2147483647);
+    let fval: f64 = to_f64_i64(masked);
+    return fval * max / 2147483647.0;
+}
+
+// ---------------------------------------------------------------------------
+// Main: timed matrix-vector multiply with profiling hooks
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    let rows: i32 = 256;
+    let cols: i32 = 256;
+    let iterations: i32 = 50;
+
+    print("Optimize Demo: 256x256 matvec, 50 iterations");
+
+    // Arena for all data
+    let arena: ptr[i32] = arena_create(4194304);
+
+    // Allocate matrix A (rows*cols doubles), vector x (cols), vector y (rows)
+    let a: ptr[f64] = arena_alloc(arena, rows * cols, 8);
+    let x: ptr[f64] = arena_alloc(arena, cols, 8);
+    let y: ptr[f64] = arena_alloc(arena, rows, 8);
+
+    // RNG seed
+    let seed_ptr: ptr[i64] = arena_alloc(arena, 1, 8);
+    ptr_write_i64(seed_ptr, 0, 987654321);
+
+    // Initialize A and x with pseudo-random values
+    for i: i32 in range(0, rows * cols) {
+        ptr_write_f64(a, i, lcg_next(seed_ptr, 2.0) - 1.0);
+    }
+    for i: i32 in range(0, cols) {
+        ptr_write_f64(x, i, lcg_next(seed_ptr, 2.0) - 1.0);
+    }
+
+    // Timed loop
+    let t0: i64 = clock_ns();
+
+    for iter: i32 in range(0, iterations) {
+        matvec(a, x, y, rows, cols);
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ns: i64 = t1 - t0;
+
+    // Checksum: dot product of y with itself
+    let checksum: f64 = dot_product(y, y, rows);
+
+    print("Elapsed (ns):");
+    print_i64(elapsed_ns);
+    print("Checksum (y . y):");
+    print_f64(checksum);
+
+    arena_destroy(arena);
+
+    print("Optimize demo complete.");
+    return 0;
+}

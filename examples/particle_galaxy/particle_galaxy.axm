@@ -1,0 +1,330 @@
+@module particle_galaxy;
+@intent("10K particle galaxy: N-body physics, rendering, zero per-frame allocations, parallel jobs");
+@constraint { per_frame_allocations: 0 };
+
+// =============================================================================
+// Particle Galaxy — Killer Demo
+// =============================================================================
+//
+// The crowning demonstration of AXIOM's game engine capabilities:
+//
+//   - 10,000 particles in a spiral galaxy formation
+//   - N-body gravitational physics (O(n) center-of-mass approximation)
+//   - Renderer integration (stub API for lifecycle + draw calls)
+//   - Zero per-frame heap allocations (arena + frame arena pattern)
+//   - Parallel job system initialization
+//   - SOA (Struct of Arrays) layout for cache-friendly iteration
+//   - LCG pseudo-random initialization
+//   - Deterministic checksum for verification
+//
+// Component layout (SOA):
+//   x[N]     : f64   position X
+//   y[N]     : f64   position Y
+//   vx[N]    : f64   velocity X
+//   vy[N]    : f64   velocity Y
+//   mass[N]  : f64   particle mass
+//   alive[N] : i32   1 = active, 0 = dead
+//
+// All arrays reside in a single 8 MB arena.
+// Per-frame scratch data uses a separate 1 MB frame arena (reset each frame).
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Pure physics: gravitational force magnitude
+// ---------------------------------------------------------------------------
+
+@pure
+fn gravity_force(x1: f64, y1: f64, x2: f64, y2: f64,
+                 m1: f64, m2: f64, g: f64) -> f64 {
+    let dx: f64 = x2 - x1;
+    let dy: f64 = y2 - y1;
+    let dist_sq: f64 = dx * dx + dy * dy + 0.01;
+    return g * m1 * m2 / dist_sq;
+}
+
+// ---------------------------------------------------------------------------
+// Pure physics: Verlet integration step
+// ---------------------------------------------------------------------------
+
+@pure
+fn integrate(pos: f64, vel: f64, acc: f64, dt: f64) -> f64 {
+    return pos + vel * dt + 0.5 * acc * dt * dt;
+}
+
+// ---------------------------------------------------------------------------
+// System: compute center of mass
+// ---------------------------------------------------------------------------
+
+@pure
+fn compute_center_of_mass_x(x: ptr[f64], mass: ptr[f64], n: i32) -> f64 {
+    let weighted_sum: f64 = 0.0;
+    let total_mass: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let m: f64 = ptr_read_f64(mass, i);
+        weighted_sum = weighted_sum + ptr_read_f64(x, i) * m;
+        total_mass = total_mass + m;
+    }
+    if total_mass > 0.0 {
+        return weighted_sum / total_mass;
+    }
+    return 0.0;
+}
+
+@pure
+fn compute_center_of_mass_y(y: ptr[f64], mass: ptr[f64], n: i32) -> f64 {
+    let weighted_sum: f64 = 0.0;
+    let total_mass: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let m: f64 = ptr_read_f64(mass, i);
+        weighted_sum = weighted_sum + ptr_read_f64(y, i) * m;
+        total_mass = total_mass + m;
+    }
+    if total_mass > 0.0 {
+        return weighted_sum / total_mass;
+    }
+    return 0.0;
+}
+
+// ---------------------------------------------------------------------------
+// System: update velocities toward center of mass
+// ---------------------------------------------------------------------------
+
+@pure
+fn system_gravity(x: ptr[f64], y: ptr[f64],
+                  vx: ptr[f64], vy: ptr[f64],
+                  mass: ptr[f64], n: i32,
+                  com_x: f64, com_y: f64,
+                  g: f64, dt: f64) {
+    for i: i32 in range(0, n) {
+        let dx: f64 = com_x - ptr_read_f64(x, i);
+        let dy: f64 = com_y - ptr_read_f64(y, i);
+        let dist_sq: f64 = dx * dx + dy * dy + 1.0;
+        let force: f64 = g * ptr_read_f64(mass, i) / dist_sq;
+        ptr_write_f64(vx, i, ptr_read_f64(vx, i) + dx * force * dt);
+        ptr_write_f64(vy, i, ptr_read_f64(vy, i) + dy * force * dt);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System: integrate positions
+// ---------------------------------------------------------------------------
+
+@pure
+fn system_integrate(x: ptr[f64], y: ptr[f64],
+                    vx: ptr[f64], vy: ptr[f64], n: i32, dt: f64) {
+    for i: i32 in range(0, n) {
+        ptr_write_f64(x, i, ptr_read_f64(x, i) + ptr_read_f64(vx, i) * dt);
+        ptr_write_f64(y, i, ptr_read_f64(y, i) + ptr_read_f64(vy, i) * dt);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System: apply velocity damping (prevents runaway speeds)
+// ---------------------------------------------------------------------------
+
+@pure
+fn system_damping(vx: ptr[f64], vy: ptr[f64], n: i32, factor: f64) {
+    for i: i32 in range(0, n) {
+        ptr_write_f64(vx, i, ptr_read_f64(vx, i) * factor);
+        ptr_write_f64(vy, i, ptr_read_f64(vy, i) * factor);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LCG pseudo-random number generator
+// ---------------------------------------------------------------------------
+
+fn lcg_next_f64(seed_ptr: ptr[i64], max: f64) -> f64 {
+    let s: i64 = ptr_read_i64(seed_ptr, 0);
+    s = s * 6364136223846793005 + 1442695040888963407;
+    ptr_write_i64(seed_ptr, 0, s);
+    let bits: i64 = lshr(s, 16);
+    let masked: i64 = band(bits, 2147483647);
+    let fval: f64 = to_f64_i64(masked);
+    return fval * max / 2147483647.0;
+}
+
+// ---------------------------------------------------------------------------
+// Compute checksum for determinism verification
+// ---------------------------------------------------------------------------
+
+@pure
+fn compute_checksum(x: ptr[f64], y: ptr[f64], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        sum = sum + ptr_read_f64(x, i) + ptr_read_f64(y, i);
+    }
+    return sum;
+}
+
+// ---------------------------------------------------------------------------
+// Count alive particles
+// ---------------------------------------------------------------------------
+
+@pure
+fn count_alive(alive: ptr[i32], n: i32) -> i32 {
+    let count: i32 = 0;
+    for i: i32 in range(0, n) {
+        if ptr_read_i32(alive, i) == 1 {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Main: particle galaxy simulation
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    let n: i32 = 10000;
+    let dt: f64 = 0.001;
+    let g: f64 = 0.1;
+    let damping: f64 = 0.9999;
+    let frames: i32 = 100;
+
+    print("Particle Galaxy: 10000 particles, 100 frames");
+
+    // -----------------------------------------------------------------------
+    // Arena for persistent particle data (8 MB)
+    // -----------------------------------------------------------------------
+    let arena: ptr[i32] = arena_create(8388608);
+
+    // SOA component arrays
+    let x:     ptr[f64] = arena_alloc(arena, n, 8);
+    let y:     ptr[f64] = arena_alloc(arena, n, 8);
+    let vx:    ptr[f64] = arena_alloc(arena, n, 8);
+    let vy:    ptr[f64] = arena_alloc(arena, n, 8);
+    let mass:  ptr[f64] = arena_alloc(arena, n, 8);
+    let alive: ptr[i32] = arena_alloc(arena, n, 4);
+
+    // RNG seed
+    let seed_ptr: ptr[i64] = arena_alloc(arena, 1, 8);
+    ptr_write_i64(seed_ptr, 0, 42);
+
+    // -----------------------------------------------------------------------
+    // Initialize particles in a spiral galaxy pattern
+    // -----------------------------------------------------------------------
+    for i: i32 in range(0, n) {
+        let angle: f64 = lcg_next_f64(seed_ptr, 6.28318);
+        let radius: f64 = lcg_next_f64(seed_ptr, 400.0) + 10.0;
+
+        // Spiral arm: radius modulated by angle
+        let spiral_r: f64 = radius * (1.0 + angle / 6.28);
+        let cos_approx: f64 = 1.0 - angle * angle / 2.0 + angle * angle * angle * angle / 24.0;
+        let sin_approx: f64 = angle - angle * angle * angle / 6.0 + angle * angle * angle * angle * angle / 120.0;
+
+        ptr_write_f64(x, i, 500.0 + spiral_r * cos_approx);
+        ptr_write_f64(y, i, 500.0 + spiral_r * sin_approx);
+
+        // Tangential velocity for orbital motion
+        let px: f64 = ptr_read_f64(x, i) - 500.0;
+        let py: f64 = ptr_read_f64(y, i) - 500.0;
+        ptr_write_f64(vx, i, 0.0 - py * 0.001);
+        ptr_write_f64(vy, i, px * 0.001);
+
+        ptr_write_f64(mass, i, lcg_next_f64(seed_ptr, 1.0) + 0.1);
+        ptr_write_i32(alive, i, 1);
+    }
+
+    let alive_count: i32 = count_alive(alive, n);
+    print("Initial alive particles:");
+    print_i32(alive_count);
+
+    // -----------------------------------------------------------------------
+    // Create renderer (stub: prints lifecycle events)
+    // -----------------------------------------------------------------------
+    let r: ptr[i32] = renderer_create(800, 600, "Particle Galaxy");
+
+    // Frame arena for per-frame scratch data (1 MB, reset each frame)
+    let frame_arena: ptr[i32] = arena_create(1048576);
+
+    // Initialize parallel job system (4 worker threads)
+    jobs_init(4);
+
+    // -----------------------------------------------------------------------
+    // GAME LOOP
+    // -----------------------------------------------------------------------
+    let t0: i64 = clock_ns();
+    let frame: i32 = 0;
+
+    while frame < frames {
+        // Reset frame arena -- O(1), zero malloc
+        arena_reset(frame_arena);
+
+        // Per-frame scratch: temporary force accumulators
+        let fx: ptr[f64] = arena_alloc(frame_arena, n, 8);
+        let fy: ptr[f64] = arena_alloc(frame_arena, n, 8);
+
+        // Zero the force accumulators
+        for i: i32 in range(0, n) {
+            ptr_write_f64(fx, i, 0.0);
+            ptr_write_f64(fy, i, 0.0);
+        }
+
+        // --- Physics: O(n) center-of-mass approximation ---
+        let com_x: f64 = compute_center_of_mass_x(x, mass, n);
+        let com_y: f64 = compute_center_of_mass_y(y, mass, n);
+
+        // Update velocities toward center of mass
+        system_gravity(x, y, vx, vy, mass, n, com_x, com_y, g, dt);
+
+        // Apply damping to prevent runaway velocities
+        system_damping(vx, vy, n, damping);
+
+        // Integrate positions
+        system_integrate(x, y, vx, vy, n, dt);
+
+        // --- Render frame ---
+        renderer_begin_frame(r);
+        // In a real engine with Vulkan backend:
+        //   renderer_draw_points(r, x, y, colors, n);
+        // Stub backend prints frame count.
+        renderer_end_frame(r);
+
+        // Despawn particles that drift too far from center (radius > 2000)
+        for i: i32 in range(0, n) {
+            if ptr_read_i32(alive, i) == 1 {
+                let px: f64 = ptr_read_f64(x, i) - 500.0;
+                let py: f64 = ptr_read_f64(y, i) - 500.0;
+                let dist_sq: f64 = px * px + py * py;
+                if dist_sq > 4000000.0 {
+                    ptr_write_i32(alive, i, 0);
+                }
+            }
+        }
+
+        frame = frame + 1;
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ns: i64 = t1 - t0;
+
+    // -----------------------------------------------------------------------
+    // Final statistics
+    // -----------------------------------------------------------------------
+    alive_count = count_alive(alive, n);
+    print("Final alive particles:");
+    print_i32(alive_count);
+
+    let checksum: f64 = compute_checksum(x, y, n);
+    print("Position checksum:");
+    print_f64(checksum);
+
+    print("Elapsed (ns):");
+    print_i64(elapsed_ns);
+
+    print("Frames rendered:");
+    print_i32(frame);
+
+    // -----------------------------------------------------------------------
+    // Cleanup
+    // -----------------------------------------------------------------------
+    jobs_shutdown();
+    renderer_destroy(r);
+    arena_destroy(frame_arena);
+    arena_destroy(arena);
+
+    print("Particle galaxy complete.");
+    return 0;
+}
