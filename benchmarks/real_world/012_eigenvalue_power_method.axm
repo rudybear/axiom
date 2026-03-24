@@ -2,7 +2,7 @@
 @constraint { optimize_for: "performance" };
 @intent("Find dominant eigenvalue of 500x500 matrix via power iteration, 200 iterations");
 
-@pure
+@pure @inline(always)
 fn dot_product(a: ptr[f64], b: ptr[f64], n: i32) -> f64 {
     let sum: f64 = 0.0;
     for i: i32 in range(0, n) {
@@ -11,7 +11,7 @@ fn dot_product(a: ptr[f64], b: ptr[f64], n: i32) -> f64 {
     return sum;
 }
 
-@pure
+@pure @inline(always)
 fn vec_norm(a: ptr[f64], n: i32) -> f64 {
     let sum: f64 = 0.0;
     for i: i32 in range(0, n) {
@@ -21,7 +21,7 @@ fn vec_norm(a: ptr[f64], n: i32) -> f64 {
     return sqrt(sum);
 }
 
-@pure
+@pure @inline(always)
 fn matvec_multiply(A: ptr[f64], v: ptr[f64], w: ptr[f64], n: i32) -> f64 {
     for i: i32 in range(0, n) {
         let sum: f64 = 0.0;
@@ -33,7 +33,7 @@ fn matvec_multiply(A: ptr[f64], v: ptr[f64], w: ptr[f64], n: i32) -> f64 {
     return 0.0;
 }
 
-@pure
+@pure @inline(always)
 fn normalize_vec(w: ptr[f64], v: ptr[f64], n: i32, norm: f64) -> f64 {
     if norm > 0.0000001 {
         for i: i32 in range(0, n) {
@@ -55,7 +55,7 @@ fn power_iteration(A: ptr[f64], v: ptr[f64], w: ptr[f64], n: i32, n_iters: i32) 
     return eigenvalue;
 }
 
-@pure
+@pure @inline(always)
 fn compute_residual(A: ptr[f64], v: ptr[f64], n: i32, eigenvalue: f64) -> f64 {
     let residual: f64 = 0.0;
     for i: i32 in range(0, n) {
@@ -69,7 +69,7 @@ fn compute_residual(A: ptr[f64], v: ptr[f64], n: i32, eigenvalue: f64) -> f64 {
     return sqrt(residual);
 }
 
-@pure
+@pure @inline(always)
 fn vec_weighted_sum(v: ptr[f64], n: i32) -> f64 {
     let v_sum: f64 = 0.0;
     for i: i32 in range(0, n) {

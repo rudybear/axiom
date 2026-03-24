@@ -42,7 +42,7 @@ fn clamp01(v: f64) -> f64 {
     return v;
 }
 
-@pure
+@pure @inline(always)
 fn trace_pixel(ray_dx_in: f64, ray_dy_in: f64, ray_dz_in: f64,
                sphere_cx: array[f64, 3], sphere_cy: array[f64, 3], sphere_cz: array[f64, 3],
                sphere_rad: array[f64, 3],
@@ -142,7 +142,7 @@ fn trace_pixel(ray_dx_in: f64, ray_dy_in: f64, ray_dz_in: f64,
     return 0.0;
 }
 
-@pure
+@pure @inline(always)
 fn compute_image_checksum(img_r: ptr[i32], img_g: ptr[i32], img_b: ptr[i32], total: i32) -> i64 {
     let r_sum: i64 = 0;
     let g_sum: i64 = 0;
