@@ -1,0 +1,42 @@
+@module arena_test;
+@intent("Test arena (bump) allocator — batch alloc/free pattern");
+
+fn main() -> i32 {
+    // Create arena with 1MB
+    let arena: ptr[i32] = arena_create(1048576);
+
+    // Allocate 1000 i32s from the arena (bump allocation — ultra fast)
+    let data: ptr[i32] = arena_alloc(arena, 1000, 4);
+
+    // Fill with values
+    for i: i32 in range(0, 1000) {
+        ptr_write_i32(data, i, i * i);
+    }
+
+    // Allocate another 500 i32s (just bumps the pointer)
+    let more: ptr[i32] = arena_alloc(arena, 500, 4);
+    for i: i32 in range(0, 500) {
+        ptr_write_i32(more, i, i * 3);
+    }
+
+    // Sum everything
+    let sum: i64 = 0;
+    for i: i32 in range(0, 1000) {
+        sum = sum + widen(ptr_read_i32(data, i));
+    }
+    for i: i32 in range(0, 500) {
+        sum = sum + widen(ptr_read_i32(more, i));
+    }
+
+    // Reset arena (frees ALL allocations instantly — one operation!)
+    arena_reset(arena);
+
+    // Can reuse the arena
+    let reused: ptr[i32] = arena_alloc(arena, 100, 4);
+    ptr_write_i32(reused, 0, 42);
+    sum = sum + widen(ptr_read_i32(reused, 0));
+
+    arena_destroy(arena);
+    print_i64(sum);  // 332833500 + 374250 + 42 = 333207792
+    return 0;
+}
