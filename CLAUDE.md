@@ -1,4 +1,4 @@
-# AXIOM — AI eXchange Intermediate Optimization Medium
+# AXIOM -- AI eXchange Intermediate Optimization Medium
 
 ## Project Identity
 
@@ -12,7 +12,7 @@ AXIOM is a programming language designed as the canonical transfer format betwee
 
 AXIOM must achieve top-tier scores on language comparison benchmarks. This is a hard requirement.
 
-**Proven results (197 benchmarks):**
+**Proven results (195 benchmarks):**
 - Real-world benchmarks: **AXIOM 31% faster than C** (clang -O2) across 20 programs
 - Binary trees (Benchmarks Game classic): **AXIOM 80% faster** with arena allocator
 - Lattice Boltzmann fluid sim: **85% faster** | SHA-256: **52% faster**
@@ -20,39 +20,42 @@ AXIOM must achieve top-tier scores on language comparison benchmarks. This is a 
 
 **Rules:** No benchmark-specific cheating. General optimizations only. Reproducible results.
 
-**Why AXIOM beats C:** `@pure` → fast-math + `memory(none)` | `noalias` on all pointer params (Fortran advantage) | `nsw` on integer arithmetic | Arena allocator (50-200x faster than malloc) | `@lifetime(scope)` heap-to-stack promotion | LLVM allocator attributes
+**Why AXIOM beats C:** `@pure` -> fast-math + `memory(none)` | `noalias` on all pointer params (Fortran advantage) | `nsw` on integer arithmetic | Arena allocator (50-200x faster than malloc) | `@lifetime(scope)` heap-to-stack promotion | LLVM allocator attributes | `fence release/acquire` for correct concurrency | `readonly`/`writeonly` pointer attributes
 
 ---
 
 ## Architecture Overview
 
 ```
-AXIOM Source (.axm)           ← AI agents read/write here
-       │
-       ▼
-AXIOM Lexer (63 tests)        ← Tokenizer with error recovery
-       │
-       ▼
-AXIOM Parser (38 tests)       ← Recursive descent + Pratt expressions
-       │
-       ▼
-AXIOM HIR (24 tests)          ← Annotation validation, type checking
-       │
-       ▼
-LLVM IR Text Gen (78 tests)   ← Optimized IR with noalias, nsw, fast-math,
-       │                         fastcc, branch hints, allocator attributes
-       ▼
-clang -O2                     ← Native binary (x86_64, AArch64)
+AXIOM Source (.axm)           <- AI agents read/write here
+       |
+       v
+AXIOM Lexer (63 tests)        <- Tokenizer with error recovery
+       |
+       v
+AXIOM Parser (50 tests)       <- Recursive descent + Pratt expressions
+       |
+       v
+AXIOM HIR (25 tests)          <- Annotation validation, type checking
+       |
+       v
+LLVM IR Text Gen (128 tests)  <- Optimized IR with noalias, nsw, fast-math,
+       |                          fastcc, branch hints, allocator attributes,
+       |                          fence release/acquire, readonly/writeonly,
+       |                          SIMD width metadata, DWARF debug info
+       v
+clang -O2                     <- Native binary (x86_64, AArch64)
 ```
 
 ## Technology Stack
 
-- **Compiler language**: Rust (21,846 lines, 7 crates)
-- **Backend**: LLVM IR text generation → clang -O2 (no inkwell dependency)
+- **Compiler language**: Rust (30,085 lines, 7 crates)
+- **Backend**: LLVM IR text generation -> clang -O2 (no inkwell dependency)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
-- **Testing**: 357 tests (unit + integration + doc-tests)
-- **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos)
+- **CI**: GitHub Actions (`.github/workflows/ci.yml`)
+- **Testing**: 450 tests (unit + integration + doc-tests + E2E)
+- **Benchmarks**: 195 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos)
 
 ## Current Feature Set
 
@@ -61,17 +64,20 @@ clang -O2                     ← Native binary (x86_64, AArch64)
 Primitives:    i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f16 bf16 f32 f64 bool
 Arrays:        array[T, N]              // fixed-size, stack-allocated
 Pointers:      ptr[T]                   // heap pointer
+               readonly_ptr[T]          // read-only pointer (enables LLVM readonly attr)
+               writeonly_ptr[T]         // write-only pointer (enables LLVM writeonly attr)
+Slices:        slice[T]                 // fat pointer (ptr + length)
 Tensors:       tensor[T, dims...]       // planned
 Tuples:        (T1, T2, T3)
 Functions:     fn(T1, T2) -> R
-Sum types:     type Name = V1(T) | V2(T)  // parsed, codegen planned
+Sum types:     type Name = V1(T) | V2(T)  // parsed, codegen via builtins (option/result)
 Structs:       struct Name { field: Type } // parsed, codegen planned
 ```
 
 ### Annotations (all implemented)
 ```
-@pure                          // No side effects → fast-math, memory(none), noalias
-@const                         // Compile-time evaluable → speculatable
+@pure                          // No side effects -> fast-math, memory(none), noalias
+@const                         // Compile-time evaluable -> speculatable + const eval
 @inline(always | never | hint) // Inlining control
 @complexity(expr)              // Algorithmic complexity class
 @intent("description")         // Semantic intent
@@ -79,48 +85,139 @@ Structs:       struct Name { field: Type } // parsed, codegen planned
 @strategy { ... }              // Optimization surface with ?holes
 @vectorizable(dims)            // Loop vectorization hints
 @parallel(dims)                // Parallelization hints
+@parallel_for(shared_read: [...], shared_write: [...], reduction(+: var), private: [...])
+                               // Data-parallel for loop with OpenMP-style sharing clauses
 @target(device_class)          // Target hardware
 @layout(row_major | col_major) // Memory layout
 @align(bytes)                  // Alignment
-@lifetime(scope | static)      // Lifetime control → heap-to-stack promotion
+@lifetime(scope | static | manual)  // Lifetime control -> heap-to-stack promotion, escape analysis
 @export                        // C ABI export
 @transfer { ... }              // Inter-agent handoff
 @optimization_log { ... }      // Optimization history
 ```
 
-### Memory Management
+### All Builtin Functions (97 total)
+
+#### I/O (6)
 ```
-// Stack arrays (zero-cost)
-let arr: array[i32, N] = array_zeros[i32, N];
-
-// Heap allocation (malloc/free with LLVM allocator attributes)
-let p: ptr[T] = heap_alloc(count, elem_size);
-ptr_write_i32(p, index, value);
-heap_free(p);
-
-// Arena allocation (50-200x faster than malloc)
-let arena: ptr[i32] = arena_create(size_bytes);
-let data: ptr[i32] = arena_alloc(arena, count, elem_size);
-arena_reset(arena);    // Free ALL allocations instantly
-arena_destroy(arena);
+print(str) print_i32(n) print_i64(n) print_f64(x)
 ```
 
-### Bitwise Operations
+#### Math (11)
+```
+abs(x) abs_f64(x)
+min(a,b) max(a,b) min_f64(a,b) max_f64(a,b)
+sqrt(x) pow(x,y)
+to_f64(i32->f64) to_f64_i64(i64->f64)
+```
+
+#### Conversions (3)
+```
+widen(narrow->wide) narrow(wide->narrow) truncate(float->int)
+```
+
+#### Bitwise (9)
 ```
 band(a,b) bor(a,b) bxor(a,b) bnot(a)
 shl(a,n) shr(a,n) lshr(a,n) rotl(a,n) rotr(a,n)
 ```
 
-### Standard Library Builtins
+#### Memory -- Heap (7)
 ```
-// I/O
-print(str) print_i32(n) print_i64(n) print_f64(x)
+heap_alloc(count, elem_size) heap_alloc_zeroed(count, elem_size)
+heap_free(ptr) heap_realloc(ptr, new_count, elem_size)
+ptr_read_i32(ptr, idx) ptr_read_i64(ptr, idx) ptr_read_f64(ptr, idx)
+ptr_write_i32(ptr, idx, val) ptr_write_i64(ptr, idx, val) ptr_write_f64(ptr, idx, val)
+```
 
-// Math
-abs(x) abs_f64(x) min(a,b) max(a,b) min_f64(a,b) max_f64(a,b) sqrt(x) pow(x,y)
+#### Memory -- Arena (4)
+```
+arena_create(size_bytes) arena_alloc(arena, count, elem_size)
+arena_reset(arena) arena_destroy(arena)
+```
 
-// Conversions
-widen(i32→i64) narrow(i64→i32) truncate(f64→i32) to_f64(i32→f64) to_f64_i64(i64→f64)
+#### File I/O (3)
+```
+file_read(path) file_write(path, data, len) file_size(path)
+```
+
+#### System (3)
+```
+clock_ns() get_argc() get_argv(index)
+```
+
+#### Coroutines (5)
+```
+coro_create(func, arg) coro_resume(handle)
+coro_yield(value) coro_is_done(handle) coro_destroy(handle)
+```
+
+#### Threading (2)
+```
+thread_create(func, arg) thread_join(handle)
+```
+
+#### Atomics (4)
+```
+atomic_load(ptr) atomic_store(ptr, val)
+atomic_add(ptr, delta) atomic_cas(ptr, expected, desired)
+```
+
+#### Mutex (4)
+```
+mutex_create() mutex_lock(mtx) mutex_unlock(mtx) mutex_destroy(mtx)
+```
+
+#### Job System (8)
+```
+jobs_init(num_workers) job_dispatch(func, data, total_items)
+job_wait() jobs_shutdown() num_cores()
+job_dispatch_handle(func, data, total_items)
+job_dispatch_after(func, data, total_items, dependency_handle)
+job_wait_handle(handle)
+```
+
+#### Renderer / Vulkan FFI (12)
+```
+renderer_create(w, h, title) renderer_destroy(r)
+renderer_begin_frame(r) renderer_end_frame(r) renderer_should_close(r)
+renderer_clear(r, r, g, b) renderer_draw_triangles(r, verts, count)
+renderer_draw_points(r, data, count) renderer_get_time(r)
+shader_load(r, path) pipeline_create(r, vert, frag)
+renderer_bind_pipeline(r, pipeline)
+```
+
+#### Option (5)
+```
+option_none() option_some(val) option_is_some(opt) option_is_none(opt) option_unwrap(opt)
+```
+
+#### String (5)
+```
+string_from_literal(str) string_len(s) string_ptr(s) string_eq(s1, s2) string_print(s)
+```
+
+#### Vec / Dynamic Array (9)
+```
+vec_new(elem_size) vec_push_i32(v, val) vec_push_f64(v, val)
+vec_get_i32(v, idx) vec_get_f64(v, idx) vec_set_i32(v, idx, val) vec_set_f64(v, idx, val)
+vec_len(v) vec_free(v)
+```
+
+#### Function Pointers (3)
+```
+fn_ptr(func_name) call_fn_ptr_i32(fp, arg) call_fn_ptr_f64(fp, arg)
+```
+
+#### Result / Error Handling (6)
+```
+result_ok(val) result_err(code) result_is_ok(r) result_is_err(r)
+result_unwrap(r) result_err_code(r)
+```
+
+#### Platform Detection (1)
+```
+cpu_features()
 ```
 
 ### C Interop
@@ -130,7 +227,7 @@ extern fn clock() -> i64;
 ```
 
 ### AI Agent Integration
-- **Optimization protocol**: extract surfaces → propose values → validate → benchmark → record
+- **Optimization protocol**: extract surfaces -> propose values -> validate -> benchmark -> record
 - **AgentSession API**: Rust API for AI agents to load/analyze/optimize AXIOM programs
 - **MCP server**: 5 tools over JSON-RPC stdio (load, surfaces, propose, compile, history)
 - **@transfer blocks**: Structured inter-agent handoff with confidence scores
@@ -148,6 +245,10 @@ extern fn clock() -> i64;
 | `!prof` branch weights | Branch prediction hints | `@pure` base case detection |
 | `!llvm.loop` vectorize hints | Auto-vectorization | `@vectorizable` annotation |
 | `allockind` / `alloc-family` | Dead alloc elimination, heap-to-stack | All allocator calls |
+| `fence release` / `fence acquire` | Correct concurrent memory ordering | `@parallel_for` regions |
+| `readonly` / `writeonly` ptr attrs | Alias analysis, dead store elimination | `readonly_ptr[T]` / `writeonly_ptr[T]` types |
+| SIMD width metadata | Preferred vector width hints | `@vectorizable` + target detection |
+| DWARF debug info | Source-level debugging with gdb/lldb | `@export` functions, debug builds |
 
 ---
 
@@ -155,90 +256,102 @@ extern fn clock() -> i64;
 
 ```
 axiom/
-├── CLAUDE.md                    # This file — project context
-├── README.md                    # GitHub README
-├── BENCHMARKS.md                # Performance results
-├── DESIGN.md                    # Living design document
-├── Cargo.toml                   # Workspace root
+├── .github/
+│   └── workflows/
+│       └── ci.yml                  # GitHub Actions CI (test + build on push)
+├── CLAUDE.md                       # This file -- project context
+├── README.md                       # GitHub README
+├── BENCHMARKS.md                   # Performance results
+├── DESIGN.md                       # Living design document
+├── Cargo.toml                      # Workspace root
 ├── crates/
-│   ├── axiom-lexer/             # Tokenizer (63 tests)
-│   ├── axiom-parser/            # Parser → AST (38 tests)
-│   ├── axiom-hir/               # HIR + lowering (24 tests)
-│   ├── axiom-mir/               # Mid-level IR (stub)
-│   ├── axiom-codegen/           # LLVM IR generation (78 tests)
-│   ├── axiom-optimize/          # Optimization protocol + agent API
-│   └── axiom-driver/            # CLI + MCP server + compilation
-├── spec/                        # Formal language specification
+│   ├── axiom-lexer/                # Tokenizer (63 tests)
+│   ├── axiom-parser/               # Parser -> AST (50 tests)
+│   ├── axiom-hir/                  # HIR + lowering (25 tests)
+│   ├── axiom-mir/                  # Mid-level IR (stub)
+│   ├── axiom-codegen/              # LLVM IR generation (128 tests)
+│   ├── axiom-optimize/             # Optimization protocol + agent API (115 tests)
+│   └── axiom-driver/               # CLI + MCP server + compilation (57 tests)
+│       └── runtime/
+│           └── axiom_rt.c          # C runtime (I/O, coroutines, threads, jobs, renderer)
+├── spec/                           # Formal language specification
 │   ├── grammar.ebnf
 │   ├── types.md
 │   ├── annotations.md
 │   ├── optimization.md
 │   └── transfer.md
 ├── benchmarks/
-│   ├── suite/                   # 115 simple benchmarks
-│   ├── complex/                 # 30 complex benchmarks
-│   ├── real_world/              # 20 real-world benchmarks
-│   ├── memory/                  # 30 memory benchmarks
-│   ├── fib/                     # From drujensen/fib (908 stars)
-│   └── leibniz/                 # From niklas-heer/speed-comparison
-├── examples/                    # Example programs
-│   ├── sort/                    # Bubble, insertion, selection sort
-│   ├── nbody/                   # N-body gravitational simulation
-│   ├── numerical/               # Pi, roots, integration
-│   ├── crypto/                  # Caesar cipher
-│   ├── multi_agent/             # Multi-agent handoff demo
-│   └── self_host/               # AXIOM lexer written in AXIOM
-├── tests/samples/               # 14 test programs
-├── docs/                        # Research documents
-│   ├── AXIOM_Language_Plan.md
+│   ├── suite/                      # 115 simple benchmarks
+│   ├── complex/                    # 30 complex benchmarks
+│   ├── real_world/                 # 20 real-world benchmarks
+│   ├── memory/                     # 30 memory benchmarks
+│   ├── fib/                        # From drujensen/fib (908 stars)
+│   └── leibniz/                    # From niklas-heer/speed-comparison
+├── examples/                       # 20 example programs
+│   ├── sort/                       # Bubble, insertion, selection sort
+│   ├── nbody/                      # N-body gravitational simulation
+│   ├── numerical/                  # Pi, roots, integration
+│   ├── matmul/                     # Matrix multiplication demos
+│   ├── crypto/                     # Caesar cipher
+│   ├── ecs/                        # Entity-Component-System game demo
+│   ├── vulkan/                     # Triangle rendering (stub -> Vulkan planned)
+│   ├── particle_galaxy/            # 10K particle galaxy (windowed renderer)
+│   ├── game_loop/                  # Frame allocator, zero per-frame allocs
+│   ├── self_opt/                   # LLM optimization demos (primes, matmul)
+│   ├── multi_agent/                # Multi-agent handoff demo
+│   └── self_host/                  # AXIOM lexer written in AXIOM
+├── tests/samples/                  # 25 test programs
+├── docs/                           # Research documents
+│   ├── MASTER_TASK_LIST.md         # 47-milestone task tracker (Phases A-H done)
 │   ├── OPTIMIZATION_RESEARCH.md
 │   ├── MEMORY_ALLOCATION_RESEARCH.md
-│   └── GAME_ENGINE_RESEARCH.md
-└── .pipeline/                   # Multi-agent development pipeline
+│   ├── GAME_ENGINE_RESEARCH.md
+│   ├── MULTITHREADING_ANALYSIS.md
+│   ├── LUX_INTEGRATION_RESEARCH.md
+│   └── AXIOM_Language_Plan.md
+└── .pipeline/                      # Multi-agent development pipeline
 ```
 
 ---
 
 ## Completed Phases
 
-### Phase 1 — Foundation ✅
-Lexer → Parser → HIR → LLVM IR Codegen → E2E compilation to native binary.
+### Phase A -- Fix UB + Soundness (MT-1) DONE
+Removed incorrect `@pure`/`noalias`/`nosync` on shared pointers. Added `fence release`/`fence acquire` around parallel regions. Fixed `@pure` semantics so write-through-ptr functions are not marked `memory(none)`.
 
-### Phase 2 — AI Optimization Loop ✅
-Optimization surface extraction, benchmarking harness, `axiom optimize` CLI, matmul demo.
+### Phase B -- Parallel For + Reductions (MT-2, MT-3) DONE
+Implemented `@parallel_for` annotation with OpenMP-style data sharing clauses: `shared_read`, `shared_write`, `reduction(op: var)`, `private`. HIR validation ensures correct placement. Codegen emits correct LLVM IR with thread-local accumulation and final atomic combine for reductions. Identity values per type.
 
-### Phase 3 — Transfer Protocol ✅
-`@transfer` blocks, AgentSession API, multi-agent handoff demo (Writer → Optimizer → GPU Specialist).
+### Phase C -- Constraints + Const Eval + Platform (L1, L3, P1, P4) DONE
+Constraint-driven LLM prompts: `@constraint { optimize_for: "performance" }` is extracted from source and threaded into the LLM optimization prompt, changing reasoning strategy. Recursive `@const` evaluation with full function body interpretation and depth limits. `--target` CLI flag for CPU architecture selection. Constraint-to-clang-flag mapping (`optimize_for: "performance"` -> `-O3`, `"memory"` -> `-Os`, `"size"` -> `-Oz`).
 
-### Phase 4 — Ecosystem ✅
-12 stdlib builtins, C FFI (`extern fn` + `@export`), MCP server (5 tools).
+### Phase D -- Ownership + Dependencies + LLVM Metadata (MT-4, MT-5, MT-6) DONE
+New pointer types: `readonly_ptr[T]` (read-only, enables LLVM `readonly` attribute), `writeonly_ptr[T]` (write-only, enables LLVM `writeonly` attribute). Lexer keywords, parser type expressions, HIR types, and codegen all updated. Job dependency graph: `job_dispatch_handle` returns a handle, `job_dispatch_after` waits for a dependency before executing, `job_wait_handle` blocks until a specific job completes. Atomic counter-based completion (Naughty Dog GDC pattern). `!llvm.access.group` and `!llvm.loop.parallel_accesses` metadata on proven-parallel loops.
 
-### Phase 5 — Self-Improvement ✅
-Self-hosted AXIOM lexer subset written in AXIOM.
+### Phase E -- Sum Types + Strings + Dynamic Arrays + Closures (F1, F2, F3, F5) DONE
+Option type as builtin functions: `option_none`, `option_some`, `option_is_some`, `option_is_none`, `option_unwrap` (tagged union packed into i64). Result type as builtin functions: `result_ok`, `result_err`, `result_is_ok`, `result_is_err`, `result_unwrap`, `result_err_code`. String builtins: `string_from_literal`, `string_len`, `string_ptr`, `string_eq`, `string_print` (fat pointer: ptr + len). Vec builtins: `vec_new`, `vec_push_i32`, `vec_push_f64`, `vec_get_i32`, `vec_get_f64`, `vec_set_i32`, `vec_set_f64`, `vec_len`, `vec_free`. Function pointer builtins: `fn_ptr`, `call_fn_ptr_i32`, `call_fn_ptr_f64`.
 
-### Phase 6 — Memory Management ✅
-Heap allocation (malloc/free), arena allocator (bump allocation), `@lifetime(scope)` heap-to-stack promotion, LLVM allocator attributes, 9 bitwise operators.
+### Phase F -- Hardware Counters + CPUID + SIMD (L2, P2, P3) DONE
+Hardware counter integration: `axiom profile` collects timing data and feeds it to the LLM optimizer. `cpu_features()` builtin queries CPUID at runtime and returns a feature bitmask. SIMD width metadata: `@vectorizable` loops emit preferred vector width hints based on target CPU features.
+
+### Phase G -- Generics + Modules + Errors + Pattern Matching (F4, F6, F7, F8) DONE (partial)
+Generics parsed in grammar. Module system: `import` declarations parsed and lowered to HIR. Result type implemented via builtin functions (tagged union). While-let and if-let patterns parsed.
+
+### Phase H -- CI + Debug Info + Formatter (E1, E2, E3) DONE
+GitHub Actions CI pipeline (`.github/workflows/ci.yml`): runs `cargo test --workspace` on every push. DWARF debug info: source file and line metadata emitted in LLVM IR for debugger support. `axiom fmt` command: parse -> HIR -> pretty-print. `axiom profile` command: compile, benchmark, extract optimization surfaces, suggest tuning.
 
 ---
 
-## Next Phase — Game Engine / Real-World Performance
+## Remaining Phases
 
-**Vision:** Build a perfectly optimized game demo — zero per-frame allocations, parallel job system, efficient CPU/GPU synchronization via Vulkan.
+### Phase I -- Real Vulkan Renderer (R1-R5)
+Replace stub renderer with real Vulkan via Rust `ash` crate. Upload AXIOM arrays to GPU buffers. Load Lux-compiled SPIR-V shaders. Descriptor sets + uniforms. Production renderer with instancing, depth buffer, compute shaders.
 
-### Planned features:
-- **C ABI conformance** — `@repr(C)` struct layout, full calling convention support
-- **Rust interop** — call Rust libraries via C ABI
-- **Vulkan integration** — FFI to Vulkan API, GPU command buffer generation
-- **SPIR-V codegen** — generate GPU shaders from AXIOM (via MLIR SPIR-V dialect)
-- **Job system** — `@job` annotation for parallel task execution, work-stealing scheduler
-- **SIMD intrinsics** — `@simd` annotation for explicit vectorization
-- **SOA layout** — `@layout(soa)` for cache-friendly data-oriented design
-- **I/O primitives** — file reading, memory-mapped I/O
-- **Multithreading** — thread spawn/join, atomics, lock-free structures
-- **Frame allocator** — ring-buffer arena for zero-allocation game loops
-- **Hot reload** — recompile functions while program runs
+### Phase J -- Game Engine (G1-G5)
+Proper archetype-based ECS storage. Input system (keyboard/mouse from Win32/Vulkan surface events). Audio (WAV playback via C runtime). Hot reload (recompile functions while program runs). 10K particle demo with real Vulkan + Lux shaders + parallel jobs.
 
-See `docs/GAME_ENGINE_RESEARCH.md` for the full 2,014-line research document.
+### Phase K -- Self-Improvement (S1-S3)
+Self-hosted AXIOM parser written in AXIOM. Compiler self-optimization using LLM loop on its own hot paths. Source-to-source AI optimizer (LLM rewrites AXIOM source, not just ?params).
 
 ---
 
@@ -257,12 +370,14 @@ Types: `feat`, `fix`, `refactor`, `test`, `spec`, `docs`, `bench`, `chore`, `per
 - **Benchmark tests**: Compare AXIOM vs C performance
 
 ### Multi-Agent Development Pipeline
-The project uses a 5-agent pipeline (`.pipeline/`):
-1. **Architect** — designs specifications
-2. **Coder** — implements from spec
-3. **Reviewer** — adversarial code review
-4. **Tester** — runs tests, verifies criteria
-5. **Benchmark** — measures performance
+The project uses a 7-agent pipeline:
+1. **Architect** -- designs specifications
+2. **Optimistic Design Reviewer** -- reviews spec for completeness
+3. **Pessimistic Design Reviewer** -- reviews spec for risks
+4. **Coder** -- implements from spec
+5. **QA** -- runs tests, verifies criteria
+6. **Optimistic Code Reviewer** -- reviews for quality
+7. **Pessimistic Code Reviewer** -- adversarial review for bugs and UB
 
 ---
 
@@ -281,7 +396,7 @@ The project uses a 5-agent pipeline (`.pipeline/`):
 3. **No operator overloading.** `+` always means numeric add.
 4. **No code without tests.** Every feature ships with tests.
 5. **Annotations are first-class data, not decorations.**
-6. **Parser must recover gracefully** — report ALL errors.
+6. **Parser must recover gracefully** -- report ALL errors.
 7. **No string types for structured data.**
 
 ---
@@ -298,10 +413,16 @@ cargo test --workspace
 # Compile AXIOM program
 axiom compile program.axm -o output
 axiom compile --emit=tokens|ast|hir|llvm-ir program.axm
+axiom compile --target=x86-64-v4 program.axm -o output
 
 # Optimization
 axiom optimize program.axm --iterations 5
+axiom optimize program.axm --dry-run
 axiom bench program.axm --runs 10
+axiom profile program.axm --iterations 10
+
+# Formatting
+axiom fmt program.axm
 
 # MCP server
 axiom mcp

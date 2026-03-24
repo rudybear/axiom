@@ -1,4 +1,4 @@
-# AXIOM Language Design Document v0.1
+# AXIOM Language Design Document v0.2
 
 This is the living design document for AXIOM. It summarizes the current
 implementation state, references the formal specification files, and tracks
@@ -20,16 +20,22 @@ The `spec/` directory contains the formal language specification:
 
 ## Implementation Status
 
-### Lexer (`axiom-lexer`) -- Complete
+### Lexer (`axiom-lexer`) -- Complete (63 tests)
 
 - All token types defined: keywords, identifiers, literals (int with base
   and suffix, float with suffix, string, bool), operators (including wrapping
   `+%`, `-%`, `*%` and saturating `+|`, `-|`), delimiters, annotations (`@name`),
   optimization holes (`?name`), comments, and error recovery tokens.
+- Keywords: `fn`, `let`, `mut`, `return`, `if`, `else`, `for`, `while`, `in`,
+  `struct`, `type`, `module`, `import`, `pub`, `unsafe`, `extern`, `and`, `or`, `not`.
+- Type keywords: `i8`, `i16`, `i32`, `i64`, `i128`, `u8`, `u16`, `u32`, `u64`, `u128`,
+  `f16`, `bf16`, `f32`, `f64`, `bool`, `tensor`, `array`, `slice`, `ptr`,
+  `readonly_ptr`, `writeonly_ptr`.
+- Conversion keywords: `widen`, `narrow`, `truncate`.
 - `Span` tracks byte offsets. `LineIndex` provides line/column lookup.
 - Error recovery: invalid characters produce `TokenKind::Error` and lexing continues.
 
-### Parser (`axiom-parser`) -- Complete
+### Parser (`axiom-parser`) -- Complete (50 tests)
 
 - Hand-written recursive descent parser with Pratt expression parsing.
 - Produces typed `Module` AST with `Spanned<T>` wrappers on all nodes.
@@ -40,15 +46,17 @@ The `spec/` directory contains the formal language specification:
   field access, method calls, `array_zeros[T, N]`, conversion keywords
   (`widen`, `narrow`, `truncate`), parenthesized grouping.
 - Type expressions: all 15 primitive types, `tensor[T, dims]`, `array[T, N]`,
-  `slice[T]`, `ptr[T]`, `fn(T) -> R`, tuples `(T1, T2)`, named types.
-- Annotations: all built-in annotations parsed with specialized syntax; unknown
-  annotations handled as `Custom(name, args)`.
+  `slice[T]`, `ptr[T]`, `readonly_ptr[T]`, `writeonly_ptr[T]`, `fn(T) -> R`,
+  tuples `(T1, T2)`, named types.
+- Annotations: all built-in annotations parsed with specialized syntax including
+  `@parallel_for` with data sharing clauses and `@lifetime` with scope/static/manual.
+  Unknown annotations handled as `Custom(name, args)`.
 - Strategy blocks with `?hole` values, nested sub-maps, and concrete values.
 - Transfer blocks with all five fields.
 - Error recovery: skips to synchronization points (`;`, `}`, statement/item
   keywords) and collects all errors. Max nesting depth of 256.
 
-### HIR (`axiom-hir`) -- Complete
+### HIR (`axiom-hir`) -- Complete (25 tests)
 
 - Every HIR node carries a unique `NodeId` and `Span`.
 - Two-pass lowering: first pass collects struct and type alias names; second
@@ -56,22 +64,49 @@ The `spec/` directory contains the formal language specification:
 - Type validation: primitive names resolved to `PrimitiveType` enum; user-defined
   names checked against known set; unknown types produce errors but lowering
   continues with `HirType::Unknown`.
+- Types: `Primitive`, `UserDefined`, `Tensor`, `Array`, `Slice`, `Ptr`,
+  `ReadonlyPtr`, `WriteonlyPtr`, `Tuple`, `Fn`, `Unknown`.
 - Annotation target validation: each annotation is checked against its set of
   valid targets (Module, Function, Param, StructDef, StructField, Block).
   Invalid placement produces errors but lowering continues.
+- Annotations: `Pure`, `Const`, `Inline`, `Complexity`, `Intent`, `Module`,
+  `Constraint`, `Target`, `Strategy`, `Transfer`, `Vectorizable`, `Parallel`,
+  `Layout`, `Align`, `OptimizationLog`, `Export`, `Lifetime`, `ParallelFor`, `Custom`.
 - Duplicate detection for functions, structs, and type aliases.
 - Re-exports AST types that are identical between AST and HIR (BinOp, UnaryOp,
   InlineHint, LayoutKind, AnnotationValue, StrategyBlock, StrategyValue,
-  TransferBlock, OptLogEntry).
+  TransferBlock, OptLogEntry, ParallelForConfig).
 
-### Codegen (`axiom-codegen`) -- Implemented
+### Codegen (`axiom-codegen`) -- Complete (128 tests)
 
-- HIR-to-LLVM-IR generation via `inkwell` for a core subset: functions with
-  `i32`/`i64`/`f32`/`f64` parameters and returns, arithmetic, if/else, for
-  loops, while loops, return, function calls, extern function declarations.
-- `@export` functions use external linkage and C calling convention.
+- HIR-to-LLVM-IR text generation for the full language subset: functions with
+  all primitive types, arithmetic (with `nsw`), if/else, for loops, while loops,
+  return, function calls, extern function declarations, `@export` functions.
+- 97 builtin functions covering: I/O, math, conversions, bitwise, heap memory,
+  arena allocation, file I/O, system, coroutines, threading, atomics, mutex,
+  job system (with dependency graph), renderer/Vulkan FFI, option, string, vec,
+  function pointers, result/error handling, and CPU feature detection.
+- `@pure` -> `memory(none)` or `memory(argmem: read)`, `readnone`/`readonly`,
+  fast-math flags on float operations.
+- `@const` -> `speculatable` + compile-time evaluation (supports recursive
+  `@const` functions with depth-limited interpretation).
+- `@inline` -> `alwaysinline`/`noinline`/`inlinehint`.
+- `@export` -> external linkage + C calling convention.
+- `@lifetime(scope)` -> stack promotion of heap allocations.
+- `@vectorizable` -> `!llvm.loop` vectorize metadata with SIMD width hints.
+- `@parallel_for` -> correct parallel codegen with fences, atomics, and
+  thread-local accumulation for reductions.
+- `readonly_ptr[T]` -> LLVM `readonly` parameter attribute.
+- `writeonly_ptr[T]` -> LLVM `writeonly` parameter attribute.
+- `noalias` on all pointer parameters (language-level guarantee).
+- `nsw` on all signed integer arithmetic.
+- `fastcc` on all non-exported functions.
+- `!prof` branch weights on `@pure` function base cases.
+- `allockind`/`alloc-family` on all allocator builtins.
+- `fence release`/`fence acquire` around parallel regions.
+- DWARF debug metadata (`!dbg` references) for source-level debugging.
 
-### Optimization Protocol (`axiom-optimize`) -- Complete
+### Optimization Protocol (`axiom-optimize`) -- Complete (115 tests)
 
 - **Surface extraction**: `extract_surfaces` parses source through HIR and
   walks all functions for `@strategy` annotations and `?hole` expressions.
@@ -86,11 +121,24 @@ The `spec/` directory contains the formal language specification:
   AXIOM source.
 - **Agent API**: `AgentSession` wraps the full workflow -- load source, inspect
   surfaces, apply proposals, manage history, export with transfer metadata.
+- **LLM Optimizer**: Builds constraint-driven prompts incorporating source,
+  LLVM IR, assembly, benchmark data, `@constraint` annotations, and optimization
+  history. Supports Claude API (via curl), Claude CLI, and dry-run modes.
 
-### Driver (`axiom-driver`) -- Exists
+### Driver (`axiom-driver`) -- Complete (57 tests)
 
-- CLI frontend. Handles `axiom compile` with `--emit=hir`, `--emit=llvm-ir`,
-  and binary output.
+- CLI frontend with 7 subcommands:
+  - `axiom compile` -- full compilation (.axm -> native binary), with `--emit` for
+    intermediate stages (tokens, ast, hir, llvm-ir) and `--target` for CPU arch.
+  - `axiom lex` -- debug tokenizer output.
+  - `axiom bench` -- benchmark a program (warmup + measurement runs).
+  - `axiom mcp` -- start MCP JSON-RPC server on stdio.
+  - `axiom optimize` -- LLM-driven optimization loop (iterations, dry-run, API key).
+  - `axiom profile` -- compile, benchmark, extract surfaces, suggest tuning.
+  - `axiom fmt` -- format source (parse -> HIR -> pretty-print).
+- C runtime (`axiom_rt.c`): I/O, nanosecond clock, coroutines (OS fibers/ucontext),
+  threads, atomics, mutexes, thread-pool job system with dependency graph,
+  renderer stub API.
 
 ## Core Design Decisions
 
@@ -106,7 +154,7 @@ The `spec/` directory contains the formal language specification:
 | `@` prefix for annotations | `@pure`, `@strategy { ... }` | Machine-parseable structured metadata |
 | Hand-written parser | Recursive descent + Pratt | Precise error recovery and span tracking |
 | Rust compiler | Memory safety, LLVM bindings | AI writes Rust well; strong ecosystem |
-| inkwell for initial codegen | Direct LLVM IR generation | Simpler bootstrap than full MLIR |
+| LLVM IR text gen | Direct text output to clang | Simpler bootstrap than inkwell/MLIR |
 
 ## Architecture
 
@@ -114,13 +162,19 @@ The `spec/` directory contains the formal language specification:
 AXIOM Source (.axm)           -- AI agents read/write here
        |
        v
-AXIOM HIR (High-level IR)     -- Semantic intent preserved, optimization holes visible
+AXIOM Lexer (63 tests)       -- Tokenizer with error recovery
        |
        v
-LLVM IR (via inkwell)         -- Standard LLVM optimization passes
+AXIOM Parser (50 tests)      -- Recursive descent + Pratt expressions
        |
        v
-Native binary                 -- x86_64, AArch64, RISC-V
+AXIOM HIR (25 tests)         -- Annotation validation, type checking, NodeIds
+       |
+       v
+LLVM IR Text (128 tests)     -- Optimized IR with noalias, nsw, fast-math,
+       |                        fastcc, fences, readonly/writeonly, DWARF debug
+       v
+clang -O2                    -- Native binary (x86_64, AArch64)
 ```
 
 The planned MLIR integration (via `melior` crate) will add an intermediate
@@ -132,76 +186,52 @@ operations for tensor, GPU, and async patterns.
 AXIOM's core differentiator: the compiler can feed source + LLVM IR + assembly + benchmarks to an LLM, which analyzes the generated code and suggests improvements.
 
 ```
-Source (.axm) → Compile → LLVM IR + Assembly
-                              ↓
+Source (.axm) -> Compile -> LLVM IR + Assembly
+                              |
                     LLM (Claude API / CLI)
                     Analyzes: IR patterns, asm bottlenecks,
                               cache behavior, vectorization misses
-                              ↓
+                    Reads: @constraint { optimize_for: X }
+                              |
                     Suggestion: ?param values, code restructuring,
                                 new @annotations
-                              ↓
-                    Apply → Recompile → Re-benchmark → Record
-                              ↓
+                              |
+                    Apply -> Recompile -> Re-benchmark -> Record
+                              |
                     Iterate (LLM sees history of what worked)
 ```
 
-**Demonstrated:** LLM analyzed `divl` bottleneck in prime-counting assembly, suggested 6k±1 wheel factorization → 37% speedup. Both AXIOM and C produce identical output at identical speed (1.00x).
+**Constraint-driven prompts:** The `@constraint { optimize_for: "performance" }` annotation (and variants like `"memory"`, `"size"`, `"latency"`) is extracted from the source and injected into the LLM prompt. This changes the LLM's reasoning strategy -- "make it fast" vs "make it fit in 64KB" vs "minimize worst-case latency."
+
+**Demonstrated:** LLM analyzed `divl` bottleneck in prime-counting assembly, suggested 6k+-1 wheel factorization -> 37% speedup. Both AXIOM and C produce identical output at identical speed (1.00x).
 
 **Commands:**
-- `axiom optimize program.axm --iterations 5` — full LLM optimization loop
-- `axiom optimize program.axm --dry-run` — preview the prompt
-- `axiom profile program.axm` — compile, benchmark, extract surfaces
+- `axiom optimize program.axm --iterations 5` -- full LLM optimization loop
+- `axiom optimize program.axm --dry-run` -- preview the prompt
+- `axiom profile program.axm` -- compile, benchmark, extract surfaces, suggest tuning
 
-## Platform-Specific Optimization (Planned)
+## Feature Inventory
 
-AXIOM should detect and utilize the host CPU's full feature set:
-
-```axiom
-@target { cpu: "native" }  // Use all available CPU features
-@target { cpu: "x86_64-v4" }  // Require AVX-512
-@constraint { optimize_for: "performance" }  // vs "memory" vs "size"
-```
-
-The compiler would:
-1. Query CPUID / equivalent for available features (AVX2, AVX-512, etc.)
-2. Pass `-march=native` or specific `-mavx512f` flags to clang
-3. The LLM optimizer could also observe "this loop isn't vectorized" and suggest `@vectorizable` or restructuring
-4. `@constraint { optimize_for: "memory" }` would prefer `-Os`, smaller tile sizes, in-place algorithms
-
-## Constraint-Driven Compilation (Planned)
-
-Different optimization goals require different strategies:
-
-```axiom
-@constraint { optimize_for: "performance" }  // -O3, aggressive inlining, large tiles
-@constraint { optimize_for: "memory" }        // -Os, minimal allocations, streaming
-@constraint { optimize_for: "size" }           // -Oz, no loop unrolling
-@constraint { optimize_for: "latency" }        // minimize worst-case, avoid allocations
-@constraint { budget: "frame_time < 16.6ms" }  // game: must hit 60fps
-```
-
-The LLM optimizer would use these constraints to guide its suggestions — not just "make it fast" but "make it fast within 64KB of memory" or "minimize worst-case latency."
-
-## Known Correctness Issues
-
-### Multithreading (CRITICAL — see docs/MULTITHREADING_ANALYSIS.md)
-
-The current job system is **unsound**:
-- `@pure` on functions that write through pointers emits `memory(argmem: read)` → LLVM can delete stores (UB)
-- `noalias` on shared array pointers across threads is incorrect
-- No memory fences, no reduction support, no dependency tracking
-
-Fix plan: OpenMP-style `@parallel_for` with explicit data sharing clauses, then ownership-based slices, then dependency graphs.
+| Category | Count | Details |
+|----------|-------|---------|
+| Primitive types | 15 | i8-i128, u8-u128, f16, bf16, f32, f64, bool |
+| Compound types | 8 | array, ptr, readonly_ptr, writeonly_ptr, slice, tensor, tuple, fn |
+| Annotations | 19 | pure, const, inline, complexity, intent, module, constraint, target, strategy, vectorizable, parallel, parallel_for, layout, align, lifetime, export, transfer, optimization_log, custom |
+| Builtin functions | 97 | I/O, math, conversions, bitwise, memory, arena, file, system, coroutines, threads, atomics, mutex, jobs, renderer, option, string, vec, fn_ptr, result, cpu |
+| CLI commands | 7 | compile, lex, bench, mcp, optimize, profile, fmt |
+| Keywords | 21 | fn, let, mut, return, if, else, for, while, in, struct, type, module, import, pub, unsafe, extern, and, or, not, true, false |
+| Type keywords | 22 | i8-i128 (5), u8-u128 (5), f16, bf16, f32, f64, bool, tensor, array, slice, ptr, readonly_ptr, writeonly_ptr |
+| Operators | 16 | +, -, *, /, %, +%, +\|, -%, -\|, *%, ==, !=, <, >, <=, >= |
 
 ## Open Questions
 
-- **Sum types**: Parsed but not codegen'd. `Pipe` token exists.
-- **Pattern matching**: No `match` statement yet.
+- **Pattern matching**: No `match` statement yet. Option/Result use builtin functions.
 - **Generic dimensions**: Tensor named dimensions (`M`, `N`) have no binding system.
 - **MLIR integration**: MIR layer planned but not implemented.
 - **Unsafe blocks**: `unsafe` keyword reserved but not enforced.
-- **Real Vulkan**: Stub renderer needs replacement with ash-based Rust crate (see `docs/RENDERING_PLAN.md`).
+- **Real Vulkan**: Stub renderer needs replacement with ash-based Rust crate (see `docs/GAME_ENGINE_RESEARCH.md`).
+- **Monomorphization**: Generics parsed but no specialization codegen yet.
+- **Module codegen**: `import` parsed and lowered but separate compilation not implemented.
 
 ## Research Documents
 
@@ -212,6 +242,5 @@ Fix plan: OpenMP-style `@parallel_for` with explicit data sharing clauses, then 
 | `docs/GAME_ENGINE_RESEARCH.md` | 2,014 | ECS, jobs, Vulkan, Lux integration |
 | `docs/MULTITHREADING_ANALYSIS.md` | 1,513 | LLVM memory model, safe parallelism, 3 correct designs |
 | `docs/LUX_INTEGRATION_RESEARCH.md` | 1,055 | Lux shader language convergence |
-| `docs/VULKAN_INTEGRATION_PLAN.md` | 200 | 5-phase Vulkan renderer plan |
-| `docs/PHASE7_GAME_ENGINE_PLAN.md` | 300 | 9-milestone game engine roadmap |
 | `docs/AXIOM_Language_Plan.md` | 400 | Original 5-phase language design |
+| `docs/MASTER_TASK_LIST.md` | 110 | 47-milestone task tracker across 8 tracks |

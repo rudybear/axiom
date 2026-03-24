@@ -1,6 +1,6 @@
 # AXIOM Type System Specification
 
-Version 0.1 -- matches implemented HIR as of 2026-03-23.
+Version 0.2 -- matches implemented HIR as of 2026-03-24.
 Source of truth: `crates/axiom-hir/src/hir.rs` (`HirType`, `PrimitiveType`).
 
 ## Guiding Principles
@@ -90,6 +90,33 @@ Syntax: `ptr[ElementType]`
 
 Raw pointer. Intended for use inside `unsafe` blocks. No bounds checking.
 Element type may be any type.
+
+### Readonly Pointer
+
+Syntax: `readonly_ptr[ElementType]`
+
+A pointer that can only be read from, not written to. In LLVM IR, parameters
+of this type receive the `readonly` attribute, enabling alias analysis
+optimizations. The compiler enforces that no store instructions target a
+`readonly_ptr`. Useful for declaring that a function only observes (does not
+mutate) the pointed-to data, which is critical for correct parallelism.
+
+```axiom
+fn sum_array(data: readonly_ptr[f64], n: i32) -> f64 { ... }
+```
+
+### Writeonly Pointer
+
+Syntax: `writeonly_ptr[ElementType]`
+
+A pointer that can only be written to, not read from. In LLVM IR, parameters
+of this type receive the `writeonly` attribute, enabling dead store elimination
+and write-combining optimizations. Useful for output buffers where the function
+only produces data.
+
+```axiom
+fn fill_zeros(out: writeonly_ptr[i32], n: i32) -> i32 { ... }
+```
 
 ### Tuple
 

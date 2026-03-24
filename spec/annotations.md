@@ -1,6 +1,6 @@
 # AXIOM Annotation Schema
 
-Version 0.1 -- matches implemented parser and HIR as of 2026-03-23.
+Version 0.2 -- matches implemented parser and HIR as of 2026-03-24.
 Source of truth: `crates/axiom-parser/src/ast.rs` (`Annotation` enum),
 `crates/axiom-hir/src/hir.rs` (`HirAnnotationKind` enum),
 `crates/axiom-hir/src/lower.rs` (`annotation_valid_targets` function).
@@ -219,6 +219,81 @@ execute concurrently.
 ```axiom
 @parallel(i, j)
 fn matmul(...) -> ... { ... }
+```
+
+### `@parallel_for`
+
+**Syntax:** `@parallel_for(shared_read: [vars], shared_write: [vars], reduction(op: var), private: [vars])`
+**Valid targets:** Block (specifically, the block containing a `for` loop)
+**Meaning:** Marks a for loop for parallel execution with explicit data sharing
+clauses, following the OpenMP model. This is the safe, correct way to parallelize
+loops in AXIOM -- it replaces the unsound combination of `@parallel` + `@pure`
+on functions that write through pointers.
+
+**Data sharing clauses:**
+- `shared_read: [a, b]` -- Variables that are read (but never written) inside
+  the loop body. The compiler ensures these are only loaded, never stored to.
+  Enables `readonly` LLVM attributes.
+- `shared_write: [out]` -- Variables that are written inside the loop body,
+  but with disjoint index access across iterations (i.e., each iteration writes
+  to a unique location). The compiler does NOT add `noalias` -- instead it
+  relies on disjoint access patterns.
+- `reduction(+: total)` -- Declares a reduction variable with an associative
+  operator. The compiler generates thread-local accumulators initialized to the
+  identity value (0 for `+`, 1 for `*`, INT_MAX for `min`, INT_MIN for `max`),
+  accumulates locally per thread, then combines with an atomic operation at the
+  end. This is the only correct way to update a shared scalar in a parallel loop.
+- `private: [temp]` -- Variables that are private to each iteration (thread-local
+  copy). Each thread gets its own independent copy; no synchronization needed.
+
+**Effect on compilation:**
+- Emits `fence release` before the parallel region and `fence acquire` after.
+- Reduction variables use `atomicrmw add` (or equivalent) for the final combine.
+- `!llvm.access.group` and `!llvm.loop.parallel_accesses` metadata on
+  proven-parallel memory accesses.
+- Does NOT blindly add `noalias` to shared pointers (this was the UB in the old design).
+
+```axiom
+@parallel_for(shared_read: [positions, masses], shared_write: [forces], reduction(+: total_energy), private: [dx, dy, dist])
+for i: i32 in range(0, n) {
+    // Each iteration reads positions/masses, writes forces[i], accumulates total_energy
+    let dx: f64 = ptr_read_f64(positions, j * 2) - ptr_read_f64(positions, i * 2);
+    let dy: f64 = ptr_read_f64(positions, j * 2 + 1) - ptr_read_f64(positions, i * 2 + 1);
+    let dist: f64 = sqrt(dx * dx + dy * dy);
+    total_energy = total_energy + compute_potential(masses, i, j, dist);
+}
+```
+
+### `@lifetime`
+
+**Syntax:** `@lifetime(scope)`, `@lifetime(static)`, `@lifetime(manual)`
+**Valid targets:** Block, Function
+**Meaning:** Declares the allocation lifetime for heap allocations within the
+annotated scope. This enables the compiler to perform escape analysis and
+heap-to-stack promotion.
+
+- `scope` -- All heap allocations within this scope do not escape. The compiler
+  may promote them to stack allocations (using `alloca` instead of `malloc`),
+  eliminating heap overhead entirely. This is verified during compilation; if
+  the pointer escapes (e.g., returned or stored to a global), the compiler
+  emits an error.
+- `static` -- Allocations live for the entire program lifetime. No deallocation
+  is needed. The compiler may place them in static data sections.
+- `manual` -- Explicit malloc/free semantics. No compiler optimization of
+  allocation lifetime. This is the default if no `@lifetime` annotation is present.
+
+**Effect on compilation:**
+- `@lifetime(scope)` -> `alloca` instead of `malloc`, no `free` needed.
+- `@lifetime(static)` -> global/static allocation.
+- `@lifetime(manual)` -> standard `malloc`/`free`.
+
+```axiom
+@lifetime(scope)
+{
+    let buffer: ptr[i32] = heap_alloc(1024, 4);
+    // buffer is promoted to stack -- no malloc, no free
+    // ... use buffer ...
+}  // buffer automatically freed (stack unwind)
 ```
 
 ---
