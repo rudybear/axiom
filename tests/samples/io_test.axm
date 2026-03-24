@@ -1,0 +1,8 @@
+@module io_test;
+
+fn main() -> i32 {
+    let t: i64 = clock_ns();
+    print_i64(t);
+    // Basic: just prove the runtime links
+    return 0;
+}
