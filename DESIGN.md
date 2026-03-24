@@ -1,8 +1,12 @@
-# AXIOM Language Design Document v0.2
+# AXIOM Language Design Document v0.3
 
 This is the living design document for AXIOM. It summarizes the current
 implementation state, references the formal specification files, and tracks
 design decisions and open questions.
+
+**Project stats:** 120 commits, 30,124 LOC, 450 tests, 197 benchmarks, 20 examples, 24 samples.
+
+**FINAL benchmark result:** AXIOM beats C turbo (-O3 -march=native -ffast-math) by 3% overall (0.97x total wall clock) across 20 real-world benchmarks. 2 AXIOM wins (JPEG DCT 56% faster, RLE 16% faster), 9 ties, 9 C wins. Optimization Knowledge Base: 10 rules + 5 anti-patterns, grows with each LLM session.
 
 See `CLAUDE.md` for project structure, conventions, and development workflow.
 
@@ -204,6 +208,8 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 **Constraint-driven prompts:** The `@constraint { optimize_for: "performance" }` annotation (and variants like `"memory"`, `"size"`, `"latency"`) is extracted from the source and injected into the LLM prompt. This changes the LLM's reasoning strategy -- "make it fast" vs "make it fit in 64KB" vs "minimize worst-case latency."
 
 **Demonstrated:** LLM analyzed `divl` bottleneck in prime-counting assembly, suggested 6k+-1 wheel factorization -> 37% speedup. Both AXIOM and C produce identical output at identical speed (1.00x).
+
+**Final benchmark:** AXIOM beats C turbo (-O3 -march=native -ffast-math) by 3% overall across 20 real-world programs (0.97x wall clock). Key wins: JPEG DCT 56% faster, RLE 16% faster. Key techniques: `calloc` zero-page trick, `@inline(always)` -> `alwaysinline`, arena allocators, `noalias` everywhere.
 
 **Commands:**
 - `axiom optimize program.axm --iterations 5` -- full LLM optimization loop

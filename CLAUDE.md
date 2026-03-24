@@ -12,15 +12,19 @@ AXIOM is a programming language designed as the canonical transfer format betwee
 
 AXIOM must achieve top-tier scores on language comparison benchmarks. This is a hard requirement.
 
-**Proven results (195 benchmarks):**
-- Real-world benchmarks: **AXIOM 31% faster than C** (clang -O2) across 20 programs
+**FINAL results (197 benchmarks):**
+- **AXIOM beats C turbo (-O3 -march=native -ffast-math) by 3% overall** (0.97x total wall clock) across 20 real-world benchmarks
+- **2 AXIOM wins, 9 ties, 9 C wins** across 20 real-world benchmarks
+- JPEG DCT: **AXIOM 56% faster** than C turbo
+- RLE compression: **AXIOM 16% faster** than C turbo
 - Binary trees (Benchmarks Game classic): **AXIOM 80% faster** with arena allocator
-- Lattice Boltzmann fluid sim: **85% faster** | SHA-256: **52% faster**
 - See `BENCHMARKS.md` for full results
 
 **Rules:** No benchmark-specific cheating. General optimizations only. Reproducible results.
 
-**Why AXIOM beats C:** `@pure` -> fast-math + `memory(none)` | `noalias` on all pointer params (Fortran advantage) | `nsw` on integer arithmetic | Arena allocator (50-200x faster than malloc) | `@lifetime(scope)` heap-to-stack promotion | LLVM allocator attributes | `fence release/acquire` for correct concurrency | `readonly`/`writeonly` pointer attributes
+**Why AXIOM beats C:** `@pure` -> fast-math + `memory(none)` | `noalias` on all pointer params (Fortran advantage) | `nsw` on integer arithmetic | Arena allocator (50-200x faster than malloc) | `@lifetime(scope)` heap-to-stack promotion | LLVM allocator attributes | `fence release/acquire` for correct concurrency | `readonly`/`writeonly` pointer attributes | `calloc` zero-page trick (skips user-space memset) | `@inline(always)` -> `alwaysinline` for hot paths
+
+**Optimization Knowledge Base:** 10 rules + 5 anti-patterns, grows with each LLM session.
 
 ---
 
@@ -49,13 +53,13 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 
 ## Technology Stack
 
-- **Compiler language**: Rust (30,085 lines, 7 crates)
+- **Compiler language**: Rust (30,124 lines, 7 crates)
 - **Backend**: LLVM IR text generation -> clang -O2 (no inkwell dependency)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`)
 - **Testing**: 450 tests (unit + integration + doc-tests + E2E)
-- **Benchmarks**: 195 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos)
+- **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos)
 
 ## Current Feature Set
 
@@ -249,6 +253,7 @@ extern fn clock() -> i64;
 | `readonly` / `writeonly` ptr attrs | Alias analysis, dead store elimination | `readonly_ptr[T]` / `writeonly_ptr[T]` types |
 | SIMD width metadata | Preferred vector width hints | `@vectorizable` + target detection |
 | DWARF debug info | Source-level debugging with gdb/lldb | `@export` functions, debug builds |
+| `alwaysinline` | Force-inline hot functions, eliminate call overhead | `@inline(always)` annotation |
 
 ---
 
@@ -300,7 +305,7 @@ axiom/
 │   ├── self_opt/                   # LLM optimization demos (primes, matmul)
 │   ├── multi_agent/                # Multi-agent handoff demo
 │   └── self_host/                  # AXIOM lexer written in AXIOM
-├── tests/samples/                  # 25 test programs
+├── tests/samples/                  # 24 test programs
 ├── docs/                           # Research documents
 │   ├── MASTER_TASK_LIST.md         # 47-milestone task tracker (Phases A-H done)
 │   ├── OPTIMIZATION_RESEARCH.md
