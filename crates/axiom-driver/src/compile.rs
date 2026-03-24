@@ -37,6 +37,10 @@ pub struct CompileOptions {
     /// - `"latency"` -> `-O3 -fno-exceptions`
     /// - anything else / `None` -> default `-O2`
     pub optimize_for: Option<String>,
+
+    /// The LLVM IR text, used to detect which features are needed (e.g.,
+    /// renderer functions) for linking decisions.
+    pub ir_text: Option<String>,
 }
 
 /// Compile LLVM IR text to a native executable binary with default options.
@@ -116,6 +120,26 @@ fn find_compiler_name() -> Option<String> {
 
 /// The C runtime source, embedded at compile time.
 const AXIOM_RT_C: &str = include_str!("../runtime/axiom_rt.c");
+
+/// Search for the axiom_renderer DLL import library.
+/// Looks in: target/release/, next to the current executable, and current dir.
+fn find_renderer_lib() -> Option<PathBuf> {
+    let candidates = [
+        // Relative to workspace root (when running from D:/ailang)
+        PathBuf::from("target/release/axiom_renderer.dll.lib"),
+        PathBuf::from("target/debug/axiom_renderer.dll.lib"),
+    ];
+    // Also check next to the current exe
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("axiom_renderer.dll.lib");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    candidates.into_iter().find(|p| p.exists())
+}
 
 /// Write the embedded C runtime to a temp file and return its path.
 fn write_runtime_c() -> miette::Result<PathBuf> {
@@ -244,20 +268,38 @@ fn invoke_clang_core(
     // Link the C runtime if needed.
     if let Some(rt) = runtime_c {
         cmd.arg(rt);
-        // On POSIX platforms, the threading primitives in axiom_rt.c require
-        // pthreads. Always link it when the runtime is used -- it is harmless
-        // if only non-threaded builtins were called.
         #[cfg(not(target_os = "windows"))]
         cmd.arg("-lpthread");
-        // On Windows, the renderer uses Win32 GDI for windowed software
-        // rasterization.  Link gdi32 and user32 unconditionally when the
-        // runtime is present -- they are harmless if the renderer is unused.
         #[cfg(target_os = "windows")]
         {
             cmd.arg("-lgdi32");
             cmd.arg("-luser32");
         }
     }
+
+    // If the IR uses the wgpu renderer, try to link against the pre-built
+    // axiom_renderer.dll.lib and tell the C runtime to skip its stub renderer.
+    let mut use_wgpu = false;
+    if let Some(ref ir_text) = options.ir_text {
+        if ir_text.contains("@axiom_renderer_create") {
+            if let Some(lib_path) = find_renderer_lib() {
+                cmd.arg(lib_path.to_str().unwrap_or("axiom_renderer.dll.lib"));
+                cmd.arg("-DAXIOM_USE_WGPU_RENDERER");
+                use_wgpu = true;
+                #[cfg(target_os = "windows")]
+                {
+                    cmd.arg("-ladvapi32");
+                    cmd.arg("-ld3dcompiler");
+                    cmd.arg("-luserenv");
+                    cmd.arg("-lws2_32");
+                    cmd.arg("-lbcrypt");
+                    cmd.arg("-lntdll");
+                    cmd.arg("-lopengl32");
+                }
+            }
+        }
+    }
+    let _ = use_wgpu; // suppress unused warning on non-Windows
 
     cmd.arg("-o")
         .arg(output);

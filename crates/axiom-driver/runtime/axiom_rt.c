@@ -983,6 +983,9 @@ void axiom_job_wait_handle(int handle) {
 #endif /* _WIN32 / POSIX -- threading */
 
 /* ── Renderer API ────────────────────────────────────────────────────── */
+/* When AXIOM_USE_WGPU_RENDERER is defined, the renderer functions come  */
+/* from the axiom_renderer.dll (wgpu-based). Skip the C stub.           */
+#ifndef AXIOM_USE_WGPU_RENDERER
 /*
  * Provides a rendering API that AXIOM programs call to create windows,
  * load SPIR-V shaders (compiled by Lux), build pipelines, and draw
@@ -1601,6 +1604,7 @@ void axiom_renderer_bind_pipeline(void *renderer, void *pipeline) {
 }
 
 #endif /* _WIN32 / headless stub */
+#endif /* !AXIOM_USE_WGPU_RENDERER */
 
 /* ── Vec (Dynamic Array) ─────────────────────────────────────────── */
 /*
