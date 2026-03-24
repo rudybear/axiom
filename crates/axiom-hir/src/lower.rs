@@ -448,7 +448,12 @@ impl LoweringContext {
             },
         };
 
-        HirStmt { id, kind, span }
+        HirStmt {
+            id,
+            kind,
+            span,
+            annotations: Vec::new(),
+        }
     }
 
     /// Lower an expression.
@@ -614,6 +619,7 @@ impl LoweringContext {
                 HirAnnotationKind::OptimizationLog(entries.clone())
             }
             ast::Annotation::Export => HirAnnotationKind::Export,
+            ast::Annotation::Lifetime(scope) => HirAnnotationKind::Lifetime(scope.clone()),
             ast::Annotation::Custom(name, args) => {
                 HirAnnotationKind::Custom(name.clone(), args.clone())
             }
@@ -703,6 +709,7 @@ fn annotation_valid_targets(kind: &HirAnnotationKind) -> (&str, Vec<AnnotationTa
         HirAnnotationKind::Align(_) => ("align", vec![Param, StructField]),
         HirAnnotationKind::OptimizationLog(_) => ("optimization_log", vec![Function]),
         HirAnnotationKind::Export => ("export", vec![Function]),
+        HirAnnotationKind::Lifetime(_) => ("lifetime", vec![Function, Block]),
         HirAnnotationKind::Custom(_, _) => (
             "custom",
             vec![Function, Module, Param, StructDef, StructField, Block],

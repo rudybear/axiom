@@ -16,8 +16,9 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use axiom_hir::{
-    BinOp, HirAnnotationKind, HirBlock, HirExpr, HirExprKind, HirExternFunction, HirFunction,
-    HirModule, HirParam, HirStmt, HirStmtKind, HirType, PrimitiveType, UnaryOp,
+    BinOp, HirAnnotation, HirAnnotationKind, HirBlock, HirExpr, HirExprKind,
+    HirExternFunction, HirFunction, HirModule, HirParam, HirStmt, HirStmtKind, HirType,
+    PrimitiveType, UnaryOp,
 };
 
 use crate::error::CodegenError;
@@ -58,6 +59,8 @@ struct FuncAnnotations {
     is_vectorizable: bool,
     /// Whether the function has any array/pointer parameter reads (for memory attribute).
     reads_arg_memory: bool,
+    /// Whether the function is annotated with `@lifetime(scope)`.
+    is_lifetime_scope: bool,
 }
 
 /// Information about a function's signature.
@@ -435,17 +438,44 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             "declare i32 @llvm.fshr.i32(i32, i32, i32)"
         );
     }
+    // Emit allocator function declarations with LLVM allocator attributes.
+    // These attributes (allockind, alloc-family) enable LLVM's optimizer to:
+    // - Eliminate dead allocations (unused malloc results)
+    // - Promote heap-to-stack (HeapToStackPass) when allocation doesn't escape
+    // - Merge/hoist allocations out of loops
+    // - Eliminate redundant memset after calloc (zeroed attribute)
+    // - Pair malloc/free for dead-free elimination (alloc-family)
     if ctx.needs_malloc || ctx.needs_arena {
-        let _ = writeln!(ctx.output, "declare noalias ptr @malloc(i64)");
+        let malloc_group =
+            ctx.get_or_create_attr_group("allockind(\"alloc,uninitialized\") \"alloc-family\"=\"malloc\"");
+        let _ = writeln!(
+            ctx.output,
+            "declare noalias ptr @malloc(i64) #{malloc_group}"
+        );
     }
     if ctx.needs_calloc {
-        let _ = writeln!(ctx.output, "declare noalias ptr @calloc(i64, i64)");
+        let calloc_group =
+            ctx.get_or_create_attr_group("allockind(\"alloc,zeroed\") \"alloc-family\"=\"malloc\"");
+        let _ = writeln!(
+            ctx.output,
+            "declare noalias ptr @calloc(i64, i64) #{calloc_group}"
+        );
     }
     if ctx.needs_realloc {
-        let _ = writeln!(ctx.output, "declare noalias ptr @realloc(ptr, i64)");
+        let realloc_group =
+            ctx.get_or_create_attr_group("allockind(\"realloc\") \"alloc-family\"=\"malloc\"");
+        let _ = writeln!(
+            ctx.output,
+            "declare noalias ptr @realloc(ptr, i64) #{realloc_group}"
+        );
     }
     if ctx.needs_free || ctx.needs_arena {
-        let _ = writeln!(ctx.output, "declare void @free(ptr)");
+        let free_group =
+            ctx.get_or_create_attr_group("allockind(\"free\") \"alloc-family\"=\"malloc\"");
+        let _ = writeln!(
+            ctx.output,
+            "declare void @free(ptr allocptr) #{free_group}"
+        );
     }
 
     // Emit attribute groups.
@@ -482,6 +512,9 @@ fn extract_func_annotations(
             HirAnnotationKind::Pure => annots.is_pure = true,
             HirAnnotationKind::Const => annots.is_const = true,
             HirAnnotationKind::Vectorizable(_) => annots.is_vectorizable = true,
+            HirAnnotationKind::Lifetime(s) if s == "scope" => {
+                annots.is_lifetime_scope = true;
+            }
             _ => {}
         }
     }
@@ -733,7 +766,7 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
             ty,
             value,
             ..
-        } => emit_let(ctx, name, ty, value),
+        } => emit_let(ctx, name, ty, value, &stmt.annotations),
         HirStmtKind::Assign { target, value } => emit_assign(ctx, target, value),
         HirStmtKind::Return { value } => emit_return(ctx, value),
         HirStmtKind::If {
@@ -755,8 +788,37 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
     }
 }
 
+/// Check whether the given annotations include `@lifetime(scope)`.
+fn has_lifetime_scope(annotations: &[HirAnnotation]) -> bool {
+    annotations
+        .iter()
+        .any(|a| matches!(&a.kind, HirAnnotationKind::Lifetime(s) if s == "scope"))
+}
+
+/// Check whether an expression is a `heap_alloc(count, elem_size)` call.
+///
+/// Returns `true` if the expression is a `Call` to the built-in `heap_alloc` function.
+fn is_heap_alloc_call(expr: &HirExpr) -> bool {
+    if let HirExprKind::Call { func, .. } = &expr.kind {
+        if let HirExprKind::Ident { name } = &func.kind {
+            return name == "heap_alloc";
+        }
+    }
+    false
+}
+
 /// Emit a let binding: alloca + optional store.
-fn emit_let(ctx: &mut CodegenContext, name: &str, ty: &HirType, value: &HirExpr) {
+///
+/// When the let binding has `@lifetime(scope)` and the value is a `heap_alloc` call,
+/// the allocation is promoted from `malloc` to `alloca` (stack allocation), which
+/// eliminates the need for `free` and enables further LLVM optimizations.
+fn emit_let(
+    ctx: &mut CodegenContext,
+    name: &str,
+    ty: &HirType,
+    value: &HirExpr,
+    annotations: &[HirAnnotation],
+) {
     // Special handling for array types: alloca [N x T] + memset.
     if let HirType::Array {
         ref element, size, ..
@@ -798,6 +860,64 @@ fn emit_let(ctx: &mut CodegenContext, name: &str, ty: &HirType, value: &HirExpr)
             },
         );
         return;
+    }
+
+    // --- @lifetime(scope) escape analysis: promote heap_alloc to alloca ---
+    //
+    // When a let binding has `@lifetime(scope)` and initializes with `heap_alloc`,
+    // we emit a stack allocation (`alloca`) instead of calling `malloc`. This is safe
+    // because `@lifetime(scope)` guarantees the pointer's lifetime matches the current
+    // scope, so it cannot escape. The corresponding `heap_free` becomes a no-op
+    // (the stack frame cleanup handles deallocation).
+    if has_lifetime_scope(annotations) && is_heap_alloc_call(value) {
+        if let HirExprKind::Call { args, .. } = &value.kind {
+            if args.len() == 2 {
+                let llvm_type = match hir_type_to_llvm(ty) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        ctx.errors.push(e);
+                        return;
+                    }
+                };
+
+                // Evaluate count and elem_size arguments.
+                let count = emit_expr(ctx, &args[0], Some("i32"));
+                let elem_size = emit_expr(ctx, &args[1], Some("i32"));
+
+                // Widen to i64 for the multiplication.
+                let count64 = ctx.fresh_reg();
+                ctx.emit(&format!("{count64} = sext i32 {} to i64", count.reg));
+                let elem64 = ctx.fresh_reg();
+                ctx.emit(&format!("{elem64} = sext i32 {} to i64", elem_size.reg));
+                let total = ctx.fresh_reg();
+                ctx.emit(&format!("{total} = mul i64 {count64}, {elem64}"));
+
+                // Emit alloca instead of malloc — stack allocation.
+                let buf_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{buf_reg} = alloca i8, i64 {total}, align 16"
+                ));
+
+                // Store the pointer into the variable's alloca slot.
+                let uid = ctx.next_reg;
+                ctx.next_reg += 1;
+                let alloca_name = format!("%{name}.{uid}");
+                ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
+                ctx.emit(&format!(
+                    "store {llvm_type} {buf_reg}, ptr {alloca_name}"
+                ));
+
+                ctx.variables.insert(
+                    name.to_string(),
+                    VarInfo {
+                        alloca_name,
+                        llvm_type,
+                        array_info: None,
+                    },
+                );
+                return;
+            }
+        }
     }
 
     let llvm_type = match hir_type_to_llvm(ty) {
@@ -3444,6 +3564,17 @@ mod tests {
             id: nid(0),
             kind,
             span: span(),
+            annotations: Vec::new(),
+        }
+    }
+
+    /// Helper: create a statement with annotations (e.g., `@lifetime(scope)` on a let binding).
+    fn stmt_with_annotations(kind: HirStmtKind, annotations: Vec<HirAnnotation>) -> HirStmt {
+        HirStmt {
+            id: nid(0),
+            kind,
+            span: span(),
+            annotations,
         }
     }
 
@@ -6224,7 +6355,7 @@ fn main() -> i32 {
             "heap_alloc should emit malloc call with noalias: {ir}"
         );
         assert!(
-            ir.contains("declare noalias ptr @malloc(i64)"),
+            ir.contains("declare noalias ptr @malloc(i64) #"),
             "should declare malloc: {ir}"
         );
     }
@@ -6260,7 +6391,7 @@ fn main() -> i32 {
             "heap_alloc_zeroed should emit calloc call: {ir}"
         );
         assert!(
-            ir.contains("declare noalias ptr @calloc(i64, i64)"),
+            ir.contains("declare noalias ptr @calloc(i64, i64) #"),
             "should declare calloc: {ir}"
         );
     }
@@ -6299,7 +6430,7 @@ fn main() -> i32 {
             "heap_free should emit free call: {ir}"
         );
         assert!(
-            ir.contains("declare void @free(ptr)"),
+            ir.contains("declare void @free(ptr allocptr) #"),
             "should declare free: {ir}"
         );
     }
@@ -6345,7 +6476,7 @@ fn main() -> i32 {
             "heap_realloc should emit realloc call: {ir}"
         );
         assert!(
-            ir.contains("declare noalias ptr @realloc(ptr, i64)"),
+            ir.contains("declare noalias ptr @realloc(ptr, i64) #"),
             "should declare realloc: {ir}"
         );
     }
@@ -6619,11 +6750,11 @@ fn main() -> i32 {
             "should widen i32 index to i64: {ir}"
         );
         assert!(
-            ir.contains("declare noalias ptr @malloc(i64)"),
+            ir.contains("declare noalias ptr @malloc(i64) #"),
             "should declare malloc: {ir}"
         );
         assert!(
-            ir.contains("declare void @free(ptr)"),
+            ir.contains("declare void @free(ptr allocptr) #"),
             "should declare free: {ir}"
         );
     }
@@ -6659,6 +6790,229 @@ fn main() -> i32 {
         assert!(
             !ir.contains("@realloc"),
             "should not declare realloc when unused: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // LLVM allocator attribute tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_malloc_alloc_attrs() {
+        // Verify that malloc/calloc/realloc/free declarations include
+        // LLVM allockind and alloc-family attributes for optimizer integration.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                        mutable: true,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "q".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("heap_alloc_zeroed", vec![int_lit(10), int_lit(4)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Assign {
+                        target: ident("p"),
+                        value: call(
+                            "heap_realloc",
+                            vec![ident("p"), int_lit(20), int_lit(4)],
+                        ),
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("heap_free", vec![ident("p")]),
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("heap_free", vec![ident("q")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // malloc declaration should have allockind("alloc,uninitialized") attribute group.
+        assert!(
+            ir.contains("declare noalias ptr @malloc(i64) #"),
+            "malloc should have attribute group reference: {ir}"
+        );
+        assert!(
+            ir.contains("allockind(\"alloc,uninitialized\")"),
+            "malloc attribute group should have allockind(alloc,uninitialized): {ir}"
+        );
+
+        // calloc declaration should have allockind("alloc,zeroed") attribute group.
+        assert!(
+            ir.contains("declare noalias ptr @calloc(i64, i64) #"),
+            "calloc should have attribute group reference: {ir}"
+        );
+        assert!(
+            ir.contains("allockind(\"alloc,zeroed\")"),
+            "calloc attribute group should have allockind(alloc,zeroed): {ir}"
+        );
+
+        // realloc declaration should have allockind("realloc") attribute group.
+        assert!(
+            ir.contains("declare noalias ptr @realloc(ptr, i64) #"),
+            "realloc should have attribute group reference: {ir}"
+        );
+        assert!(
+            ir.contains("allockind(\"realloc\")"),
+            "realloc attribute group should have allockind(realloc): {ir}"
+        );
+
+        // free declaration should have allocptr parameter attribute and allockind("free").
+        assert!(
+            ir.contains("declare void @free(ptr allocptr) #"),
+            "free should have allocptr param attribute and attr group ref: {ir}"
+        );
+        assert!(
+            ir.contains("allockind(\"free\")"),
+            "free attribute group should have allockind(free): {ir}"
+        );
+
+        // All allocator functions should be in the same alloc-family.
+        let family_count = ir.matches("\"alloc-family\"=\"malloc\"").count();
+        assert!(
+            family_count >= 4,
+            "all 4 allocator declarations should have alloc-family=malloc (got {family_count}): {ir}"
+        );
+    }
+
+    #[test]
+    fn test_escape_analysis_hint() {
+        // A @pure function that uses heap_alloc should get both @pure function
+        // attributes (memory(none), nounwind, etc.) and the LLVM allocator
+        // attributes on the malloc declaration. Together these enable LLVM's
+        // HeapToStackPass to promote the allocation to the stack.
+        let m = module(
+            Some("test"),
+            vec![func_with_annotations(
+                "compute",
+                vec![param("n", HirType::Primitive(PrimitiveType::I32))],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "buf".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("heap_alloc", vec![ident("n"), int_lit(4)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("heap_free", vec![ident("buf")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(42),
+                    }),
+                ]),
+                vec![pure_ann()],
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // The function should have @pure attributes (memory + nounwind).
+        // Note: @pure with a ptr result from heap_alloc uses argmem:read if
+        // there are ptr params. But compute takes only i32, so memory(none).
+        assert!(
+            ir.contains("memory(none)"),
+            "@pure function should have memory(none): {ir}"
+        );
+        assert!(
+            ir.contains("nounwind"),
+            "@pure function should have nounwind: {ir}"
+        );
+
+        // The malloc declaration should have allocator attributes.
+        assert!(
+            ir.contains("allockind(\"alloc,uninitialized\")"),
+            "malloc should have allockind for heap-to-stack optimization: {ir}"
+        );
+        assert!(
+            ir.contains("\"alloc-family\"=\"malloc\""),
+            "should have alloc-family for malloc/free pairing: {ir}"
+        );
+
+        // The free declaration should have allocator attributes.
+        assert!(
+            ir.contains("allockind(\"free\")"),
+            "free should have allockind for dead-free elimination: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_lifetime_scope() {
+        // @lifetime(scope) on a let binding with heap_alloc should emit alloca
+        // instead of malloc, promoting the heap allocation to the stack.
+        let lifetime_scope_ann = HirAnnotation {
+            kind: HirAnnotationKind::Lifetime("scope".to_string()),
+            span: SPAN_DUMMY,
+        };
+
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt_with_annotations(
+                        HirStmtKind::Let {
+                            name: "buf".to_string(),
+                            name_span: span(),
+                            ty: HirType::Ptr {
+                                element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                            },
+                            value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                            mutable: false,
+                        },
+                        vec![lifetime_scope_ann],
+                    ),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // The allocation should be promoted to alloca (stack).
+        assert!(
+            ir.contains("alloca i8, i64"),
+            "@lifetime(scope) should promote heap_alloc to alloca: {ir}"
+        );
+
+        // No malloc should be called — the allocation is on the stack.
+        assert!(
+            !ir.contains("call noalias ptr @malloc"),
+            "@lifetime(scope) should NOT call malloc: {ir}"
+        );
+
+        // No malloc declaration needed since it was promoted.
+        assert!(
+            !ir.contains("@malloc"),
+            "@lifetime(scope) should not need malloc declaration: {ir}"
         );
     }
 
@@ -6715,7 +7069,7 @@ fn main() -> i32 {
         );
         // Should declare malloc.
         assert!(
-            ir.contains("declare noalias ptr @malloc(i64)"),
+            ir.contains("declare noalias ptr @malloc(i64) #"),
             "arena_create should declare malloc: {ir}"
         );
     }
@@ -6864,7 +7218,7 @@ fn main() -> i32 {
         );
         // Should declare free.
         assert!(
-            ir.contains("declare void @free(ptr)"),
+            ir.contains("declare void @free(ptr allocptr) #"),
             "arena_destroy should declare free: {ir}"
         );
     }
@@ -6978,11 +7332,11 @@ fn main() -> i32 {
             "should emit 2 free calls for destroy (got {free_count}): {ir}"
         );
         assert!(
-            ir.contains("declare noalias ptr @malloc(i64)"),
+            ir.contains("declare noalias ptr @malloc(i64) #"),
             "should declare malloc: {ir}"
         );
         assert!(
-            ir.contains("declare void @free(ptr)"),
+            ir.contains("declare void @free(ptr allocptr) #"),
             "should declare free: {ir}"
         );
     }

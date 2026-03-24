@@ -198,6 +198,8 @@ pub enum Annotation {
     Align(u64),
     OptimizationLog(Vec<OptLogEntry>),
     Export,
+    /// `@lifetime(scope|static|manual)` — declares allocation lifetime.
+    Lifetime(String),
     Custom(String, Vec<AnnotationValue>),
 }
 
