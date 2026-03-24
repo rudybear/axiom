@@ -1,0 +1,120 @@
+@module particle_system_10k;
+@intent("10K particles (heap-allocated), 100 timesteps, add/remove particles dynamically");
+
+// Particle: 6 i32 slots [x*1000, y*1000, vx*1000, vy*1000, life, active]
+
+fn main() -> i32 {
+    let max_particles: i32 = 15000;
+    let initial: i32 = 10000;
+    let slots: i32 = 6;
+
+    let particles: ptr[i32] = heap_alloc(max_particles * slots, 4);
+    let active_count: i32 = 0;
+
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Initialize particles
+    for i: i32 in range(0, initial) {
+        let base: i32 = i * slots;
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(particles, base, narrow(seed % 10000));     // x
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(particles, base + 1, narrow(seed % 10000)); // y
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(particles, base + 2, narrow(seed % 200) - 100); // vx
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(particles, base + 3, narrow(seed % 200) - 100); // vy
+        ptr_write_i32(particles, base + 4, narrow(seed % 100) + 50);  // life
+        ptr_write_i32(particles, base + 5, 1);  // active
+        active_count = active_count + 1;
+    }
+
+    // Free list for recycling dead particle slots
+    let free_list: ptr[i32] = heap_alloc(max_particles, 4);
+    let free_top: i32 = 0;
+    let next_slot: i32 = initial;
+
+    let total_checksum: i64 = 0;
+
+    // Simulate 100 timesteps
+    for step: i32 in range(0, 100) {
+        // Update particles
+        for i: i32 in range(0, next_slot) {
+            let base: i32 = i * slots;
+            if ptr_read_i32(particles, base + 5) == 1 {
+                // Update position
+                let x: i32 = ptr_read_i32(particles, base) + ptr_read_i32(particles, base + 2);
+                let y: i32 = ptr_read_i32(particles, base + 1) + ptr_read_i32(particles, base + 3);
+                ptr_write_i32(particles, base, x);
+                ptr_write_i32(particles, base + 1, y);
+
+                // Apply gravity
+                let vy: i32 = ptr_read_i32(particles, base + 3) + 2;
+                ptr_write_i32(particles, base + 3, vy);
+
+                // Decrease life
+                let life: i32 = ptr_read_i32(particles, base + 4) - 1;
+                ptr_write_i32(particles, base + 4, life);
+
+                if life <= 0 {
+                    ptr_write_i32(particles, base + 5, 0);
+                    active_count = active_count - 1;
+                    // Add to free list
+                    if free_top < max_particles {
+                        ptr_write_i32(free_list, free_top, i);
+                        free_top = free_top + 1;
+                    }
+                }
+            }
+        }
+
+        // Spawn new particles to replace dead ones
+        let spawn: i32 = 100;
+        for s: i32 in range(0, spawn) {
+            let slot: i32 = -1;
+            if free_top > 0 {
+                free_top = free_top - 1;
+                slot = ptr_read_i32(free_list, free_top);
+            }
+            if free_top == 0 and slot == -1 and next_slot < max_particles {
+                slot = next_slot;
+                next_slot = next_slot + 1;
+            }
+            if slot != -1 {
+                let base: i32 = slot * slots;
+                seed = (lcg_a * seed + lcg_c) % lcg_m;
+                ptr_write_i32(particles, base, narrow(seed % 10000));
+                seed = (lcg_a * seed + lcg_c) % lcg_m;
+                ptr_write_i32(particles, base + 1, narrow(seed % 10000));
+                seed = (lcg_a * seed + lcg_c) % lcg_m;
+                ptr_write_i32(particles, base + 2, narrow(seed % 200) - 100);
+                seed = (lcg_a * seed + lcg_c) % lcg_m;
+                ptr_write_i32(particles, base + 3, narrow(seed % 200) - 100);
+                ptr_write_i32(particles, base + 4, narrow(seed % 100) + 50);
+                ptr_write_i32(particles, base + 5, 1);
+                active_count = active_count + 1;
+            }
+        }
+
+        // Compute checksum for this step
+        let step_sum: i64 = 0;
+        for i: i32 in range(0, next_slot) {
+            let base: i32 = i * slots;
+            if ptr_read_i32(particles, base + 5) == 1 {
+                step_sum = step_sum + widen(ptr_read_i32(particles, base));
+                step_sum = step_sum + widen(ptr_read_i32(particles, base + 1));
+            }
+        }
+        total_checksum = total_checksum + step_sum;
+    }
+
+    heap_free(particles);
+    heap_free(free_list);
+
+    total_checksum = total_checksum + widen(active_count);
+    print_i64(total_checksum);
+    return 0;
+}

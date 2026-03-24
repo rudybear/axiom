@@ -1,0 +1,48 @@
+@module string_concat_10k;
+@intent("Concatenate 10K strings (i32 arrays representing chars) via realloc");
+
+fn main() -> i32 {
+    let n: i32 = 10000;
+    let str_len: i32 = 0;
+    let str_cap: i32 = 16;
+    let str: ptr[i32] = heap_alloc(str_cap, 4);
+
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Concatenate 10K small "strings" (each 5-15 chars)
+    for i: i32 in range(0, n) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let append_len: i32 = narrow(seed % 11) + 5;
+
+        // Ensure capacity
+        let needed: i32 = str_len + append_len;
+        if needed > str_cap {
+            while str_cap < needed {
+                str_cap = str_cap * 2;
+            }
+            str = heap_realloc(str, str_cap, 4);
+        }
+
+        // Append chars
+        for j: i32 in range(0, append_len) {
+            seed = (lcg_a * seed + lcg_c) % lcg_m;
+            let ch: i32 = narrow(seed % 26) + 97;  // 'a' to 'z'
+            ptr_write_i32(str, str_len + j, ch);
+        }
+        str_len = str_len + append_len;
+    }
+
+    // Compute checksum over the string
+    let checksum: i64 = 0;
+    for i: i32 in range(0, str_len) {
+        checksum = checksum + widen(ptr_read_i32(str, i));
+    }
+    checksum = checksum + widen(str_len);
+
+    heap_free(str);
+    print_i64(checksum);
+    return 0;
+}

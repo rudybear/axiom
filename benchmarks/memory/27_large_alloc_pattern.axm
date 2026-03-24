@@ -1,0 +1,34 @@
+@module large_alloc_pattern;
+@intent("Allocate a few very large blocks (1MB each), fill, checksum, free");
+
+fn main() -> i32 {
+    let block_count: i32 = 8;
+    let block_elems: i32 = 262144;  // 256K i32s = 1MB per block
+    let checksum: i64 = 0;
+
+    // Multiple rounds
+    for round: i32 in range(0, 5) {
+        // Allocate 8 x 1MB blocks, process sequentially
+        for b: i32 in range(0, block_count) {
+            let block: ptr[i32] = heap_alloc(block_elems, 4);
+
+            // Fill with pattern
+            for i: i32 in range(0, block_elems) {
+                let val: i32 = (i * 7 + b * 13 + round * 31) % 1000000;
+                ptr_write_i32(block, i, val);
+            }
+
+            // Compute sum
+            let sum: i64 = 0;
+            for i: i32 in range(0, block_elems) {
+                sum = sum + widen(ptr_read_i32(block, i));
+            }
+
+            checksum = checksum + sum;
+            heap_free(block);
+        }
+    }
+
+    print_i64(checksum);
+    return 0;
+}

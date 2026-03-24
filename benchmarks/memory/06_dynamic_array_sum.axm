@@ -1,0 +1,27 @@
+@module dynamic_array_sum;
+@intent("Allocate large dynamic array (2M i32), fill with computed values, sum, free");
+
+fn main() -> i32 {
+    let n: i32 = 2000000;
+    let data: ptr[i32] = heap_alloc(n, 4);
+
+    // Fill with computed values
+    for i: i32 in range(0, n) {
+        let val: i32 = (i * 7 + 13) % 100000;
+        ptr_write_i32(data, i, val);
+    }
+
+    // Multiple passes to increase runtime
+    let total: i64 = 0;
+    for pass: i32 in range(0, 5) {
+        let sum: i64 = 0;
+        for i: i32 in range(0, n) {
+            sum = sum + widen(ptr_read_i32(data, i));
+        }
+        total = total + sum;
+    }
+
+    heap_free(data);
+    print_i64(total);
+    return 0;
+}

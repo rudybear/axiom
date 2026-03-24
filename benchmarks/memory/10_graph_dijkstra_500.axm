@@ -1,0 +1,139 @@
+@module graph_dijkstra_500;
+@intent("Dijkstra shortest path on 500-node graph. Heap-allocated priority queue (array-based)");
+
+fn main() -> i32 {
+    let num_nodes: i32 = 500;
+    let max_edges: i32 = 5000;
+
+    // CSR adjacency list with weights
+    let adj_offset: ptr[i32] = heap_alloc(num_nodes + 1, 4);
+    let adj_target: ptr[i32] = heap_alloc(max_edges * 2, 4);
+    let adj_weight: ptr[i32] = heap_alloc(max_edges * 2, 4);
+
+    let seed: i64 = 99;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    let degree: ptr[i32] = heap_alloc_zeroed(num_nodes, 4);
+    let edges_src: ptr[i32] = heap_alloc(max_edges, 4);
+    let edges_dst: ptr[i32] = heap_alloc(max_edges, 4);
+    let edges_wt: ptr[i32] = heap_alloc(max_edges, 4);
+
+    for e: i32 in range(0, max_edges) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let u: i32 = narrow(seed % widen(num_nodes));
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let v: i32 = narrow(seed % widen(num_nodes));
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let w: i32 = narrow(seed % 100) + 1;
+        ptr_write_i32(edges_src, e, u);
+        ptr_write_i32(edges_dst, e, v);
+        ptr_write_i32(edges_wt, e, w);
+        let du: i32 = ptr_read_i32(degree, u);
+        ptr_write_i32(degree, u, du + 1);
+        let dv: i32 = ptr_read_i32(degree, v);
+        ptr_write_i32(degree, v, dv + 1);
+    }
+
+    // Build CSR
+    ptr_write_i32(adj_offset, 0, 0);
+    for i: i32 in range(0, num_nodes) {
+        let prev: i32 = ptr_read_i32(adj_offset, i);
+        ptr_write_i32(adj_offset, i + 1, prev + ptr_read_i32(degree, i));
+    }
+
+    let insert_pos: ptr[i32] = heap_alloc(num_nodes, 4);
+    for i: i32 in range(0, num_nodes) {
+        ptr_write_i32(insert_pos, i, ptr_read_i32(adj_offset, i));
+    }
+    for e: i32 in range(0, max_edges) {
+        let u: i32 = ptr_read_i32(edges_src, e);
+        let v: i32 = ptr_read_i32(edges_dst, e);
+        let w: i32 = ptr_read_i32(edges_wt, e);
+        let pu: i32 = ptr_read_i32(insert_pos, u);
+        ptr_write_i32(adj_target, pu, v);
+        ptr_write_i32(adj_weight, pu, w);
+        ptr_write_i32(insert_pos, u, pu + 1);
+        let pv: i32 = ptr_read_i32(insert_pos, v);
+        ptr_write_i32(adj_target, pv, u);
+        ptr_write_i32(adj_weight, pv, w);
+        ptr_write_i32(insert_pos, v, pv + 1);
+    }
+
+    // Dijkstra arrays
+    let dist: ptr[i32] = heap_alloc(num_nodes, 4);
+    let visited: ptr[i32] = heap_alloc(num_nodes, 4);
+
+    let total_dist: i64 = 0;
+    let total_reached: i32 = 0;
+
+    // Run Dijkstra from 5 sources
+    for src: i32 in range(0, 5) {
+        let start: i32 = src * 100;
+
+        for i: i32 in range(0, num_nodes) {
+            ptr_write_i32(dist, i, 999999999);
+            ptr_write_i32(visited, i, 0);
+        }
+        ptr_write_i32(dist, start, 0);
+
+        // Simple O(V^2) Dijkstra
+        for step: i32 in range(0, num_nodes) {
+            // Find unvisited node with min dist
+            let min_d: i32 = 999999999;
+            let min_u: i32 = -1;
+            for i: i32 in range(0, num_nodes) {
+                if ptr_read_i32(visited, i) == 0 {
+                    let d: i32 = ptr_read_i32(dist, i);
+                    if d < min_d {
+                        min_d = d;
+                        min_u = i;
+                    }
+                }
+            }
+            if min_u == -1 {
+                // No more reachable nodes
+                step = num_nodes;  // break
+            }
+            if min_u != -1 {
+                ptr_write_i32(visited, min_u, 1);
+                let start_e: i32 = ptr_read_i32(adj_offset, min_u);
+                let end_e: i32 = ptr_read_i32(adj_offset, min_u + 1);
+                let e: i32 = start_e;
+                while e < end_e {
+                    let v: i32 = ptr_read_i32(adj_target, e);
+                    let w: i32 = ptr_read_i32(adj_weight, e);
+                    let new_d: i32 = min_d + w;
+                    if new_d < ptr_read_i32(dist, v) {
+                        ptr_write_i32(dist, v, new_d);
+                    }
+                    e = e + 1;
+                }
+            }
+        }
+
+        for i: i32 in range(0, num_nodes) {
+            let d: i32 = ptr_read_i32(dist, i);
+            if d < 999999999 {
+                total_dist = total_dist + widen(d);
+                total_reached = total_reached + 1;
+            }
+        }
+    }
+
+    heap_free(adj_offset);
+    heap_free(adj_target);
+    heap_free(adj_weight);
+    heap_free(degree);
+    heap_free(edges_src);
+    heap_free(edges_dst);
+    heap_free(edges_wt);
+    heap_free(insert_pos);
+    heap_free(dist);
+    heap_free(visited);
+
+    let checksum: i64 = total_dist + widen(total_reached);
+    print_i64(checksum);
+    return 0;
+}

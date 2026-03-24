@@ -1,0 +1,32 @@
+@module arena_alloc_cycle_1m;
+@intent("Arena allocation of 1M small objects, arena_reset. Shows arena vs malloc speed");
+
+fn main() -> i32 {
+    let n: i32 = 1000000;
+    let batch_size: i32 = 10000;
+    let num_batches: i32 = n / batch_size;
+    let checksum: i64 = 0;
+
+    // Arena: 10K objects * 16 bytes = 160KB per batch
+    let arena: ptr[i32] = arena_create(200000);
+
+    for batch: i32 in range(0, num_batches) {
+        // Allocate batch_size objects from arena
+        for j: i32 in range(0, batch_size) {
+            let idx: i32 = batch * batch_size + j;
+            let p: ptr[i32] = arena_alloc(arena, 4, 4);
+            ptr_write_i32(p, 0, idx);
+            ptr_write_i32(p, 1, idx * 2);
+            ptr_write_i32(p, 2, idx * 3);
+            ptr_write_i32(p, 3, idx * 4);
+            checksum = checksum + widen(ptr_read_i32(p, 0)) + widen(ptr_read_i32(p, 1));
+            checksum = checksum + widen(ptr_read_i32(p, 2)) + widen(ptr_read_i32(p, 3));
+        }
+        // Reset arena for next batch (frees all at once!)
+        arena_reset(arena);
+    }
+
+    arena_destroy(arena);
+    print_i64(checksum);
+    return 0;
+}

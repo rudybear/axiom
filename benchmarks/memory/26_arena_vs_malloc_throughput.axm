@@ -1,0 +1,40 @@
+@module arena_vs_malloc_throughput;
+@intent("Pure allocation throughput: time 1M arena_alloc vs 1M heap_alloc");
+
+fn main() -> i32 {
+    let n: i32 = 1000000;
+    let obj_size: i32 = 4;  // 4 i32s per object
+    let checksum: i64 = 0;
+
+    // Phase 1: Arena allocation throughput
+    // Arena: 1M * 16 bytes = 16MB
+    let arena: ptr[i32] = arena_create(20000000);
+
+    for i: i32 in range(0, n) {
+        let p: ptr[i32] = arena_alloc(arena, obj_size, 4);
+        ptr_write_i32(p, 0, i);
+        checksum = checksum + widen(ptr_read_i32(p, 0));
+    }
+
+    arena_reset(arena);
+
+    // Phase 2: Arena allocation again (after reset, same speed)
+    for i: i32 in range(0, n) {
+        let p: ptr[i32] = arena_alloc(arena, obj_size, 4);
+        ptr_write_i32(p, 0, i * 3);
+        checksum = checksum + widen(ptr_read_i32(p, 0));
+    }
+
+    arena_destroy(arena);
+
+    // Phase 3: Heap allocation throughput (alloc+free cycle)
+    for i: i32 in range(0, n) {
+        let p: ptr[i32] = heap_alloc(obj_size, 4);
+        ptr_write_i32(p, 0, i * 5);
+        checksum = checksum + widen(ptr_read_i32(p, 0));
+        heap_free(p);
+    }
+
+    print_i64(checksum);
+    return 0;
+}

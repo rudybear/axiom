@@ -1,0 +1,74 @@
+@module sequential_alloc_free;
+@intent("Allocate 10K blocks sequentially, then free in reverse order (LIFO). Uses flat pool approach");
+
+fn main() -> i32 {
+    let n: i32 = 10000;
+    let block_size: i32 = 256;  // 256 i32s = 1KB each
+    let checksum: i64 = 0;
+
+    // Allocate one big pool and treat sub-regions as "blocks"
+    // This simulates sequential alloc/free patterns
+    let total_size: i32 = n * block_size;
+
+    // Multiple rounds for timing
+    for round: i32 in range(0, 20) {
+        let pool: ptr[i32] = heap_alloc(total_size, 4);
+
+        // "Allocate" blocks: fill each block's data
+        for i: i32 in range(0, n) {
+            let base: i32 = i * block_size;
+            ptr_write_i32(pool, base, i + round * n);
+            ptr_write_i32(pool, base + block_size - 1, i * 7 + round);
+        }
+
+        // Read all blocks
+        for i: i32 in range(0, n) {
+            let base: i32 = i * block_size;
+            checksum = checksum + widen(ptr_read_i32(pool, base));
+            checksum = checksum + widen(ptr_read_i32(pool, base + block_size - 1));
+        }
+
+        // Free in reverse order: separate allocs
+        heap_free(pool);
+    }
+
+    // Now test actual individual alloc/free with a smaller batch
+    for round: i32 in range(0, 50) {
+        // Allocate 200 blocks individually, use them, free them in reverse
+        // Use a small array to track block data for verification
+        let data_check: i64 = 0;
+        let p1: ptr[i32] = heap_alloc(block_size, 4);
+        let p2: ptr[i32] = heap_alloc(block_size, 4);
+        let p3: ptr[i32] = heap_alloc(block_size, 4);
+        let p4: ptr[i32] = heap_alloc(block_size, 4);
+        let p5: ptr[i32] = heap_alloc(block_size, 4);
+
+        for j: i32 in range(0, block_size) {
+            ptr_write_i32(p1, j, j + round);
+            ptr_write_i32(p2, j, j * 2 + round);
+            ptr_write_i32(p3, j, j * 3 + round);
+            ptr_write_i32(p4, j, j * 4 + round);
+            ptr_write_i32(p5, j, j * 5 + round);
+        }
+
+        for j: i32 in range(0, block_size) {
+            data_check = data_check + widen(ptr_read_i32(p1, j));
+            data_check = data_check + widen(ptr_read_i32(p2, j));
+            data_check = data_check + widen(ptr_read_i32(p3, j));
+            data_check = data_check + widen(ptr_read_i32(p4, j));
+            data_check = data_check + widen(ptr_read_i32(p5, j));
+        }
+
+        // LIFO free
+        heap_free(p5);
+        heap_free(p4);
+        heap_free(p3);
+        heap_free(p2);
+        heap_free(p1);
+
+        checksum = checksum + data_check;
+    }
+
+    print_i64(checksum);
+    return 0;
+}

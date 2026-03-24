@@ -1,0 +1,46 @@
+@module mixed_size_alloc;
+@intent("Allocate objects of varying sizes (4, 16, 64, 256 i32s), 100K of each");
+
+fn main() -> i32 {
+    let count: i32 = 100000;
+    let checksum: i64 = 0;
+
+    // Size class 1: 4 i32s (16 bytes)
+    for i: i32 in range(0, count) {
+        let p: ptr[i32] = heap_alloc(4, 4);
+        ptr_write_i32(p, 0, i);
+        ptr_write_i32(p, 3, i * 7);
+        checksum = checksum + widen(ptr_read_i32(p, 0)) + widen(ptr_read_i32(p, 3));
+        heap_free(p);
+    }
+
+    // Size class 2: 16 i32s (64 bytes)
+    for i: i32 in range(0, count) {
+        let p: ptr[i32] = heap_alloc(16, 4);
+        ptr_write_i32(p, 0, i);
+        ptr_write_i32(p, 15, i * 13);
+        checksum = checksum + widen(ptr_read_i32(p, 0)) + widen(ptr_read_i32(p, 15));
+        heap_free(p);
+    }
+
+    // Size class 3: 64 i32s (256 bytes)
+    for i: i32 in range(0, count) {
+        let p: ptr[i32] = heap_alloc(64, 4);
+        ptr_write_i32(p, 0, i);
+        ptr_write_i32(p, 63, i * 17);
+        checksum = checksum + widen(ptr_read_i32(p, 0)) + widen(ptr_read_i32(p, 63));
+        heap_free(p);
+    }
+
+    // Size class 4: 256 i32s (1024 bytes)
+    for i: i32 in range(0, count) {
+        let p: ptr[i32] = heap_alloc(256, 4);
+        ptr_write_i32(p, 0, i);
+        ptr_write_i32(p, 255, i * 19);
+        checksum = checksum + widen(ptr_read_i32(p, 0)) + widen(ptr_read_i32(p, 255));
+        heap_free(p);
+    }
+
+    print_i64(checksum);
+    return 0;
+}

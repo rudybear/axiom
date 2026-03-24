@@ -1,0 +1,38 @@
+@module realloc_growth;
+@intent("Start with 1 element, realloc doubling 20 times (1->2->4->...->1M). Time the growth");
+
+fn main() -> i32 {
+    let checksum: i64 = 0;
+
+    // Multiple trials
+    for trial: i32 in range(0, 50) {
+        let capacity: i32 = 1;
+        let data: ptr[i32] = heap_alloc(capacity, 4);
+        ptr_write_i32(data, 0, trial);
+
+        // Double 20 times: 1 -> 2 -> 4 -> ... -> 1048576
+        for step: i32 in range(0, 20) {
+            let new_cap: i32 = capacity * 2;
+            data = heap_realloc(data, new_cap, 4);
+
+            // Fill new portion
+            for i: i32 in range(capacity, new_cap) {
+                ptr_write_i32(data, i, i + trial * 7);
+            }
+
+            capacity = new_cap;
+        }
+
+        // Sum all elements
+        let sum: i64 = 0;
+        for i: i32 in range(0, capacity) {
+            sum = sum + widen(ptr_read_i32(data, i));
+        }
+
+        checksum = checksum + sum;
+        heap_free(data);
+    }
+
+    print_i64(checksum);
+    return 0;
+}
