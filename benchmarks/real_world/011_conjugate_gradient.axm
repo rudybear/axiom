@@ -1,161 +1,201 @@
 @module conjugate_gradient;
+@constraint { optimize_for: "performance" };
 @intent("Conjugate gradient method solving Ax=b for 1000x1000 sparse symmetric positive-definite system");
 
-@pure
-fn dot_product(a: array[f64, 1000], b: array[f64, 1000], n: i32) -> f64 {
+@pure @inline(always)
+fn dot_product(a: ptr[f64], b: ptr[f64], n: i32) -> f64 {
     let sum: f64 = 0.0;
     for i: i32 in range(0, n) {
-        sum = sum + a[i] * b[i];
+        sum = sum + ptr_read_f64(a, i) * ptr_read_f64(b, i);
     }
     return sum;
 }
 
 @pure
-fn vec_norm(a: array[f64, 1000], n: i32) -> f64 {
+fn vec_norm(a: ptr[f64], n: i32) -> f64 {
     let sum: f64 = 0.0;
     for i: i32 in range(0, n) {
-        sum = sum + a[i] * a[i];
+        let v: f64 = ptr_read_f64(a, i);
+        sum = sum + v * v;
     }
     return sqrt(sum);
 }
 
-fn main() -> i32 {
-    let n: i32 = 1000;
-
-    // Build a sparse SPD matrix A as tridiagonal + diagonal dominance
-    // Store as dense band: A[i][j] is accessed via flat array A[i*n + j]
-    // But that's 1M entries -> use the structure: tridiagonal
-    // diag[i], upper[i], lower[i]
-    let diag: array[f64, 1000] = array_zeros[f64, 1000];
-    let upper: array[f64, 1000] = array_zeros[f64, 1000];
-    let lower: array[f64, 1000] = array_zeros[f64, 1000];
-
-    // Also add a wider band: A[i][i+5] and A[i][i-5]
-    let upper5: array[f64, 1000] = array_zeros[f64, 1000];
-    let lower5: array[f64, 1000] = array_zeros[f64, 1000];
-
-    // Initialize matrix (symmetric positive definite)
+@pure
+fn banded_matvec(diag: ptr[f64], lower: ptr[f64], upper: ptr[f64],
+                 lower5: ptr[f64], upper5: ptr[f64],
+                 p: ptr[f64], ap: ptr[f64], n: i32) -> f64 {
     for i: i32 in range(0, n) {
-        diag[i] = 4.0 + to_f64(i % 10) * 0.1;
+        let val: f64 = ptr_read_f64(diag, i) * ptr_read_f64(p, i);
+        if i > 0 {
+            val = val + ptr_read_f64(lower, i) * ptr_read_f64(p, i - 1);
+        }
         if i < n - 1 {
-            upper[i] = -1.0;
-            lower[i + 1] = -1.0;
+            val = val + ptr_read_f64(upper, i) * ptr_read_f64(p, i + 1);
+        }
+        if i >= 5 {
+            val = val + ptr_read_f64(lower5, i) * ptr_read_f64(p, i - 5);
         }
         if i < n - 5 {
-            upper5[i] = -0.3;
-            lower5[i + 5] = -0.3;
+            val = val + ptr_read_f64(upper5, i) * ptr_read_f64(p, i + 5);
         }
+        ptr_write_f64(ap, i, val);
     }
+    return 0.0;
+}
 
-    // Right-hand side b
-    let b: array[f64, 1000] = array_zeros[f64, 1000];
+@pure
+fn axpy_update(x: ptr[f64], p: ptr[f64], alpha: f64, n: i32) -> f64 {
     for i: i32 in range(0, n) {
-        b[i] = 1.0 + to_f64(i) * 0.001;
+        ptr_write_f64(x, i, ptr_read_f64(x, i) + alpha * ptr_read_f64(p, i));
     }
+    return 0.0;
+}
 
-    // Solution vector x (initial guess = 0)
-    let x: array[f64, 1000] = array_zeros[f64, 1000];
-
-    // r = b - A*x = b (since x=0)
-    let r: array[f64, 1000] = array_zeros[f64, 1000];
+@pure
+fn axpy_subtract(r: ptr[f64], ap: ptr[f64], alpha: f64, n: i32) -> f64 {
     for i: i32 in range(0, n) {
-        r[i] = b[i];
+        ptr_write_f64(r, i, ptr_read_f64(r, i) - alpha * ptr_read_f64(ap, i));
     }
+    return 0.0;
+}
 
-    // p = r
-    let p: array[f64, 1000] = array_zeros[f64, 1000];
+@pure
+fn update_p(p: ptr[f64], r: ptr[f64], beta: f64, n: i32) -> f64 {
     for i: i32 in range(0, n) {
-        p[i] = r[i];
+        ptr_write_f64(p, i, ptr_read_f64(r, i) + beta * ptr_read_f64(p, i));
     }
+    return 0.0;
+}
 
-    // Ap = A*p (workspace)
-    let ap: array[f64, 1000] = array_zeros[f64, 1000];
-
-    // rsold = r^T * r
-    let rsold: f64 = dot_product(r, r, n);
-
-    // CG iterations (up to n iterations or convergence)
-    let max_iter: i32 = 1000;
-    let tol: f64 = 0.0000000001;
+@pure
+fn cg_iterate(diag: ptr[f64], lower: ptr[f64], upper: ptr[f64],
+              lower5: ptr[f64], upper5: ptr[f64],
+              x: ptr[f64], r: ptr[f64], p: ptr[f64], ap: ptr[f64],
+              n: i32, max_iter: i32, rsold_init: f64, tol: f64) -> f64 {
+    let rsold: f64 = rsold_init;
     let iter_count: i32 = 0;
-
     for iter: i32 in range(0, max_iter) {
-        // Compute Ap = A * p (banded matrix-vector multiply)
-        for i: i32 in range(0, n) {
-            let val: f64 = diag[i] * p[i];
-            if i > 0 {
-                val = val + lower[i] * p[i - 1];
-            }
-            if i < n - 1 {
-                val = val + upper[i] * p[i + 1];
-            }
-            if i >= 5 {
-                val = val + lower5[i] * p[i - 5];
-            }
-            if i < n - 5 {
-                val = val + upper5[i] * p[i + 5];
-            }
-            ap[i] = val;
-        }
-
-        // alpha = rsold / (p^T * Ap)
+        let _mv: f64 = banded_matvec(diag, lower, upper, lower5, upper5, p, ap, n);
         let pap: f64 = dot_product(p, ap, n);
 
         if pap < tol and pap > 0.0 - tol {
             iter_count = iter;
-            return 0;
+            return to_f64(iter_count);
         }
 
         let alpha: f64 = rsold / pap;
-
-        // x = x + alpha * p
-        for i: i32 in range(0, n) {
-            x[i] = x[i] + alpha * p[i];
-        }
-
-        // r = r - alpha * Ap
-        for i: i32 in range(0, n) {
-            r[i] = r[i] - alpha * ap[i];
-        }
-
-        // rsnew = r^T * r
+        let _u1: f64 = axpy_update(x, p, alpha, n);
+        let _u2: f64 = axpy_subtract(r, ap, alpha, n);
         let rsnew: f64 = dot_product(r, r, n);
 
         iter_count = iter + 1;
 
         if rsnew < tol {
-            iter_count = iter + 1;
-            // Force exit by setting iter to max
-            iter = max_iter;
+            return to_f64(iter_count);
         }
 
         if rsnew >= tol {
-            // p = r + (rsnew / rsold) * p
             let beta: f64 = rsnew / rsold;
-            for i: i32 in range(0, n) {
-                p[i] = r[i] + beta * p[i];
-            }
+            let _u3: f64 = update_p(p, r, beta, n);
             rsold = rsnew;
         }
     }
+    return to_f64(iter_count);
+}
 
-    // Verify: compute ||Ax - b||
+@pure
+fn compute_residual(diag: ptr[f64], lower: ptr[f64], upper: ptr[f64],
+                    lower5: ptr[f64], upper5: ptr[f64],
+                    x: ptr[f64], b: ptr[f64], n: i32) -> f64 {
     let residual: f64 = 0.0;
     for i: i32 in range(0, n) {
-        let ax_i: f64 = diag[i] * x[i];
-        if i > 0 { ax_i = ax_i + lower[i] * x[i - 1]; }
-        if i < n - 1 { ax_i = ax_i + upper[i] * x[i + 1]; }
-        if i >= 5 { ax_i = ax_i + lower5[i] * x[i - 5]; }
-        if i < n - 5 { ax_i = ax_i + upper5[i] * x[i + 5]; }
-        let diff: f64 = ax_i - b[i];
+        let ax_i: f64 = ptr_read_f64(diag, i) * ptr_read_f64(x, i);
+        if i > 0 { ax_i = ax_i + ptr_read_f64(lower, i) * ptr_read_f64(x, i - 1); }
+        if i < n - 1 { ax_i = ax_i + ptr_read_f64(upper, i) * ptr_read_f64(x, i + 1); }
+        if i >= 5 { ax_i = ax_i + ptr_read_f64(lower5, i) * ptr_read_f64(x, i - 5); }
+        if i < n - 5 { ax_i = ax_i + ptr_read_f64(upper5, i) * ptr_read_f64(x, i + 5); }
+        let diff: f64 = ax_i - ptr_read_f64(b, i);
         residual = residual + diff * diff;
     }
-    residual = sqrt(residual);
+    return sqrt(residual);
+}
+
+fn main() -> i32 {
+    let n: i32 = 1000;
+
+    let diag: ptr[f64] = heap_alloc_zeroed(1000, 8);
+    let upper: ptr[f64] = heap_alloc_zeroed(1000, 8);
+    let lower: ptr[f64] = heap_alloc_zeroed(1000, 8);
+    let upper5: ptr[f64] = heap_alloc_zeroed(1000, 8);
+    let lower5: ptr[f64] = heap_alloc_zeroed(1000, 8);
+
+    // Initialize matrix (symmetric positive definite)
+    for i: i32 in range(0, n) {
+        ptr_write_f64(diag, i, 4.0 + to_f64(i % 10) * 0.1);
+        if i < n - 1 {
+            ptr_write_f64(upper, i, -1.0);
+            ptr_write_f64(lower, i + 1, -1.0);
+        }
+        if i < n - 5 {
+            ptr_write_f64(upper5, i, -0.3);
+            ptr_write_f64(lower5, i + 5, -0.3);
+        }
+    }
+
+    // Right-hand side b
+    let b: ptr[f64] = heap_alloc_zeroed(1000, 8);
+    for i: i32 in range(0, n) {
+        ptr_write_f64(b, i, 1.0 + to_f64(i) * 0.001);
+    }
+
+    // Solution vector x (initial guess = 0)
+    let x: ptr[f64] = heap_alloc_zeroed(1000, 8);
+
+    // r = b - A*x = b (since x=0)
+    let r: ptr[f64] = heap_alloc_zeroed(1000, 8);
+    for i: i32 in range(0, n) {
+        ptr_write_f64(r, i, ptr_read_f64(b, i));
+    }
+
+    // p = r
+    let p: ptr[f64] = heap_alloc_zeroed(1000, 8);
+    for i: i32 in range(0, n) {
+        ptr_write_f64(p, i, ptr_read_f64(r, i));
+    }
+
+    // Ap = A*p (workspace)
+    let ap: ptr[f64] = heap_alloc_zeroed(1000, 8);
+
+    // rsold = r^T * r
+    let rsold: f64 = dot_product(r, r, n);
+
+    // CG iterations
+    let max_iter: i32 = 1000;
+    let tol: f64 = 0.0000000001;
+
+    let iter_count_f: f64 = cg_iterate(diag, lower, upper, lower5, upper5,
+                                         x, r, p, ap, n, max_iter, rsold, tol);
+    let iter_count: i32 = truncate(iter_count_f);
+
+    // Verify: compute ||Ax - b||
+    let residual: f64 = compute_residual(diag, lower, upper, lower5, upper5, x, b, n);
 
     // Checksum: solution norm + residual + iter count
     let x_norm: f64 = vec_norm(x, n);
 
     let checksum: f64 = x_norm * 1000.0 + residual + to_f64(iter_count);
     print_f64(checksum);
+
+    heap_free(diag);
+    heap_free(upper);
+    heap_free(lower);
+    heap_free(upper5);
+    heap_free(lower5);
+    heap_free(b);
+    heap_free(x);
+    heap_free(r);
+    heap_free(p);
+    heap_free(ap);
     return 0;
 }

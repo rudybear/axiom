@@ -1,28 +1,29 @@
 @module md5_hash;
+@constraint { optimize_for: "performance" };
 @intent("MD5-inspired hash computation on 10000 64-byte blocks using native bitwise ops");
 
-// MD5 round functions
-@pure
+// MD5 round functions - @inline(always) eliminates call overhead in tight 64-round loop
+@pure @inline(always)
 fn md5_F(b: i32, c: i32, d: i32) -> i32 {
     return bor(band(b, c), band(bnot(b), d));
 }
 
-@pure
+@pure @inline(always)
 fn md5_G(b: i32, c: i32, d: i32) -> i32 {
     return bor(band(d, b), band(bnot(d), c));
 }
 
-@pure
+@pure @inline(always)
 fn md5_H(b: i32, c: i32, d: i32) -> i32 {
     return bxor(bxor(b, c), d);
 }
 
-@pure
+@pure @inline(always)
 fn md5_I(b: i32, c: i32, d: i32) -> i32 {
     return bxor(c, bor(b, bnot(d)));
 }
 
-@pure
+@pure @inline(always)
 fn md5_round(a: i32, b: i32, f_val: i32, k: i32, m: i32, shift: i32) -> i32 {
     let temp: i32 = a +% f_val +% k +% m;
     let rotated: i32 = rotl(temp, shift);

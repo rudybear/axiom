@@ -1,18 +1,65 @@
 @module sparse_matrix_multiply;
+@constraint { optimize_for: "performance" };
 @intent("Compressed Sparse Row (CSR) matrix-vector multiply, 5000x5000 with ~100000 non-zeros, 20 iterations");
+
+@pure
+fn spmv(values: ptr[f64], col_idx: ptr[i32], row_ptr: ptr[i32],
+        x: ptr[f64], y: ptr[f64], n: i32) -> f64 {
+    for i: i32 in range(0, n) {
+        let sum: f64 = 0.0;
+        let start: i32 = ptr_read_i32(row_ptr, i);
+        let end: i32 = ptr_read_i32(row_ptr, i + 1);
+        let j: i32 = start;
+        while j < end {
+            sum = sum + ptr_read_f64(values, j) * ptr_read_f64(x, ptr_read_i32(col_idx, j));
+            j = j + 1;
+        }
+        ptr_write_f64(y, i, sum);
+    }
+    return 0.0;
+}
+
+@pure
+fn vec_norm_sq(v: ptr[f64], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let val: f64 = ptr_read_f64(v, i);
+        sum = sum + val * val;
+    }
+    return sum;
+}
+
+@pure
+fn normalize_vec(y: ptr[f64], x: ptr[f64], n: i32, norm: f64) -> f64 {
+    if norm > 0.0000001 {
+        for i: i32 in range(0, n) {
+            ptr_write_f64(x, i, ptr_read_f64(y, i) / norm);
+        }
+    }
+    return 0.0;
+}
+
+@pure
+fn weighted_sum(x: ptr[f64], n: i32) -> f64 {
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        checksum = checksum + ptr_read_f64(x, i) * to_f64(i + 1);
+    }
+    return checksum;
+}
 
 fn main() -> i32 {
     let n: i32 = 5000;
     let nnz_target: i32 = 100000;
 
-    // CSR format arrays
-    let values: array[f64, 100000] = array_zeros[f64, 100000];
-    let col_idx: array[i32, 100000] = array_zeros[i32, 100000];
-    let row_ptr: array[i32, 5001] = array_zeros[i32, 5001];
+    // CSR format arrays on heap (values: 800KB, col_idx: 400KB)
+    let values: ptr[f64] = heap_alloc_zeroed(100000, 8);
+    let col_idx: ptr[i32] = heap_alloc_zeroed(100000, 4);
+    let row_ptr: ptr[i32] = heap_alloc_zeroed(5001, 4);
 
-    // Dense vector and result
-    let x: array[f64, 5000] = array_zeros[f64, 5000];
-    let y: array[f64, 5000] = array_zeros[f64, 5000];
+    // Dense vectors on heap (40KB each)
+    let x: ptr[f64] = heap_alloc_zeroed(5000, 8);
+    let y: ptr[f64] = heap_alloc_zeroed(5000, 8);
 
     // LCG for generating sparse matrix
     let seed: i64 = 42;
@@ -25,12 +72,12 @@ fn main() -> i32 {
     let nnz_per_row: i32 = nnz_target / n;
 
     for i: i32 in range(0, n) {
-        row_ptr[i] = nnz;
+        ptr_write_i32(row_ptr, i, nnz);
 
         // Diagonal element (ensure non-singular)
         if nnz < 100000 {
-            values[nnz] = to_f64(i + 1) * 0.01 + 2.0;
-            col_idx[nnz] = i;
+            ptr_write_f64(values, nnz, to_f64(i + 1) * 0.01 + 2.0);
+            ptr_write_i32(col_idx, nnz, i);
             nnz = nnz + 1;
         }
 
@@ -42,54 +89,39 @@ fn main() -> i32 {
             if col != i {
                 seed = (lcg_a * seed + lcg_c) % lcg_m;
                 let val: f64 = to_f64_i64(seed) / to_f64_i64(lcg_m) * 2.0 - 1.0;
-                values[nnz] = val;
-                col_idx[nnz] = col;
+                ptr_write_f64(values, nnz, val);
+                ptr_write_i32(col_idx, nnz, col);
                 nnz = nnz + 1;
             }
             elems = elems + 1;
         }
     }
-    row_ptr[n] = nnz;
+    ptr_write_i32(row_ptr, n, nnz);
 
     // Initialize vector x
     for i: i32 in range(0, n) {
-        x[i] = 1.0 / to_f64(i + 1);
+        ptr_write_f64(x, i, 1.0 / to_f64(i + 1));
     }
 
     // Perform 20 matrix-vector multiplications: y = A*x, then x = y (power iteration-like)
     for iter: i32 in range(0, 20) {
-        // y = A * x
-        for i: i32 in range(0, n) {
-            let sum: f64 = 0.0;
-            let start: i32 = row_ptr[i];
-            let end: i32 = row_ptr[i + 1];
-            let j: i32 = start;
-            while j < end {
-                sum = sum + values[j] * x[col_idx[j]];
-                j = j + 1;
-            }
-            y[i] = sum;
-        }
+        let _mv: f64 = spmv(values, col_idx, row_ptr, x, y, n);
 
         // Normalize y and copy to x
-        let norm: f64 = 0.0;
-        for i: i32 in range(0, n) {
-            norm = norm + y[i] * y[i];
-        }
-        norm = sqrt(norm);
-        if norm > 0.0000001 {
-            for i: i32 in range(0, n) {
-                x[i] = y[i] / norm;
-            }
-        }
+        let norm_sq: f64 = vec_norm_sq(y, n);
+        let norm: f64 = sqrt(norm_sq);
+        let _nv: f64 = normalize_vec(y, x, n, norm);
     }
 
     // Checksum
-    let checksum: f64 = 0.0;
-    for i: i32 in range(0, n) {
-        checksum = checksum + x[i] * to_f64(i + 1);
-    }
+    let checksum: f64 = weighted_sum(x, n);
     checksum = checksum + to_f64(nnz);
     print_f64(checksum);
+
+    heap_free(values);
+    heap_free(col_idx);
+    heap_free(row_ptr);
+    heap_free(x);
+    heap_free(y);
     return 0;
 }

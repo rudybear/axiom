@@ -1,8 +1,9 @@
 @module ray_tracer;
+@constraint { optimize_for: "performance" };
 @intent("Simple ray tracer: 3 spheres, 1 light, 256x256 image with Phong shading and shadows");
 
 // Returns the nearest positive t for a ray-sphere intersection, or -1.0 if no hit
-@pure
+@pure @inline(always)
 fn ray_sphere_t(ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64,
                 cx: f64, cy: f64, cz: f64, rad: f64) -> f64 {
     let oc_x: f64 = ox - cx;
@@ -24,17 +25,17 @@ fn ray_sphere_t(ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64,
     return t;
 }
 
-@pure
+@pure @inline(always)
 fn dot3(ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64) -> f64 {
     return ax * bx + ay * by + az * bz;
 }
 
-@pure
+@pure @inline(always)
 fn vec_length(x: f64, y: f64, z: f64) -> f64 {
     return sqrt(x * x + y * y + z * z);
 }
 
-@pure
+@pure @inline(always)
 fn clamp01(v: f64) -> f64 {
     if v > 1.0 { return 1.0; }
     if v < 0.0 { return 0.0; }
@@ -49,7 +50,7 @@ fn trace_pixel(ray_dx_in: f64, ray_dy_in: f64, ray_dz_in: f64,
                sphere_spec: array[f64, 3],
                light_x: f64, light_y: f64, light_z: f64, light_intensity: f64,
                ambient: f64,
-               img_r: array[i32, 65536], img_g: array[i32, 65536], img_b: array[i32, 65536],
+               img_r: ptr[i32], img_g: ptr[i32], img_b: ptr[i32],
                pixel_idx: i32) -> f64 {
     // Normalize ray direction
     let ray_len: f64 = vec_length(ray_dx_in, ray_dy_in, ray_dz_in);
@@ -135,21 +136,21 @@ fn trace_pixel(ray_dx_in: f64, ray_dy_in: f64, ray_dz_in: f64,
         fb = clamp01(fb);
     }
 
-    img_r[pixel_idx] = truncate(fr * 255.0);
-    img_g[pixel_idx] = truncate(fg * 255.0);
-    img_b[pixel_idx] = truncate(fb * 255.0);
+    ptr_write_i32(img_r, pixel_idx, truncate(fr * 255.0));
+    ptr_write_i32(img_g, pixel_idx, truncate(fg * 255.0));
+    ptr_write_i32(img_b, pixel_idx, truncate(fb * 255.0));
     return 0.0;
 }
 
 @pure
-fn compute_image_checksum(img_r: array[i32, 65536], img_g: array[i32, 65536], img_b: array[i32, 65536], total: i32) -> i64 {
+fn compute_image_checksum(img_r: ptr[i32], img_g: ptr[i32], img_b: ptr[i32], total: i32) -> i64 {
     let r_sum: i64 = 0;
     let g_sum: i64 = 0;
     let b_sum: i64 = 0;
     for i: i32 in range(0, total) {
-        r_sum = r_sum + widen(img_r[i]);
-        g_sum = g_sum + widen(img_g[i]);
-        b_sum = b_sum + widen(img_b[i]);
+        r_sum = r_sum + widen(ptr_read_i32(img_r, i));
+        g_sum = g_sum + widen(ptr_read_i32(img_g, i));
+        b_sum = b_sum + widen(ptr_read_i32(img_b, i));
     }
     return r_sum * 10000 + g_sum * 100 + b_sum;
 }
@@ -159,12 +160,12 @@ fn main() -> i32 {
     let height: i32 = 256;
     let total: i32 = 65536;
 
-    // Image buffer (RGB as separate arrays, values 0-255)
-    let img_r: array[i32, 65536] = array_zeros[i32, 65536];
-    let img_g: array[i32, 65536] = array_zeros[i32, 65536];
-    let img_b: array[i32, 65536] = array_zeros[i32, 65536];
+    // Image buffer on heap (65536 * 4 = 256KB each)
+    let img_r: ptr[i32] = heap_alloc_zeroed(65536, 4);
+    let img_g: ptr[i32] = heap_alloc_zeroed(65536, 4);
+    let img_b: ptr[i32] = heap_alloc_zeroed(65536, 4);
 
-    // Scene: 3 spheres (cx, cy, cz, radius, r, g, b)
+    // Scene: 3 spheres (small arrays stay on stack - only 24 bytes each)
     let sphere_cx: array[f64, 3] = array_zeros[f64, 3];
     let sphere_cy: array[f64, 3] = array_zeros[f64, 3];
     let sphere_cz: array[f64, 3] = array_zeros[f64, 3];
@@ -222,5 +223,9 @@ fn main() -> i32 {
     // Checksum
     let checksum: i64 = compute_image_checksum(img_r, img_g, img_b, total);
     print_i64(checksum);
+
+    heap_free(img_r);
+    heap_free(img_g);
+    heap_free(img_b);
     return 0;
 }

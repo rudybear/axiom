@@ -1,12 +1,13 @@
 @module huffman_encoding;
+@constraint { optimize_for: "performance" };
 @intent("Huffman encoding: build frequency table, construct tree, compute total encoded bit length");
 
-@pure
+@pure @inline(always)
 fn lcg_next(seed: i64) -> i64 {
     return (1103515245 * seed + 12345) % 2147483648;
 }
 
-@pure
+@pure @inline(always)
 fn skewed_byte(seed: i64) -> i32 {
     let raw: i64 = seed % 1000;
     let byte_val: i32 = 0;
@@ -17,6 +18,19 @@ fn skewed_byte(seed: i64) -> i32 {
     return byte_val;
 }
 
+@pure
+fn find_minimum(tree_freq: ptr[i64], active: ptr[i32], node_count: i32, exclude: i32) -> i32 {
+    let min_idx: i32 = -1;
+    let min_freq: i64 = 9999999999;
+    for i: i32 in range(0, node_count) {
+        if ptr_read_i32(active, i) == 1 and i != exclude and ptr_read_i64(tree_freq, i) < min_freq {
+            min_idx = i;
+            min_freq = ptr_read_i64(tree_freq, i);
+        }
+    }
+    return min_idx;
+}
+
 fn main() -> i32 {
     let data_size: i32 = 200000;
     let alpha_size: i32 = 256;
@@ -25,81 +39,68 @@ fn main() -> i32 {
     let freq: array[i64, 256] = array_zeros[i64, 256];
     let seed: i64 = 42;
 
-    // Build data and frequency table
-    let data: array[i32, 200000] = array_zeros[i32, 200000];
+    // Build data and frequency table - data array is 800KB, use heap
+    let data: ptr[i32] = heap_alloc_zeroed(200000, 4);
     for i: i32 in range(0, data_size) {
         seed = lcg_next(seed);
         let byte_val: i32 = skewed_byte(seed);
-        data[i] = byte_val;
+        ptr_write_i32(data, i, byte_val);
         freq[byte_val] = freq[byte_val] + 1;
     }
 
-    // Build Huffman tree using flat array
-    // Node structure: freq[], left_child[], right_child[], is_leaf[], symbol[]
+    // Build Huffman tree using flat arrays on heap
     let max_nodes: i32 = 511;
-    let tree_freq: array[i64, 511] = array_zeros[i64, 511];
-    let tree_left: array[i32, 511] = array_zeros[i32, 511];
-    let tree_right: array[i32, 511] = array_zeros[i32, 511];
-    let tree_leaf: array[i32, 511] = array_zeros[i32, 511];
-    let tree_sym: array[i32, 511] = array_zeros[i32, 511];
+    let tree_freq: ptr[i64] = heap_alloc_zeroed(511, 8);
+    let tree_left: ptr[i32] = heap_alloc_zeroed(511, 4);
+    let tree_right: ptr[i32] = heap_alloc_zeroed(511, 4);
+    let tree_leaf: ptr[i32] = heap_alloc_zeroed(511, 4);
+    let tree_sym: ptr[i32] = heap_alloc_zeroed(511, 4);
 
     // Initialize leaf nodes for symbols with freq > 0
     let node_count: i32 = 0;
     for i: i32 in range(0, 256) {
         if freq[i] > 0 {
-            tree_freq[node_count] = freq[i];
-            tree_left[node_count] = -1;
-            tree_right[node_count] = -1;
-            tree_leaf[node_count] = 1;
-            tree_sym[node_count] = i;
+            ptr_write_i64(tree_freq, node_count, freq[i]);
+            ptr_write_i32(tree_left, node_count, -1);
+            ptr_write_i32(tree_right, node_count, -1);
+            ptr_write_i32(tree_leaf, node_count, 1);
+            ptr_write_i32(tree_sym, node_count, i);
             node_count = node_count + 1;
         }
     }
 
     // Min-heap-like approach: repeatedly find two smallest and merge
-    // Use active[] array to track which nodes are still in the pool
-    let active: array[i32, 511] = array_zeros[i32, 511];
+    let active: ptr[i32] = heap_alloc_zeroed(511, 4);
     for i: i32 in range(0, node_count) {
-        active[i] = 1;
+        ptr_write_i32(active, i, 1);
     }
     let active_count: i32 = node_count;
 
     while active_count > 1 {
         // Find minimum
-        let min1: i32 = -1;
-        let min1_freq: i64 = 9999999999;
-        for i: i32 in range(0, node_count) {
-            if active[i] == 1 and tree_freq[i] < min1_freq {
-                min1 = i;
-                min1_freq = tree_freq[i];
-            }
-        }
-        active[min1] = 0;
+        let min1: i32 = find_minimum(tree_freq, active, node_count, -1);
+        ptr_write_i32(active, min1, 0);
 
         // Find second minimum
-        let min2: i32 = -1;
-        let min2_freq: i64 = 9999999999;
-        for i: i32 in range(0, node_count) {
-            if active[i] == 1 and tree_freq[i] < min2_freq {
-                min2 = i;
-                min2_freq = tree_freq[i];
-            }
-        }
-        active[min2] = 0;
+        let min2: i32 = find_minimum(tree_freq, active, node_count, -1);
+        ptr_write_i32(active, min2, 0);
+
+        let min1_freq: i64 = ptr_read_i64(tree_freq, min1);
+        let min2_freq: i64 = ptr_read_i64(tree_freq, min2);
 
         // Create merged node
         let new_node: i32 = node_count;
-        tree_freq[new_node] = min1_freq + min2_freq;
-        tree_left[new_node] = min1;
-        tree_right[new_node] = min2;
-        tree_leaf[new_node] = 0;
-        tree_sym[new_node] = -1;
-        active[new_node] = 1;
+        ptr_write_i64(tree_freq, new_node, min1_freq + min2_freq);
+        ptr_write_i32(tree_left, new_node, min1);
+        ptr_write_i32(tree_right, new_node, min2);
+        ptr_write_i32(tree_leaf, new_node, 0);
+        ptr_write_i32(tree_sym, new_node, -1);
+        ptr_write_i32(active, new_node, 1);
         node_count = node_count + 1;
         active_count = active_count - 1;
     }
 
-    // Compute code lengths via BFS/DFS using stack
+    // Compute code lengths via DFS using stack
     let code_len: array[i32, 256] = array_zeros[i32, 256];
     let stack_node: array[i32, 512] = array_zeros[i32, 512];
     let stack_depth: array[i32, 512] = array_zeros[i32, 512];
@@ -116,18 +117,18 @@ fn main() -> i32 {
         let cur: i32 = stack_node[sp];
         let depth: i32 = stack_depth[sp];
 
-        if tree_leaf[cur] == 1 {
-            let sym: i32 = tree_sym[cur];
+        if ptr_read_i32(tree_leaf, cur) == 1 {
+            let sym: i32 = ptr_read_i32(tree_sym, cur);
             code_len[sym] = depth;
         }
-        if tree_leaf[cur] == 0 {
-            if tree_left[cur] >= 0 {
-                stack_node[sp] = tree_left[cur];
+        if ptr_read_i32(tree_leaf, cur) == 0 {
+            if ptr_read_i32(tree_left, cur) >= 0 {
+                stack_node[sp] = ptr_read_i32(tree_left, cur);
                 stack_depth[sp] = depth + 1;
                 sp = sp + 1;
             }
-            if tree_right[cur] >= 0 {
-                stack_node[sp] = tree_right[cur];
+            if ptr_read_i32(tree_right, cur) >= 0 {
+                stack_node[sp] = ptr_read_i32(tree_right, cur);
                 stack_depth[sp] = depth + 1;
                 sp = sp + 1;
             }
@@ -154,5 +155,13 @@ fn main() -> i32 {
 
     let checksum: i64 = total_bits * 100 + widen(unique_count) * 10000 + widen(max_code_len);
     print_i64(checksum);
+
+    heap_free(data);
+    heap_free(tree_freq);
+    heap_free(tree_left);
+    heap_free(tree_right);
+    heap_free(tree_leaf);
+    heap_free(tree_sym);
+    heap_free(active);
     return 0;
 }

@@ -1,57 +1,54 @@
 @module eigenvalue_power_method;
+@constraint { optimize_for: "performance" };
 @intent("Find dominant eigenvalue of 500x500 matrix via power iteration, 200 iterations");
 
 @pure
-fn dot_product(a: array[f64, 500], b: array[f64, 500], n: i32) -> f64 {
+fn dot_product(a: ptr[f64], b: ptr[f64], n: i32) -> f64 {
     let sum: f64 = 0.0;
     for i: i32 in range(0, n) {
-        sum = sum + a[i] * b[i];
+        sum = sum + ptr_read_f64(a, i) * ptr_read_f64(b, i);
     }
     return sum;
 }
 
 @pure
-fn vec_norm(a: array[f64, 500], n: i32) -> f64 {
+fn vec_norm(a: ptr[f64], n: i32) -> f64 {
     let sum: f64 = 0.0;
     for i: i32 in range(0, n) {
-        sum = sum + a[i] * a[i];
+        let v: f64 = ptr_read_f64(a, i);
+        sum = sum + v * v;
     }
     return sqrt(sum);
 }
 
 @pure
-fn matvec_multiply(A: array[f64, 250000], v: array[f64, 500], w: array[f64, 500], n: i32) -> f64 {
+fn matvec_multiply(A: ptr[f64], v: ptr[f64], w: ptr[f64], n: i32) -> f64 {
     for i: i32 in range(0, n) {
         let sum: f64 = 0.0;
         for j: i32 in range(0, n) {
-            sum = sum + A[i * n + j] * v[j];
+            sum = sum + ptr_read_f64(A, i * n + j) * ptr_read_f64(v, j);
         }
-        w[i] = sum;
+        ptr_write_f64(w, i, sum);
     }
     return 0.0;
 }
 
 @pure
-fn normalize_vec(w: array[f64, 500], v: array[f64, 500], n: i32, norm: f64) -> f64 {
+fn normalize_vec(w: ptr[f64], v: ptr[f64], n: i32, norm: f64) -> f64 {
     if norm > 0.0000001 {
         for i: i32 in range(0, n) {
-            v[i] = w[i] / norm;
+            ptr_write_f64(v, i, ptr_read_f64(w, i) / norm);
         }
     }
     return 0.0;
 }
 
 @pure
-fn power_iteration(A: array[f64, 250000], v: array[f64, 500], w: array[f64, 500], n: i32, n_iters: i32) -> f64 {
+fn power_iteration(A: ptr[f64], v: ptr[f64], w: ptr[f64], n: i32, n_iters: i32) -> f64 {
     let eigenvalue: f64 = 0.0;
     for iter: i32 in range(0, n_iters) {
-        // w = A * v
         let _d1: f64 = matvec_multiply(A, v, w, n);
-
-        // Compute eigenvalue estimate: v^T * w (Rayleigh quotient numerator)
         eigenvalue = dot_product(v, w, n);
-
-        // Normalize w -> v
         let norm: f64 = vec_norm(w, n);
         let _d2: f64 = normalize_vec(w, v, n, norm);
     }
@@ -59,24 +56,24 @@ fn power_iteration(A: array[f64, 250000], v: array[f64, 500], w: array[f64, 500]
 }
 
 @pure
-fn compute_residual(A: array[f64, 250000], v: array[f64, 500], n: i32, eigenvalue: f64) -> f64 {
+fn compute_residual(A: ptr[f64], v: ptr[f64], n: i32, eigenvalue: f64) -> f64 {
     let residual: f64 = 0.0;
     for i: i32 in range(0, n) {
         let av_i: f64 = 0.0;
         for j: i32 in range(0, n) {
-            av_i = av_i + A[i * n + j] * v[j];
+            av_i = av_i + ptr_read_f64(A, i * n + j) * ptr_read_f64(v, j);
         }
-        let diff: f64 = av_i - eigenvalue * v[i];
+        let diff: f64 = av_i - eigenvalue * ptr_read_f64(v, i);
         residual = residual + diff * diff;
     }
     return sqrt(residual);
 }
 
 @pure
-fn vec_weighted_sum(v: array[f64, 500], n: i32) -> f64 {
+fn vec_weighted_sum(v: ptr[f64], n: i32) -> f64 {
     let v_sum: f64 = 0.0;
     for i: i32 in range(0, n) {
-        v_sum = v_sum + v[i] * to_f64(i + 1);
+        v_sum = v_sum + ptr_read_f64(v, i) * to_f64(i + 1);
     }
     return v_sum;
 }
@@ -85,10 +82,10 @@ fn main() -> i32 {
     let n: i32 = 500;
     let n_sq: i32 = 250000;
 
-    // Store matrix as flat array: A[i*n + j]
-    let A: array[f64, 250000] = array_zeros[f64, 250000];
-    let v: array[f64, 500] = array_zeros[f64, 500];
-    let w: array[f64, 500] = array_zeros[f64, 500];
+    // Use heap for large arrays (250000 * 8 = 2MB, 500 * 8 = 4KB)
+    let A: ptr[f64] = heap_alloc_zeroed(250000, 8);
+    let v: ptr[f64] = heap_alloc_zeroed(500, 8);
+    let w: ptr[f64] = heap_alloc_zeroed(500, 8);
 
     // LCG for matrix generation
     let seed: i64 = 12345;
@@ -101,17 +98,17 @@ fn main() -> i32 {
         for j: i32 in range(i, n) {
             seed = (lcg_a * seed + lcg_c) % lcg_m;
             let val: f64 = to_f64_i64(seed) / to_f64_i64(lcg_m) * 2.0 - 1.0;
-            A[i * n + j] = val;
-            A[j * n + i] = val;
+            ptr_write_f64(A, i * n + j, val);
+            ptr_write_f64(A, j * n + i, val);
         }
         // Make diagonally dominant
-        A[i * n + i] = A[i * n + i] + to_f64(n) * 0.5;
+        ptr_write_f64(A, i * n + i, ptr_read_f64(A, i * n + i) + to_f64(n) * 0.5);
     }
 
     // Initial vector v = [1, 1, ..., 1] / sqrt(n)
     let inv_sqrt_n: f64 = 1.0 / sqrt(to_f64(n));
     for i: i32 in range(0, n) {
-        v[i] = inv_sqrt_n;
+        ptr_write_f64(v, i, inv_sqrt_n);
     }
 
     // Power iteration: 200 iterations
@@ -125,5 +122,9 @@ fn main() -> i32 {
 
     let checksum: f64 = eigenvalue * 100.0 + residual + v_sum;
     print_f64(checksum);
+
+    heap_free(A);
+    heap_free(v);
+    heap_free(w);
     return 0;
 }

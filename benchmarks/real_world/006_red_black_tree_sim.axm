@@ -1,54 +1,94 @@
 @module red_black_tree_sim;
+@constraint { optimize_for: "performance" };
 @intent("Red-black tree simulation using flat arrays: 50000 inserts and 50000 searches");
 
-@pure
+@pure @inline(always)
 fn lcg_next(seed: i64) -> i64 {
     return (1103515245 * seed + 12345) % 2147483648;
 }
 
+@pure
+fn search_keys_compute(key: ptr[i64], left: ptr[i32], right: ptr[i32],
+                       insert_keys: ptr[i64], root: i32, n_search: i32) -> i64 {
+    let found_count: i32 = 0;
+    let depth_sum: i64 = 0;
+    for s: i32 in range(0, n_search) {
+        let search_key: i64 = ptr_read_i64(insert_keys, s);
+        let cur: i32 = root;
+        let depth: i32 = 0;
+        let found: i32 = 0;
+        while cur != 0 and found == 0 {
+            depth = depth + 1;
+            if ptr_read_i64(key, cur) == search_key {
+                found = 1;
+                found_count = found_count + 1;
+            }
+            if found == 0 and search_key < ptr_read_i64(key, cur) {
+                cur = ptr_read_i32(left, cur);
+            }
+            if found == 0 and search_key >= ptr_read_i64(key, cur) {
+                cur = ptr_read_i32(right, cur);
+            }
+        }
+        depth_sum = depth_sum + widen(depth);
+    }
+    return widen(found_count) * 10000000 + depth_sum;
+}
+
+@pure
+fn count_colors(color: ptr[i32], node_count: i32) -> i64 {
+    let red_count: i32 = 0;
+    let black_count: i32 = 0;
+    for i: i32 in range(1, node_count) {
+        if ptr_read_i32(color, i) == 1 {
+            red_count = red_count + 1;
+        }
+        if ptr_read_i32(color, i) == 0 {
+            black_count = black_count + 1;
+        }
+    }
+    return widen(red_count) + widen(black_count) * 100;
+}
+
 fn main() -> i32 {
     let max_nodes: i32 = 60000;
-    // Parallel arrays for tree structure
-    let key: array[i64, 60000] = array_zeros[i64, 60000];
-    let left: array[i32, 60000] = array_zeros[i32, 60000];
-    let right: array[i32, 60000] = array_zeros[i32, 60000];
-    let parent: array[i32, 60000] = array_zeros[i32, 60000];
-    let color: array[i32, 60000] = array_zeros[i32, 60000];
+    // Use heap for large arrays (>4KB each)
+    let key: ptr[i64] = heap_alloc_zeroed(60000, 8);
+    let left: ptr[i32] = heap_alloc_zeroed(60000, 4);
+    let right: ptr[i32] = heap_alloc_zeroed(60000, 4);
+    let parent: ptr[i32] = heap_alloc_zeroed(60000, 4);
+    let color: ptr[i32] = heap_alloc_zeroed(60000, 4);
 
     // 0 = NIL sentinel, 1-based indexing
     let nil: i32 = 0;
     let root: i32 = 0;
     let node_count: i32 = 1;
 
-    // Initialize NIL node
-    color[0] = 0;
-    left[0] = 0;
-    right[0] = 0;
-    parent[0] = 0;
+    // Initialize NIL node (already zero from heap_alloc_zeroed)
 
     // LCG
     let seed: i64 = 98765;
 
-    let insert_keys: array[i64, 50000] = array_zeros[i64, 50000];
+    let insert_keys: ptr[i64] = heap_alloc_zeroed(50000, 8);
 
     // INSERT 50000 keys using simplified RB-tree insert
     for ins: i32 in range(0, 50000) {
         seed = lcg_next(seed);
         let new_key: i64 = seed;
-        insert_keys[ins] = new_key;
+        ptr_write_i64(insert_keys, ins, new_key);
 
         // BST insert
         let new_node: i32 = node_count;
         node_count = node_count + 1;
-        key[new_node] = new_key;
-        left[new_node] = nil;
-        right[new_node] = nil;
-        color[new_node] = 1;
-        parent[new_node] = nil;
+        ptr_write_i64(key, new_node, new_key);
+        ptr_write_i32(left, new_node, nil);
+        ptr_write_i32(right, new_node, nil);
+        ptr_write_i32(color, new_node, 1);
+        ptr_write_i32(parent, new_node, nil);
 
         if root == nil {
             root = new_node;
-            color[new_node] = 0;
+            ptr_write_i32(color, new_node, 0);
         }
         if root != nil and root != new_node {
             let cur: i32 = root;
@@ -58,13 +98,13 @@ fn main() -> i32 {
 
             while cur != nil and placed == 0 {
                 par = cur;
-                if new_key < key[cur] {
+                if new_key < ptr_read_i64(key, cur) {
                     go_left = 1;
-                    cur = left[cur];
+                    cur = ptr_read_i32(left, cur);
                 }
-                if new_key >= key[cur] and placed == 0 and go_left == 0 {
+                if new_key >= ptr_read_i64(key, cur) and placed == 0 and go_left == 0 {
                     go_left = 0;
-                    cur = right[cur];
+                    cur = ptr_read_i32(right, cur);
                 }
                 if cur == nil {
                     placed = 1;
@@ -74,98 +114,78 @@ fn main() -> i32 {
                 }
             }
 
-            parent[new_node] = par;
-            if new_key < key[par] {
-                left[par] = new_node;
+            ptr_write_i32(parent, new_node, par);
+            if new_key < ptr_read_i64(key, par) {
+                ptr_write_i32(left, par, new_node);
             }
-            if new_key >= key[par] {
-                right[par] = new_node;
+            if new_key >= ptr_read_i64(key, par) {
+                ptr_write_i32(right, par, new_node);
             }
 
             // RB fixup: simplified - fix red-red violations by recoloring
             let z: i32 = new_node;
             let fix_count: i32 = 0;
-            while parent[z] != nil and color[parent[z]] == 1 and fix_count < 20 {
-                let p: i32 = parent[z];
-                let gp: i32 = parent[p];
+            while ptr_read_i32(parent, z) != nil and ptr_read_i32(color, ptr_read_i32(parent, z)) == 1 and fix_count < 20 {
+                let p: i32 = ptr_read_i32(parent, z);
+                let gp: i32 = ptr_read_i32(parent, p);
                 if gp == nil {
-                    color[p] = 0;
+                    ptr_write_i32(color, p, 0);
                     fix_count = 20;
                 }
                 if gp != nil {
-                    if p == left[gp] {
-                        let uncle: i32 = right[gp];
-                        if color[uncle] == 1 {
-                            color[p] = 0;
-                            color[uncle] = 0;
-                            color[gp] = 1;
+                    if p == ptr_read_i32(left, gp) {
+                        let uncle: i32 = ptr_read_i32(right, gp);
+                        if ptr_read_i32(color, uncle) == 1 {
+                            ptr_write_i32(color, p, 0);
+                            ptr_write_i32(color, uncle, 0);
+                            ptr_write_i32(color, gp, 1);
                             z = gp;
                         }
-                        if color[uncle] != 1 {
-                            // Simplified: just recolor
-                            color[p] = 0;
-                            color[gp] = 1;
+                        if ptr_read_i32(color, uncle) != 1 {
+                            ptr_write_i32(color, p, 0);
+                            ptr_write_i32(color, gp, 1);
                             fix_count = 20;
                         }
                     }
-                    if p == right[gp] {
-                        let uncle: i32 = left[gp];
-                        if color[uncle] == 1 {
-                            color[p] = 0;
-                            color[uncle] = 0;
-                            color[gp] = 1;
+                    if p == ptr_read_i32(right, gp) {
+                        let uncle: i32 = ptr_read_i32(left, gp);
+                        if ptr_read_i32(color, uncle) == 1 {
+                            ptr_write_i32(color, p, 0);
+                            ptr_write_i32(color, uncle, 0);
+                            ptr_write_i32(color, gp, 1);
                             z = gp;
                         }
-                        if color[uncle] != 1 {
-                            color[p] = 0;
-                            color[gp] = 1;
+                        if ptr_read_i32(color, uncle) != 1 {
+                            ptr_write_i32(color, p, 0);
+                            ptr_write_i32(color, gp, 1);
                             fix_count = 20;
                         }
                     }
                 }
                 fix_count = fix_count + 1;
             }
-            color[root] = 0;
+            ptr_write_i32(color, root, 0);
         }
     }
 
     // SEARCH 50000 keys
-    let found_count: i32 = 0;
-    let depth_sum: i64 = 0;
-    for s: i32 in range(0, 50000) {
-        let search_key: i64 = insert_keys[s];
-        let cur: i32 = root;
-        let depth: i32 = 0;
-        let found: i32 = 0;
-        while cur != nil and found == 0 {
-            depth = depth + 1;
-            if key[cur] == search_key {
-                found = 1;
-                found_count = found_count + 1;
-            }
-            if found == 0 and search_key < key[cur] {
-                cur = left[cur];
-            }
-            if found == 0 and search_key >= key[cur] {
-                cur = right[cur];
-            }
-        }
-        depth_sum = depth_sum + widen(depth);
-    }
+    let search_result: i64 = search_keys_compute(key, left, right, insert_keys, root, 50000);
+    let found_count: i32 = narrow(search_result / 10000000);
+    let depth_sum: i64 = search_result % 10000000;
 
     // Count colors
-    let red_count: i32 = 0;
-    let black_count: i32 = 0;
-    for i: i32 in range(1, node_count) {
-        if color[i] == 1 {
-            red_count = red_count + 1;
-        }
-        if color[i] == 0 {
-            black_count = black_count + 1;
-        }
-    }
+    let color_result: i64 = count_colors(color, node_count);
+    let red_count: i32 = narrow(color_result % 100);
+    let black_count: i32 = narrow(color_result / 100);
 
     let checksum: i64 = widen(found_count) * 10000 + depth_sum + widen(red_count) + widen(black_count) * 100;
     print_i64(checksum);
+
+    heap_free(key);
+    heap_free(left);
+    heap_free(right);
+    heap_free(parent);
+    heap_free(color);
+    heap_free(insert_keys);
     return 0;
 }
