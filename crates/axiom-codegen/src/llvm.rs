@@ -151,6 +151,9 @@ struct CodegenContext {
     /// Whether coroutine builtins are used (coro_create/coro_resume/etc.).
     /// When true, coroutine extern declarations are emitted and the runtime is linked.
     needs_coroutines: bool,
+    /// Whether threading/job-system builtins are used (thread_create, jobs_init, etc.).
+    /// When true, threading extern declarations are emitted and the runtime is linked.
+    needs_threading: bool,
     /// Registry of struct types (name → StructInfo).
     struct_registry: HashMap<String, StructInfo>,
     /// Collected errors.
@@ -210,6 +213,7 @@ impl CodegenContext {
             needs_arena: false,
             needs_runtime: false,
             needs_coroutines: false,
+            needs_threading: false,
             struct_registry: HashMap::new(),
             errors: Vec::new(),
             block_terminated: false,
@@ -541,6 +545,35 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         let _ = writeln!(ctx.output, "declare void @axiom_coro_destroy(i32)");
     }
 
+    // Emit threading + job system extern declarations (also part of axiom_rt.c).
+    if ctx.needs_threading {
+        // Thread creation / join
+        let _ = writeln!(ctx.output, "declare i32 @axiom_thread_create(ptr, ptr)");
+        let _ = writeln!(ctx.output, "declare void @axiom_thread_join(i32)");
+        // Atomics
+        let _ = writeln!(ctx.output, "declare i32 @axiom_atomic_load(ptr)");
+        let _ = writeln!(ctx.output, "declare void @axiom_atomic_store(ptr, i32)");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_atomic_add(ptr, i32)");
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @axiom_atomic_cas(ptr, i32, i32)"
+        );
+        // Mutex
+        let _ = writeln!(ctx.output, "declare ptr @axiom_mutex_create()");
+        let _ = writeln!(ctx.output, "declare void @axiom_mutex_lock(ptr)");
+        let _ = writeln!(ctx.output, "declare void @axiom_mutex_unlock(ptr)");
+        let _ = writeln!(ctx.output, "declare void @axiom_mutex_destroy(ptr)");
+        // Job system
+        let _ = writeln!(ctx.output, "declare void @axiom_jobs_init(i32)");
+        let _ = writeln!(
+            ctx.output,
+            "declare void @axiom_job_dispatch(ptr, ptr, i32)"
+        );
+        let _ = writeln!(ctx.output, "declare void @axiom_job_wait()");
+        let _ = writeln!(ctx.output, "declare void @axiom_jobs_shutdown()");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_num_cores()");
+    }
+
     // Emit attribute groups.
     if !ctx.attribute_groups.is_empty() {
         ctx.emit_blank();
@@ -579,6 +612,21 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_coro_yield")
         || ir.contains("@axiom_coro_is_done")
         || ir.contains("@axiom_coro_destroy")
+        || ir.contains("@axiom_thread_create")
+        || ir.contains("@axiom_thread_join")
+        || ir.contains("@axiom_atomic_load")
+        || ir.contains("@axiom_atomic_store")
+        || ir.contains("@axiom_atomic_add")
+        || ir.contains("@axiom_atomic_cas")
+        || ir.contains("@axiom_mutex_create")
+        || ir.contains("@axiom_mutex_lock")
+        || ir.contains("@axiom_mutex_unlock")
+        || ir.contains("@axiom_mutex_destroy")
+        || ir.contains("@axiom_jobs_init")
+        || ir.contains("@axiom_job_dispatch")
+        || ir.contains("@axiom_job_wait")
+        || ir.contains("@axiom_jobs_shutdown")
+        || ir.contains("@axiom_num_cores")
 }
 
 /// Register a struct type in the codegen context.
@@ -2363,6 +2411,25 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "coro_yield" => return emit_builtin_coro_yield(ctx, args),
             "coro_is_done" => return emit_builtin_coro_is_done(ctx, args),
             "coro_destroy" => return emit_builtin_coro_destroy(ctx, args),
+            // Threading primitives (axiom_rt.c)
+            "thread_create" => return emit_builtin_thread_create(ctx, args),
+            "thread_join" => return emit_builtin_thread_join(ctx, args),
+            // Atomics (axiom_rt.c)
+            "atomic_load" => return emit_builtin_atomic_load(ctx, args),
+            "atomic_store" => return emit_builtin_atomic_store(ctx, args),
+            "atomic_add" => return emit_builtin_atomic_add(ctx, args),
+            "atomic_cas" => return emit_builtin_atomic_cas(ctx, args),
+            // Mutex (axiom_rt.c)
+            "mutex_create" => return emit_builtin_mutex_create(ctx, args),
+            "mutex_lock" => return emit_builtin_mutex_lock(ctx, args),
+            "mutex_unlock" => return emit_builtin_mutex_unlock(ctx, args),
+            "mutex_destroy" => return emit_builtin_mutex_destroy(ctx, args),
+            // Job system (axiom_rt.c -- thread pool)
+            "jobs_init" => return emit_builtin_jobs_init(ctx, args),
+            "job_dispatch" => return emit_builtin_job_dispatch(ctx, args),
+            "job_wait" => return emit_builtin_job_wait(ctx, args),
+            "jobs_shutdown" => return emit_builtin_jobs_shutdown(ctx, args),
+            "num_cores" => return emit_builtin_num_cores(ctx, args),
             _ => {}
         }
 
@@ -3865,6 +3932,447 @@ fn emit_builtin_coro_destroy(ctx: &mut CodegenContext, args: &[HirExpr]) -> Llvm
     LlvmValue {
         reg: "0".to_string(),
         ty: "void".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Threading primitives (axiom_rt.c -- threads, atomics, mutexes)
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `thread_create(func: ptr, arg: ptr) -> i32`.
+///
+/// Creates a new OS thread that runs `func(arg)`. Returns a handle.
+fn emit_builtin_thread_create(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "thread_create() requires exactly 2 arguments (func, arg)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "-1".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let func_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let arg_val = emit_expr(ctx, &args[1], Some("ptr"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_thread_create(ptr {}, ptr {})",
+        func_val.reg, arg_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `thread_join(handle: i32)`.
+///
+/// Waits for the thread identified by `handle` to finish.
+fn emit_builtin_thread_join(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "thread_join() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("i32"));
+
+    ctx.emit(&format!(
+        "call void @axiom_thread_join(i32 {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `atomic_load(ptr: ptr) -> i32`.
+///
+/// Atomically loads an i32 from the given pointer.
+fn emit_builtin_atomic_load(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "atomic_load() requires exactly 1 argument (ptr)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_atomic_load(ptr {})",
+        ptr_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `atomic_store(ptr: ptr, val: i32)`.
+///
+/// Atomically stores an i32 to the given pointer.
+fn emit_builtin_atomic_store(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "atomic_store() requires exactly 2 arguments (ptr, val)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let val = emit_expr(ctx, &args[1], Some("i32"));
+
+    ctx.emit(&format!(
+        "call void @axiom_atomic_store(ptr {}, i32 {})",
+        ptr_val.reg, val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `atomic_add(ptr: ptr, val: i32) -> i32`.
+///
+/// Atomically adds `val` to the i32 at `ptr`. Returns the old value.
+fn emit_builtin_atomic_add(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "atomic_add() requires exactly 2 arguments (ptr, val)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let val = emit_expr(ctx, &args[1], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_atomic_add(ptr {}, i32 {})",
+        ptr_val.reg, val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `atomic_cas(ptr: ptr, expected: i32, desired: i32) -> i32`.
+///
+/// Atomically compares `*ptr` with `expected`; if equal, stores `desired`.
+/// Returns the old value (useful for checking if the CAS succeeded).
+fn emit_builtin_atomic_cas(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "atomic_cas() requires exactly 3 arguments (ptr, expected, desired)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let expected_val = emit_expr(ctx, &args[1], Some("i32"));
+    let desired_val = emit_expr(ctx, &args[2], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_atomic_cas(ptr {}, i32 {}, i32 {})",
+        ptr_val.reg, expected_val.reg, desired_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `mutex_create() -> ptr`.
+///
+/// Creates and returns a new mutex handle.
+fn emit_builtin_mutex_create(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if !args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "mutex_create() takes no arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call ptr @axiom_mutex_create()"
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `mutex_lock(mtx: ptr)`.
+///
+/// Acquires the mutex.
+fn emit_builtin_mutex_lock(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "mutex_lock() requires exactly 1 argument (mtx)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let mtx_val = emit_expr(ctx, &args[0], Some("ptr"));
+
+    ctx.emit(&format!(
+        "call void @axiom_mutex_lock(ptr {})",
+        mtx_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `mutex_unlock(mtx: ptr)`.
+///
+/// Releases the mutex.
+fn emit_builtin_mutex_unlock(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "mutex_unlock() requires exactly 1 argument (mtx)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let mtx_val = emit_expr(ctx, &args[0], Some("ptr"));
+
+    ctx.emit(&format!(
+        "call void @axiom_mutex_unlock(ptr {})",
+        mtx_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `mutex_destroy(mtx: ptr)`.
+///
+/// Destroys the mutex and frees its resources.
+fn emit_builtin_mutex_destroy(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "mutex_destroy() requires exactly 1 argument (mtx)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let mtx_val = emit_expr(ctx, &args[0], Some("ptr"));
+
+    ctx.emit(&format!(
+        "call void @axiom_mutex_destroy(ptr {})",
+        mtx_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Job system builtins (axiom_rt.c -- thread pool + parallel dispatch)
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `jobs_init(num_workers: i32)`.
+///
+/// Initializes the thread pool with `num_workers` worker threads.
+fn emit_builtin_jobs_init(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "jobs_init() requires exactly 1 argument (num_workers)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let workers_val = emit_expr(ctx, &args[0], Some("i32"));
+
+    ctx.emit(&format!(
+        "call void @axiom_jobs_init(i32 {})",
+        workers_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `job_dispatch(func: ptr, data: ptr, total_items: i32)`.
+///
+/// Splits `total_items` into chunks across workers. Each worker calls
+/// `func(data, chunk_start, chunk_end)`.
+fn emit_builtin_job_dispatch(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "job_dispatch() requires exactly 3 arguments (func, data, total_items)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let func_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let data_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let total_val = emit_expr(ctx, &args[2], Some("i32"));
+
+    ctx.emit(&format!(
+        "call void @axiom_job_dispatch(ptr {}, ptr {}, i32 {})",
+        func_val.reg, data_val.reg, total_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `job_wait()`.
+///
+/// Blocks until all dispatched jobs have completed.
+fn emit_builtin_job_wait(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if !args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "job_wait() takes no arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    ctx.emit("call void @axiom_job_wait()");
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `jobs_shutdown()`.
+///
+/// Shuts down the thread pool and joins all worker threads.
+fn emit_builtin_jobs_shutdown(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if !args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "jobs_shutdown() takes no arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    ctx.emit("call void @axiom_jobs_shutdown()");
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `num_cores() -> i32`.
+///
+/// Returns the number of hardware threads (logical cores) available.
+fn emit_builtin_num_cores(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if !args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "num_cores() takes no arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{result_reg} = call i32 @axiom_num_cores()"));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
     }
 }
 

@@ -1,0 +1,31 @@
+@module jobs_test;
+
+@pure
+fn compute_chunk(data: ptr[i32], start: i32, end: i32) {
+    for i: i32 in range(start, end) {
+        ptr_write_i32(data, i, i * i);
+    }
+}
+
+fn main() -> i32 {
+    let n: i32 = 10000;
+    let data: ptr[i32] = heap_alloc(n, 4);
+
+    // Initialize thread pool
+    jobs_init(4);
+
+    // Dispatch parallel work
+    job_dispatch(compute_chunk, data, n);
+    job_wait();
+
+    // Sum results
+    let sum: i64 = 0;
+    for i: i32 in range(0, n) {
+        sum = sum + widen(ptr_read_i32(data, i));
+    }
+
+    jobs_shutdown();
+    heap_free(data);
+    print_i64(sum);
+    return 0;
+}

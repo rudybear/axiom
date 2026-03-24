@@ -172,6 +172,11 @@ fn invoke_clang_core(
     // Link the C runtime if needed.
     if let Some(rt) = runtime_c {
         cmd.arg(rt);
+        // On POSIX platforms, the threading primitives in axiom_rt.c require
+        // pthreads. Always link it when the runtime is used -- it is harmless
+        // if only non-threaded builtins were called.
+        #[cfg(not(target_os = "windows"))]
+        cmd.arg("-lpthread");
     }
 
     cmd.arg("-o")
