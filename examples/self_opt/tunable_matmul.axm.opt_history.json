@@ -4,7 +4,6 @@
       "version": "v1",
       "params": {
         "unroll_factor": 16,
-        "tile_k": 256,
         "prefetch_distance": 8,
         "loop_order": [
           "i",
@@ -12,6 +11,7 @@
           "k"
         ],
         "tile_n": 256,
+        "tile_k": 256,
         "tile_m": 256
       },
       "metrics": {},
@@ -22,21 +22,40 @@
     {
       "version": "v2",
       "params": {
+        "tile_m": 256,
+        "prefetch_distance": 8,
+        "unroll_factor": 16,
         "tile_k": 256,
         "loop_order": [
           "i",
           "j",
           "k"
         ],
-        "prefetch_distance": 8,
-        "tile_m": 256,
-        "tile_n": 256,
-        "unroll_factor": 16
+        "tile_n": 256
       },
       "metrics": {},
       "agent": "axiom-llm-optimizer-grid-search",
       "target": "native",
       "timestamp": "1774336434s"
+    },
+    {
+      "version": "v3",
+      "params": {
+        "unroll_factor": 16,
+        "tile_m": 256,
+        "tile_k": 256,
+        "prefetch_distance": 8,
+        "tile_n": 256,
+        "loop_order": [
+          "i",
+          "j",
+          "k"
+        ]
+      },
+      "metrics": {},
+      "agent": "axiom-llm-optimizer-grid-search",
+      "target": "native",
+      "timestamp": "1774336846s"
     }
   ]
 }

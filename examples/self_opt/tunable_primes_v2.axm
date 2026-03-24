@@ -1,0 +1,42 @@
+@module tunable_primes_v2;
+@intent("LLM-optimized prime counting — 6k±1 wheel factorization");
+
+// LLM OPTIMIZATION LOG:
+// v1: naive trial division by odds (step=2), 22.5ms
+// v2 (this): 6k±1 wheel — checks divisibility by 2 and 3 first,
+//     then only tests 6k-1 and 6k+1. Skips 2/3 of candidates.
+//     Suggested by LLM after observing divl bottleneck in assembly.
+
+@strategy {
+    algorithm: ?wheel_size
+}
+
+@pure
+fn is_prime_wheel(n: i32) -> i32 {
+    if n < 2 { return 0; }
+    if n < 4 { return 1; }
+    if n - (n / 2) * 2 == 0 { return 0; }
+    if n - (n / 3) * 3 == 0 { return 0; }
+    // 6k±1 wheel: only check i=5,7,11,13,17,19,...
+    let i: i32 = 5;
+    while i * i <= n {
+        if n - (n / i) * i == 0 { return 0; }
+        // i+2 checks 6k+1
+        let j: i32 = i + 2;
+        if j * j <= n {
+            if n - (n / j) * j == 0 { return 0; }
+        }
+        i = i + 6;
+    }
+    return 1;
+}
+
+fn main() -> i32 {
+    let limit: i32 = 500000;
+    let count: i32 = 0;
+    for n: i32 in range(2, limit) {
+        count = count + is_prime_wheel(n);
+    }
+    print_i32(count);
+    return 0;
+}

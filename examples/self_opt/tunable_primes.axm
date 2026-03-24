@@ -1,0 +1,31 @@
+@module tunable_primes;
+@intent("Count primes with tunable trial division — LLM optimization demo");
+
+@strategy {
+    limit: ?search_limit
+    trial_step: ?trial_step
+}
+
+@pure
+fn is_prime(n: i32, step: i32) -> i32 {
+    if n < 2 { return 0; }
+    if n < 4 { return 1; }
+    if n - (n / 2) * 2 == 0 { return 0; }
+    let i: i32 = 3;
+    while i * i <= n {
+        if n - (n / i) * i == 0 { return 0; }
+        i = i + step;
+    }
+    return 1;
+}
+
+fn main() -> i32 {
+    let limit: i32 = 500000;
+    let step: i32 = 2;
+    let count: i32 = 0;
+    for n: i32 in range(2, limit) {
+        count = count + is_prime(n, step);
+    }
+    print_i32(count);
+    return 0;
+}

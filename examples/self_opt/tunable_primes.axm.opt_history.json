@@ -1,0 +1,27 @@
+{
+  "records": [
+    {
+      "version": "v1",
+      "params": {},
+      "metrics": {
+        "time_ms": 22.4741
+      },
+      "agent": "axiom-llm-optimizer",
+      "target": "native",
+      "timestamp": "1774336880s"
+    },
+    {
+      "version": "v2",
+      "params": {
+        "search_limit": 1,
+        "trial_step": 1
+      },
+      "metrics": {
+        "time_ms": 22.4741
+      },
+      "agent": "axiom-llm-optimizer-grid-search",
+      "target": "native",
+      "timestamp": "1774336880s"
+    }
+  ]
+}
