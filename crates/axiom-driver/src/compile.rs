@@ -105,12 +105,36 @@ fn find_compiler() -> miette::Result<CompilerKind> {
 /// Invoke clang (or compatible compiler) to compile a `.ll` file to a native
 /// binary.
 fn invoke_clang(clang: &Path, ll_file: &Path, output: &str) -> miette::Result<()> {
+    // First try linking with mimalloc for faster heap allocation.
+    // If mimalloc is not installed, fall back to system malloc.
+    if try_invoke_clang_with_mimalloc(clang, ll_file, output) {
+        return Ok(());
+    }
+    invoke_clang_core(clang, ll_file, output, &[])
+}
+
+/// Try to compile with `-lmimalloc`. Returns `true` on success.
+fn try_invoke_clang_with_mimalloc(clang: &Path, ll_file: &Path, output: &str) -> bool {
+    invoke_clang_core(clang, ll_file, output, &["-lmimalloc"]).is_ok()
+}
+
+/// Core clang invocation with optional extra linker flags.
+fn invoke_clang_core(
+    clang: &Path,
+    ll_file: &Path,
+    output: &str,
+    extra_args: &[&str],
+) -> miette::Result<()> {
     let mut cmd = Command::new(clang);
     cmd.arg("-O2")
         .arg("-Wno-override-module")
         .arg(ll_file)
         .arg("-o")
         .arg(output);
+
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
 
     // AXIOM uses stack-allocated arrays (alloca). Large arrays need a bigger
     // stack than the default 1MB on Windows. Request 64MB.

@@ -120,6 +120,14 @@ struct CodegenContext {
     needs_fshl_i32: bool,
     /// Whether the `@llvm.fshr.i32` intrinsic is needed (rotate right).
     needs_fshr_i32: bool,
+    /// Whether `@malloc` is needed (heap_alloc).
+    needs_malloc: bool,
+    /// Whether `@calloc` is needed (heap_alloc_zeroed).
+    needs_calloc: bool,
+    /// Whether `@realloc` is needed (heap_realloc).
+    needs_realloc: bool,
+    /// Whether `@free` is needed (heap_free).
+    needs_free: bool,
     /// Collected errors.
     errors: Vec<CodegenError>,
     /// Whether the current basic block has been terminated (ret or br).
@@ -170,6 +178,10 @@ impl CodegenContext {
             needs_memset: false,
             needs_fshl_i32: false,
             needs_fshr_i32: false,
+            needs_malloc: false,
+            needs_calloc: false,
+            needs_realloc: false,
+            needs_free: false,
             errors: Vec::new(),
             block_terminated: false,
             current_return_type: String::new(),
@@ -418,6 +430,18 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             ctx.output,
             "declare i32 @llvm.fshr.i32(i32, i32, i32)"
         );
+    }
+    if ctx.needs_malloc {
+        let _ = writeln!(ctx.output, "declare noalias ptr @malloc(i64)");
+    }
+    if ctx.needs_calloc {
+        let _ = writeln!(ctx.output, "declare noalias ptr @calloc(i64, i64)");
+    }
+    if ctx.needs_realloc {
+        let _ = writeln!(ctx.output, "declare noalias ptr @realloc(ptr, i64)");
+    }
+    if ctx.needs_free {
+        let _ = writeln!(ctx.output, "declare void @free(ptr)");
     }
 
     // Emit attribute groups.
@@ -1755,6 +1779,16 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "bnot" => return emit_builtin_bnot(ctx, args),
             "rotl" => return emit_builtin_rotl(ctx, args),
             "rotr" => return emit_builtin_rotr(ctx, args),
+            "heap_alloc" => return emit_builtin_heap_alloc(ctx, args),
+            "heap_alloc_zeroed" => return emit_builtin_heap_alloc_zeroed(ctx, args),
+            "heap_free" => return emit_builtin_heap_free(ctx, args),
+            "heap_realloc" => return emit_builtin_heap_realloc(ctx, args),
+            "ptr_read_i32" => return emit_builtin_ptr_read(ctx, args, "i32"),
+            "ptr_read_i64" => return emit_builtin_ptr_read(ctx, args, "i64"),
+            "ptr_read_f64" => return emit_builtin_ptr_read(ctx, args, "double"),
+            "ptr_write_i32" => return emit_builtin_ptr_write(ctx, args, "i32"),
+            "ptr_write_i64" => return emit_builtin_ptr_write(ctx, args, "i64"),
+            "ptr_write_f64" => return emit_builtin_ptr_write(ctx, args, "double"),
             _ => {}
         }
 
@@ -2549,6 +2583,266 @@ fn emit_builtin_rotr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
     LlvmValue {
         reg: result_reg,
         ty: "i32".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Heap allocation builtins
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `heap_alloc(count: i32, elem_size: i32) -> ptr`.
+///
+/// Calls `malloc(count * elem_size)` with `noalias` on the result.
+fn emit_builtin_heap_alloc(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_malloc = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "heap_alloc() requires exactly 2 arguments (count, elem_size)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let count = emit_expr(ctx, &args[0], Some("i32"));
+    let elem_size = emit_expr(ctx, &args[1], Some("i32"));
+
+    // Widen both to i64 for the multiplication.
+    let count64 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{count64} = sext i32 {} to i64",
+        count.reg
+    ));
+    let elem64 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{elem64} = sext i32 {} to i64",
+        elem_size.reg
+    ));
+    let total = ctx.fresh_reg();
+    ctx.emit(&format!("{total} = mul i64 {count64}, {elem64}"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call noalias ptr @malloc(i64 {total})"
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `heap_alloc_zeroed(count: i32, elem_size: i32) -> ptr`.
+///
+/// Calls `calloc(count, elem_size)` with `noalias` on the result.
+fn emit_builtin_heap_alloc_zeroed(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_calloc = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "heap_alloc_zeroed() requires exactly 2 arguments (count, elem_size)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let count = emit_expr(ctx, &args[0], Some("i32"));
+    let elem_size = emit_expr(ctx, &args[1], Some("i32"));
+
+    // Widen both to i64 for calloc.
+    let count64 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{count64} = sext i32 {} to i64",
+        count.reg
+    ));
+    let elem64 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{elem64} = sext i32 {} to i64",
+        elem_size.reg
+    ));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call noalias ptr @calloc(i64 {count64}, i64 {elem64})"
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `heap_free(p: ptr)`.
+///
+/// Calls `free(p)`.
+fn emit_builtin_heap_free(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_free = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "heap_free() requires exactly 1 argument (ptr)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    ctx.emit(&format!("call void @free(ptr {})", ptr_val.reg));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `heap_realloc(p: ptr, new_count: i32, elem_size: i32) -> ptr`.
+///
+/// Calls `realloc(p, new_count * elem_size)` with `noalias` on the result.
+fn emit_builtin_heap_realloc(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_realloc = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "heap_realloc() requires exactly 3 arguments (ptr, new_count, elem_size)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let new_count = emit_expr(ctx, &args[1], Some("i32"));
+    let elem_size = emit_expr(ctx, &args[2], Some("i32"));
+
+    // Widen to i64 for the multiplication.
+    let count64 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{count64} = sext i32 {} to i64",
+        new_count.reg
+    ));
+    let elem64 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{elem64} = sext i32 {} to i64",
+        elem_size.reg
+    ));
+    let total = ctx.fresh_reg();
+    ctx.emit(&format!("{total} = mul i64 {count64}, {elem64}"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call noalias ptr @realloc(ptr {}, i64 {total})",
+        ptr_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pointer read/write builtins
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `ptr_read_<T>(p: ptr, index: i32) -> T`.
+///
+/// Emits GEP + load for the given element type.
+fn emit_builtin_ptr_read(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+    elem_type: &str,
+) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("ptr_read_{elem_type}() requires exactly 2 arguments (ptr, index)"),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: elem_type.to_string(),
+        };
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+
+    // Widen index to i64 for GEP.
+    let idx64 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{idx64} = sext i32 {} to i64",
+        index.reg
+    ));
+
+    let gep_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{gep_reg} = getelementptr {elem_type}, ptr {}, i64 {idx64}",
+        ptr_val.reg
+    ));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = load {elem_type}, ptr {gep_reg}"
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: elem_type.to_string(),
+    }
+}
+
+/// Emit built-in `ptr_write_<T>(p: ptr, index: i32, val: T)`.
+///
+/// Emits GEP + store for the given element type.
+fn emit_builtin_ptr_write(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+    elem_type: &str,
+) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!(
+                "ptr_write_{elem_type}() requires exactly 3 arguments (ptr, index, val)"
+            ),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+    let val = emit_expr(ctx, &args[2], Some(elem_type));
+
+    // Widen index to i64 for GEP.
+    let idx64 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{idx64} = sext i32 {} to i64",
+        index.reg
+    ));
+
+    let gep_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{gep_reg} = getelementptr {elem_type}, ptr {}, i64 {idx64}",
+        ptr_val.reg
+    ));
+
+    ctx.emit(&format!(
+        "store {elem_type} {}, ptr {gep_reg}",
+        val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
     }
 }
 
@@ -5683,6 +5977,480 @@ fn main() -> i32 {
         assert!(
             ir.contains("declare i32 @llvm.fshr.i32(i32, i32, i32)"),
             "should declare llvm.fshr.i32: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Heap allocation builtin tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_heap_alloc() {
+        // heap_alloc(100, 4) should emit sext + mul + call malloc with noalias
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("heap_alloc", vec![int_lit(100), int_lit(4)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call noalias ptr @malloc(i64"),
+            "heap_alloc should emit malloc call with noalias: {ir}"
+        );
+        assert!(
+            ir.contains("declare noalias ptr @malloc(i64)"),
+            "should declare malloc: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_heap_alloc_zeroed() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("heap_alloc_zeroed", vec![int_lit(50), int_lit(4)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call noalias ptr @calloc(i64"),
+            "heap_alloc_zeroed should emit calloc call: {ir}"
+        );
+        assert!(
+            ir.contains("declare noalias ptr @calloc(i64, i64)"),
+            "should declare calloc: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_heap_free() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("heap_free", vec![ident("p")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call void @free(ptr"),
+            "heap_free should emit free call: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @free(ptr)"),
+            "should declare free: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_heap_realloc() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                        mutable: true,
+                    }),
+                    stmt(HirStmtKind::Assign {
+                        target: ident("p"),
+                        value: call(
+                            "heap_realloc",
+                            vec![ident("p"), int_lit(20), int_lit(4)],
+                        ),
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("heap_free", vec![ident("p")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call noalias ptr @realloc(ptr"),
+            "heap_realloc should emit realloc call: {ir}"
+        );
+        assert!(
+            ir.contains("declare noalias ptr @realloc(ptr, i64)"),
+            "should declare realloc: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_ptr_read_write_i32() {
+        // ptr_write_i32(p, 0, 42); ptr_read_i32(p, 0) should emit GEP + store/load
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call(
+                            "ptr_write_i32",
+                            vec![ident("p"), int_lit(0), int_lit(42)],
+                        ),
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("ptr_read_i32", vec![ident("p"), int_lit(0)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("heap_free", vec![ident("p")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: ident("val"),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // ptr_write: GEP + store
+        assert!(
+            ir.contains("getelementptr i32, ptr"),
+            "ptr_write should emit GEP: {ir}"
+        );
+        assert!(
+            ir.contains("store i32"),
+            "ptr_write should emit store: {ir}"
+        );
+        // ptr_read: GEP + load
+        assert!(
+            ir.contains("load i32, ptr"),
+            "ptr_read should emit load: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_ptr_read_write_f64() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::F64)),
+                        },
+                        value: call("heap_alloc", vec![int_lit(10), int_lit(8)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call(
+                            "ptr_write_f64",
+                            vec![ident("p"), int_lit(0), float_lit(3.14)],
+                        ),
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: call("ptr_read_f64", vec![ident("p"), int_lit(0)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("heap_free", vec![ident("p")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("getelementptr double, ptr"),
+            "ptr_write_f64 should emit GEP with double: {ir}"
+        );
+        assert!(
+            ir.contains("store double"),
+            "ptr_write_f64 should emit store double: {ir}"
+        );
+        assert!(
+            ir.contains("load double, ptr"),
+            "ptr_read_f64 should emit load double: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_ptr_read_write_i64() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I64)),
+                        },
+                        value: call("heap_alloc", vec![int_lit(10), int_lit(8)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call(
+                            "ptr_write_i64",
+                            vec![ident("p"), int_lit(0), int_lit(999)],
+                        ),
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: call("ptr_read_i64", vec![ident("p"), int_lit(0)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("heap_free", vec![ident("p")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("getelementptr i64, ptr"),
+            "ptr_write_i64 should emit GEP with i64: {ir}"
+        );
+        assert!(
+            ir.contains("store i64"),
+            "ptr_write_i64 should emit store i64: {ir}"
+        );
+        assert!(
+            ir.contains("load i64, ptr"),
+            "ptr_read_i64 should emit load i64: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_heap_program_full_integration() {
+        // A full program: alloc, write, read, sum, free -- mirrors heap_test.axm
+        let m = module(
+            Some("heap_int_test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // let data: ptr[i32] = heap_alloc(10, 4);
+                    stmt(HirStmtKind::Let {
+                        name: "data".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                        mutable: false,
+                    }),
+                    // for i in range(0,10) { ptr_write_i32(data, i, i*i); }
+                    stmt(HirStmtKind::For {
+                        var: "i".to_string(),
+                        var_span: span(),
+                        var_type: HirType::Primitive(PrimitiveType::I32),
+                        iterable: call("range", vec![int_lit(0), int_lit(10)]),
+                        body: block(vec![stmt(HirStmtKind::Expr {
+                            expr: call(
+                                "ptr_write_i32",
+                                vec![
+                                    ident("data"),
+                                    ident("i"),
+                                    binop(BinOp::Mul, ident("i"), ident("i")),
+                                ],
+                            ),
+                        })]),
+                    }),
+                    // let sum: i64 = 0;
+                    stmt(HirStmtKind::Let {
+                        name: "sum".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: int_lit(0),
+                        mutable: true,
+                    }),
+                    // for i in range(0,10) { sum = sum + widen(ptr_read_i32(data, i)); }
+                    stmt(HirStmtKind::For {
+                        var: "i".to_string(),
+                        var_span: span(),
+                        var_type: HirType::Primitive(PrimitiveType::I32),
+                        iterable: call("range", vec![int_lit(0), int_lit(10)]),
+                        body: block(vec![stmt(HirStmtKind::Assign {
+                            target: ident("sum"),
+                            value: binop(
+                                BinOp::Add,
+                                ident("sum"),
+                                call(
+                                    "widen",
+                                    vec![call("ptr_read_i32", vec![ident("data"), ident("i")])],
+                                ),
+                            ),
+                        })]),
+                    }),
+                    // heap_free(data);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("heap_free", vec![ident("data")]),
+                    }),
+                    // print_i64(sum);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("print_i64", vec![ident("sum")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Verify all key components are present.
+        assert!(
+            ir.contains("call noalias ptr @malloc(i64"),
+            "should emit malloc: {ir}"
+        );
+        assert!(
+            ir.contains("getelementptr i32, ptr"),
+            "should emit GEP for ptr_write/read: {ir}"
+        );
+        assert!(
+            ir.contains("call void @free(ptr"),
+            "should emit free: {ir}"
+        );
+        assert!(
+            ir.contains("sext i32"),
+            "should widen i32 index to i64: {ir}"
+        );
+        assert!(
+            ir.contains("declare noalias ptr @malloc(i64)"),
+            "should declare malloc: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @free(ptr)"),
+            "should declare free: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_no_malloc_decl_when_unused() {
+        // A program that doesn't use heap builtins should NOT declare malloc/free.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![stmt(HirStmtKind::Return {
+                    value: int_lit(0),
+                })]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            !ir.contains("@malloc"),
+            "should not declare malloc when unused: {ir}"
+        );
+        assert!(
+            !ir.contains("@free"),
+            "should not declare free when unused: {ir}"
+        );
+        assert!(
+            !ir.contains("@calloc"),
+            "should not declare calloc when unused: {ir}"
+        );
+        assert!(
+            !ir.contains("@realloc"),
+            "should not declare realloc when unused: {ir}"
         );
     }
 }

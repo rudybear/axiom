@@ -1,0 +1,22 @@
+@module heap_test;
+@intent("Test heap allocation builtins");
+
+fn main() -> i32 {
+    // Allocate array of 1000 i32s on heap
+    let data: ptr[i32] = heap_alloc(1000, 4);
+
+    // Fill with squares
+    for i: i32 in range(0, 1000) {
+        ptr_write_i32(data, i, i * i);
+    }
+
+    // Sum them
+    let sum: i64 = 0;
+    for i: i32 in range(0, 1000) {
+        sum = sum + widen(ptr_read_i32(data, i));
+    }
+
+    heap_free(data);
+    print_i64(sum);
+    return 0;
+}
