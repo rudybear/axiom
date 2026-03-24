@@ -105,12 +105,19 @@ fn find_compiler() -> miette::Result<CompilerKind> {
 /// Invoke clang (or compatible compiler) to compile a `.ll` file to a native
 /// binary.
 fn invoke_clang(clang: &Path, ll_file: &Path, output: &str) -> miette::Result<()> {
-    let child = Command::new(clang)
-        .arg("-O2")
+    let mut cmd = Command::new(clang);
+    cmd.arg("-O2")
         .arg("-Wno-override-module")
         .arg(ll_file)
         .arg("-o")
-        .arg(output)
+        .arg(output);
+
+    // AXIOM uses stack-allocated arrays (alloca). Large arrays need a bigger
+    // stack than the default 1MB on Windows. Request 64MB.
+    #[cfg(target_os = "windows")]
+    cmd.arg("-Wl,/STACK:67108864");
+
+    let child = cmd
         .output()
         .map_err(|e| miette::miette!("failed to run {}: {}", clang.display(), e))?;
 
