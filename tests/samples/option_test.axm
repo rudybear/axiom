@@ -1,0 +1,32 @@
+@module option_test;
+@intent("Test option (sum type) builtins -- tagged union packed into i64");
+
+fn main() -> i32 {
+    // Create a None
+    let none_val: i64 = option_none();
+
+    // Create a Some(42)
+    let some_val: i64 = option_some(42);
+
+    // Check is_some / is_none
+    let is_some: i32 = option_is_some(some_val);
+    print_i32(is_some);   // should print 1
+
+    let is_none: i32 = option_is_none(none_val);
+    print_i32(is_none);   // should print 1
+
+    let is_some_none: i32 = option_is_some(none_val);
+    print_i32(is_some_none);  // should print 0
+
+    // Unwrap the Some value
+    let val: i32 = option_unwrap(some_val);
+    print_i32(val);   // should print 42
+
+    // Pattern: if-based dispatch
+    if option_is_some(some_val) == 1 {
+        let inner: i32 = option_unwrap(some_val);
+        print_i32(inner);  // should print 42
+    }
+
+    return 0;
+}

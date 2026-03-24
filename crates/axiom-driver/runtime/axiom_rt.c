@@ -1601,3 +1601,196 @@ void axiom_renderer_bind_pipeline(void *renderer, void *pipeline) {
 }
 
 #endif /* _WIN32 / headless stub */
+
+/* ── Vec (Dynamic Array) ─────────────────────────────────────────── */
+/*
+ * Growable array backed by heap allocation.
+ * Layout: { ptr data, i32 len, i32 cap, i32 elem_size }
+ *
+ * API:
+ *   axiom_vec_new(elem_size)        -> ptr to vec header
+ *   axiom_vec_push_i32(v, val)      -> push i32, auto-grow
+ *   axiom_vec_push_f64(v, val)      -> push f64, auto-grow
+ *   axiom_vec_get_i32(v, index)     -> indexed read (i32)
+ *   axiom_vec_get_f64(v, index)     -> indexed read (f64)
+ *   axiom_vec_set_i32(v, index, val)-> indexed write (i32)
+ *   axiom_vec_set_f64(v, index, val)-> indexed write (f64)
+ *   axiom_vec_len(v)                -> current length
+ *   axiom_vec_free(v)               -> free data + header
+ */
+
+typedef struct {
+    void *data;
+    int   len;
+    int   cap;
+    int   elem_size;
+} AxiomVec;
+
+#define AXIOM_VEC_INITIAL_CAP 16
+
+static void axiom_vec_grow(AxiomVec *v) {
+    int new_cap = v->cap * 2;
+    if (new_cap < AXIOM_VEC_INITIAL_CAP) new_cap = AXIOM_VEC_INITIAL_CAP;
+    void *new_data = realloc(v->data, (size_t)new_cap * (size_t)v->elem_size);
+    if (!new_data) {
+        fprintf(stderr, "axiom_vec_grow: out of memory\n");
+        abort();
+    }
+    v->data = new_data;
+    v->cap  = new_cap;
+}
+
+void *axiom_vec_new(int elem_size) {
+    AxiomVec *v = (AxiomVec *)malloc(sizeof(AxiomVec));
+    if (!v) {
+        fprintf(stderr, "axiom_vec_new: out of memory\n");
+        abort();
+    }
+    v->len       = 0;
+    v->cap       = AXIOM_VEC_INITIAL_CAP;
+    v->elem_size = elem_size;
+    v->data      = malloc((size_t)v->cap * (size_t)elem_size);
+    if (!v->data) {
+        fprintf(stderr, "axiom_vec_new: out of memory\n");
+        free(v);
+        abort();
+    }
+    return v;
+}
+
+void axiom_vec_push_i32(void *vec, int val) {
+    AxiomVec *v = (AxiomVec *)vec;
+    if (v->len >= v->cap) axiom_vec_grow(v);
+    ((int *)v->data)[v->len] = val;
+    v->len++;
+}
+
+void axiom_vec_push_f64(void *vec, double val) {
+    AxiomVec *v = (AxiomVec *)vec;
+    if (v->len >= v->cap) axiom_vec_grow(v);
+    ((double *)v->data)[v->len] = val;
+    v->len++;
+}
+
+int axiom_vec_get_i32(void *vec, int index) {
+    AxiomVec *v = (AxiomVec *)vec;
+    if (index < 0 || index >= v->len) {
+        fprintf(stderr, "axiom_vec_get_i32: index %d out of bounds (len=%d)\n",
+                index, v->len);
+        abort();
+    }
+    return ((int *)v->data)[index];
+}
+
+double axiom_vec_get_f64(void *vec, int index) {
+    AxiomVec *v = (AxiomVec *)vec;
+    if (index < 0 || index >= v->len) {
+        fprintf(stderr, "axiom_vec_get_f64: index %d out of bounds (len=%d)\n",
+                index, v->len);
+        abort();
+    }
+    return ((double *)v->data)[index];
+}
+
+void axiom_vec_set_i32(void *vec, int index, int val) {
+    AxiomVec *v = (AxiomVec *)vec;
+    if (index < 0 || index >= v->len) {
+        fprintf(stderr, "axiom_vec_set_i32: index %d out of bounds (len=%d)\n",
+                index, v->len);
+        abort();
+    }
+    ((int *)v->data)[index] = val;
+}
+
+void axiom_vec_set_f64(void *vec, int index, double val) {
+    AxiomVec *v = (AxiomVec *)vec;
+    if (index < 0 || index >= v->len) {
+        fprintf(stderr, "axiom_vec_set_f64: index %d out of bounds (len=%d)\n",
+                index, v->len);
+        abort();
+    }
+    ((double *)v->data)[index] = val;
+}
+
+int axiom_vec_len(void *vec) {
+    AxiomVec *v = (AxiomVec *)vec;
+    return v->len;
+}
+
+void axiom_vec_free(void *vec) {
+    AxiomVec *v = (AxiomVec *)vec;
+    if (v) {
+        free(v->data);
+        free(v);
+    }
+}
+
+/* ── String (Fat Pointer) ────────────────────────────────────────── */
+/*
+ * Strings are packed into an i64 as a fat pointer:
+ *   - Upper 32 bits: length (i32)
+ *   - Lower 32 bits: pointer (truncated to 32 bits on 32-bit, or index on 64-bit)
+ *
+ * Actually, on 64-bit systems we cannot pack a 64-bit pointer into 32 bits.
+ * Instead we use a different strategy: store strings in a table and return
+ * an index packed with the length.  But for simplicity and the common case
+ * (string literals whose pointers are known), we use a small string table.
+ *
+ * Encoding: (len << 32) | table_index
+ *
+ * API:
+ *   axiom_string_from_literal(ptr) -> i64 (packed len + index)
+ *   axiom_string_len(s)            -> i32
+ *   axiom_string_ptr(s)            -> ptr
+ *   axiom_string_eq(a, b)          -> i32 (1 if equal, 0 otherwise)
+ *   axiom_string_print(s)          -> void (prints to stdout)
+ */
+
+#define AXIOM_STRING_TABLE_MAX 4096
+
+static const char *axiom_string_table[AXIOM_STRING_TABLE_MAX];
+static int axiom_string_table_len_arr[AXIOM_STRING_TABLE_MAX];
+static int axiom_string_table_count = 0;
+
+long long axiom_string_from_literal(const char *lit) {
+    int idx = axiom_string_table_count;
+    if (idx >= AXIOM_STRING_TABLE_MAX) {
+        fprintf(stderr, "axiom_string_from_literal: string table full\n");
+        abort();
+    }
+    int len = (int)strlen(lit);
+    axiom_string_table[idx] = lit;
+    axiom_string_table_len_arr[idx] = len;
+    axiom_string_table_count++;
+    return ((long long)len << 32) | (long long)(unsigned int)idx;
+}
+
+int axiom_string_len(long long s) {
+    return (int)(s >> 32);
+}
+
+const char *axiom_string_ptr(long long s) {
+    int idx = (int)(s & 0xFFFFFFFF);
+    if (idx < 0 || idx >= axiom_string_table_count) return "";
+    return axiom_string_table[idx];
+}
+
+int axiom_string_eq(long long a, long long b) {
+    int len_a = (int)(a >> 32);
+    int len_b = (int)(b >> 32);
+    if (len_a != len_b) return 0;
+    int idx_a = (int)(a & 0xFFFFFFFF);
+    int idx_b = (int)(b & 0xFFFFFFFF);
+    if (idx_a < 0 || idx_a >= axiom_string_table_count) return 0;
+    if (idx_b < 0 || idx_b >= axiom_string_table_count) return 0;
+    return memcmp(axiom_string_table[idx_a], axiom_string_table[idx_b],
+                  (size_t)len_a) == 0 ? 1 : 0;
+}
+
+void axiom_string_print(long long s) {
+    int len = (int)(s >> 32);
+    int idx = (int)(s & 0xFFFFFFFF);
+    if (idx < 0 || idx >= axiom_string_table_count) return;
+    fwrite(axiom_string_table[idx], 1, (size_t)len, stdout);
+    fputc('\n', stdout);
+}
