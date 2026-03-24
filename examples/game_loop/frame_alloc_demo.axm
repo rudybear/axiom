@@ -1,0 +1,133 @@
+@module frame_alloc_demo;
+@intent("Zero per-frame allocation game loop using triple-buffered arenas");
+@constraint { per_frame_allocations: 0 };
+
+// =============================================================================
+// Frame Allocator Demo
+// =============================================================================
+//
+// Demonstrates a triple-buffered arena pattern for zero-malloc game loops.
+//
+// In a real game engine, each frame needs scratch memory for:
+//   - Transformed positions
+//   - Velocity updates
+//   - Input command buffers
+//   - Temporary render data
+//
+// Using three arenas in round-robin, frame N's arena is reset only after
+// frames N-1 and N-2 have finished reading from it. This guarantees that
+// no heap allocation (malloc/free) occurs during the hot loop.
+//
+// Layout:
+//   arena0: frame 0, 3, 6, 9, ...
+//   arena1: frame 1, 4, 7, 10, ...
+//   arena2: frame 2, 5, 8, 11, ...
+//
+// Each arena is 1 MB, large enough for per-frame scratch data.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Simulate physics work: write positions and velocities
+// ---------------------------------------------------------------------------
+
+@pure
+fn simulate_physics(positions: ptr[f64], velocities: ptr[f64],
+                    count: i32, frame: i32) {
+    let dt: f64 = 0.016;
+    let frame_f: f64 = to_f64(frame);
+    for i: i32 in range(0, count) {
+        let fi: f64 = to_f64(i);
+        // Position: simple harmonic motion offset by frame
+        ptr_write_f64(positions, i, fi * 0.1 + frame_f * dt);
+        // Velocity: decaying oscillation
+        ptr_write_f64(velocities, i, fi * 0.01 - frame_f * 0.001);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Process input commands: fill command buffer
+// ---------------------------------------------------------------------------
+
+@pure
+fn process_input(commands: ptr[i32], count: i32, frame: i32) {
+    for i: i32 in range(0, count) {
+        // Simulate command encoding: frame number + command index
+        ptr_write_i32(commands, i, frame * 1000 + i);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compute a checksum over a frame's data for verification
+// ---------------------------------------------------------------------------
+
+@pure
+fn frame_checksum(positions: ptr[f64], velocities: ptr[f64],
+                  entity_count: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, entity_count) {
+        sum = sum + ptr_read_f64(positions, i) + ptr_read_f64(velocities, i);
+    }
+    return sum;
+}
+
+// ---------------------------------------------------------------------------
+// Main: triple-buffered game loop
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    let entity_count: i32 = 1000;
+    let command_count: i32 = 500;
+    let total_frames: i32 = 300;
+
+    print("Frame Allocator Demo: 300 frames, triple-buffered arenas");
+
+    // Create three 1 MB arenas for triple buffering
+    let arena0: ptr[i32] = arena_create(1048576);
+    let arena1: ptr[i32] = arena_create(1048576);
+    let arena2: ptr[i32] = arena_create(1048576);
+
+    let frame: i32 = 0;
+    let total_allocs: i64 = 0;
+    let running_checksum: f64 = 0.0;
+
+    while frame < total_frames {
+        // Select current frame's arena (round-robin: 0, 1, 2, 0, 1, 2, ...)
+        let current: ptr[i32] = arena0;
+        if frame % 3 == 1 { current = arena1; }
+        if frame % 3 == 2 { current = arena2; }
+
+        // Reset this frame's arena -- frees all scratch data from 3 frames ago.
+        // This is the key insight: by the time we reset arena K, both frames
+        // K-1 and K-2 have already finished, so no dangling references.
+        arena_reset(current);
+
+        // All per-frame allocations come from the arena -- zero malloc!
+        let positions: ptr[f64] = arena_alloc(current, entity_count, 8);
+        let velocities: ptr[f64] = arena_alloc(current, entity_count, 8);
+        let commands: ptr[i32] = arena_alloc(current, command_count, 4);
+
+        // Simulate game loop work
+        simulate_physics(positions, velocities, entity_count, frame);
+        process_input(commands, command_count, frame);
+
+        // Accumulate checksum (verifies data integrity across frames)
+        running_checksum = running_checksum + frame_checksum(positions, velocities, entity_count);
+
+        total_allocs = total_allocs + 3;
+        frame = frame + 1;
+    }
+
+    // Results
+    print("Total arena allocs (0 heap allocs):");
+    print_i64(total_allocs);
+    print("Running checksum:");
+    print_f64(running_checksum);
+
+    // Cleanup
+    arena_destroy(arena0);
+    arena_destroy(arena1);
+    arena_destroy(arena2);
+
+    print("Frame allocator demo complete.");
+    return 0;
+}
