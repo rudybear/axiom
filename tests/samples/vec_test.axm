@@ -1,0 +1,48 @@
+@module vec_test;
+@intent("Test dynamic array (Vec) builtins -- growable heap-backed array");
+
+fn main() -> i32 {
+    // Create a vec of i32s (elem_size = 4)
+    let v: ptr = vec_new(4);
+
+    // Push some values
+    vec_push_i32(v, 10);
+    vec_push_i32(v, 20);
+    vec_push_i32(v, 30);
+
+    // Check length
+    let len: i32 = vec_len(v);
+    print_i32(len);  // should print 3
+
+    // Read values
+    let v0: i32 = vec_get_i32(v, 0);
+    let v1: i32 = vec_get_i32(v, 1);
+    let v2: i32 = vec_get_i32(v, 2);
+    print_i32(v0);  // should print 10
+    print_i32(v1);  // should print 20
+    print_i32(v2);  // should print 30
+
+    // Overwrite a value
+    vec_set_i32(v, 1, 99);
+    let updated: i32 = vec_get_i32(v, 1);
+    print_i32(updated);  // should print 99
+
+    // Push many values to test auto-grow (initial cap = 16)
+    for i: i32 in range(0, 100) {
+        vec_push_i32(v, i * i);
+    }
+    let big_len: i32 = vec_len(v);
+    print_i32(big_len);  // should print 103 (3 + 100)
+
+    // Sum all elements
+    let sum: i64 = 0;
+    for i: i32 in range(0, big_len) {
+        sum = sum + widen(vec_get_i32(v, i));
+    }
+    print_i64(sum);
+
+    // Clean up
+    vec_free(v);
+
+    return 0;
+}

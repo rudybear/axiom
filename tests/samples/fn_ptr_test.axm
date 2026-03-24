@@ -1,0 +1,25 @@
+@module fn_ptr_test;
+@intent("Test function pointer builtins -- indirect function calls");
+
+fn double_it(x: i32) -> i32 {
+    return x * 2;
+}
+
+fn triple_it(x: i32) -> i32 {
+    return x * 3;
+}
+
+fn main() -> i32 {
+    // Get function pointers
+    let fp_double: ptr = fn_ptr(double_it);
+    let fp_triple: ptr = fn_ptr(triple_it);
+
+    // Call through function pointers
+    let r1: i32 = call_fn_ptr_i32(fp_double, 21);
+    print_i32(r1);  // should print 42
+
+    let r2: i32 = call_fn_ptr_i32(fp_triple, 10);
+    print_i32(r2);  // should print 30
+
+    return 0;
+}

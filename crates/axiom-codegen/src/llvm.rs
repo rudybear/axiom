@@ -159,6 +159,12 @@ struct CodegenContext {
     /// Whether renderer builtins are used (renderer_create, shader_load, etc.).
     /// When true, renderer extern declarations are emitted and the runtime is linked.
     needs_renderer: bool,
+    /// Whether Vec (dynamic array) builtins are used (vec_new, vec_push_*, etc.).
+    /// When true, Vec extern declarations are emitted and the runtime is linked.
+    needs_vec: bool,
+    /// Whether string builtins are used (string_from_literal, string_len, etc.).
+    /// When true, string extern declarations are emitted and the runtime is linked.
+    needs_strings: bool,
     /// Registry of struct types (name → StructInfo).
     struct_registry: HashMap<String, StructInfo>,
     /// Collected errors.
@@ -234,6 +240,8 @@ impl CodegenContext {
             needs_coroutines: false,
             needs_threading: false,
             needs_renderer: false,
+            needs_vec: false,
+            needs_strings: false,
             struct_registry: HashMap::new(),
             errors: Vec::new(),
             block_terminated: false,
@@ -666,6 +674,31 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         );
     }
 
+    // Emit Vec (dynamic array) runtime extern declarations.
+    if ctx.needs_vec {
+        let _ = writeln!(ctx.output, "declare ptr @axiom_vec_new(i32)");
+        let _ = writeln!(ctx.output, "declare void @axiom_vec_push_i32(ptr, i32)");
+        let _ = writeln!(ctx.output, "declare void @axiom_vec_push_f64(ptr, double)");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_vec_get_i32(ptr, i32)");
+        let _ = writeln!(ctx.output, "declare double @axiom_vec_get_f64(ptr, i32)");
+        let _ = writeln!(ctx.output, "declare void @axiom_vec_set_i32(ptr, i32, i32)");
+        let _ = writeln!(
+            ctx.output,
+            "declare void @axiom_vec_set_f64(ptr, i32, double)"
+        );
+        let _ = writeln!(ctx.output, "declare i32 @axiom_vec_len(ptr)");
+        let _ = writeln!(ctx.output, "declare void @axiom_vec_free(ptr)");
+    }
+
+    // Emit string runtime extern declarations.
+    if ctx.needs_strings {
+        let _ = writeln!(ctx.output, "declare i64 @axiom_string_from_literal(ptr)");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_string_len(i64)");
+        let _ = writeln!(ctx.output, "declare ptr @axiom_string_ptr(i64)");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_string_eq(i64, i64)");
+        let _ = writeln!(ctx.output, "declare void @axiom_string_print(i64)");
+    }
+
     // Emit attribute groups.
     if !ctx.attribute_groups.is_empty() {
         ctx.emit_blank();
@@ -743,6 +776,22 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_shader_load")
         || ir.contains("@axiom_pipeline_create")
         || ir.contains("@axiom_renderer_bind_pipeline")
+        // Vec builtins
+        || ir.contains("@axiom_vec_new")
+        || ir.contains("@axiom_vec_push_i32")
+        || ir.contains("@axiom_vec_push_f64")
+        || ir.contains("@axiom_vec_get_i32")
+        || ir.contains("@axiom_vec_get_f64")
+        || ir.contains("@axiom_vec_set_i32")
+        || ir.contains("@axiom_vec_set_f64")
+        || ir.contains("@axiom_vec_len")
+        || ir.contains("@axiom_vec_free")
+        // String builtins
+        || ir.contains("@axiom_string_from_literal")
+        || ir.contains("@axiom_string_len")
+        || ir.contains("@axiom_string_ptr")
+        || ir.contains("@axiom_string_eq")
+        || ir.contains("@axiom_string_print")
 }
 
 /// Register a struct type in the codegen context.
@@ -2723,6 +2772,32 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "shader_load" => return emit_builtin_shader_load(ctx, args),
             "pipeline_create" => return emit_builtin_pipeline_create(ctx, args),
             "renderer_bind_pipeline" => return emit_builtin_renderer_bind_pipeline(ctx, args),
+            // Option (sum type) builtins -- tagged union packed into i64
+            "option_none" => return emit_builtin_option_none(ctx, args),
+            "option_some" => return emit_builtin_option_some(ctx, args),
+            "option_is_some" => return emit_builtin_option_is_some(ctx, args),
+            "option_is_none" => return emit_builtin_option_is_none(ctx, args),
+            "option_unwrap" => return emit_builtin_option_unwrap(ctx, args),
+            // String builtins -- fat pointer (ptr, len) via axiom_rt.c
+            "string_from_literal" => return emit_builtin_string_from_literal(ctx, args),
+            "string_len" => return emit_builtin_string_len(ctx, args),
+            "string_ptr" => return emit_builtin_string_ptr(ctx, args),
+            "string_eq" => return emit_builtin_string_eq(ctx, args),
+            "string_print" => return emit_builtin_string_print(ctx, args),
+            // Vec (dynamic array) builtins -- axiom_rt.c runtime
+            "vec_new" => return emit_builtin_vec_new(ctx, args),
+            "vec_push_i32" => return emit_builtin_vec_push_i32(ctx, args),
+            "vec_push_f64" => return emit_builtin_vec_push_f64(ctx, args),
+            "vec_get_i32" => return emit_builtin_vec_get_i32(ctx, args),
+            "vec_get_f64" => return emit_builtin_vec_get_f64(ctx, args),
+            "vec_set_i32" => return emit_builtin_vec_set_i32(ctx, args),
+            "vec_set_f64" => return emit_builtin_vec_set_f64(ctx, args),
+            "vec_len" => return emit_builtin_vec_len(ctx, args),
+            "vec_free" => return emit_builtin_vec_free(ctx, args),
+            // Function pointer builtins
+            "fn_ptr" => return emit_builtin_fn_ptr(ctx, args),
+            "call_fn_ptr_i32" => return emit_builtin_call_fn_ptr_i32(ctx, args),
+            "call_fn_ptr_f64" => return emit_builtin_call_fn_ptr_f64(ctx, args),
             _ => {}
         }
 
@@ -5178,6 +5253,667 @@ fn emit_builtin_renderer_bind_pipeline(ctx: &mut CodegenContext, args: &[HirExpr
     LlvmValue {
         reg: "0".to_string(),
         ty: "void".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F1: Option (sum type) builtins -- tagged union packed into i64
+// ---------------------------------------------------------------------------
+// Encoding: (tag << 32) | (value & 0xFFFFFFFF)
+// Tag 0 = None, Tag 1 = Some(value)
+
+/// Emit built-in `option_none() -> i64`.
+/// Returns 0 (tag=0, no payload).
+fn emit_builtin_option_none(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if !args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "option_none() takes no arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "i64".to_string(),
+    }
+}
+
+/// Emit built-in `option_some(val: i32) -> i64`.
+/// Packs tag=1 + val into i64: (1 << 32) | (val & 0xFFFFFFFF).
+fn emit_builtin_option_some(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "option_some() requires exactly 1 argument (val: i32)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i64".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("i32"));
+
+    // Zero-extend val to i64
+    let val64 = ctx.fresh_reg();
+    ctx.emit(&format!("{val64} = zext i32 {} to i64", val.reg));
+
+    // Mask to lower 32 bits (in case of sign extension issues)
+    let masked = ctx.fresh_reg();
+    ctx.emit(&format!("{masked} = and i64 {val64}, 4294967295"));
+
+    // tag = 1 << 32 = 4294967296
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = or i64 {masked}, 4294967296"));
+
+    LlvmValue {
+        reg: result,
+        ty: "i64".to_string(),
+    }
+}
+
+/// Emit built-in `option_is_some(opt: i64) -> i32`.
+/// Returns 1 if tag != 0 (i.e., upper 32 bits nonzero).
+fn emit_builtin_option_is_some(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "option_is_some() requires exactly 1 argument (opt: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let opt = emit_expr(ctx, &args[0], Some("i64"));
+
+    // tag = opt >> 32 (logical shift right)
+    let tag = ctx.fresh_reg();
+    ctx.emit(&format!("{tag} = lshr i64 {}, 32", opt.reg));
+
+    // trunc to i32
+    let tag32 = ctx.fresh_reg();
+    ctx.emit(&format!("{tag32} = trunc i64 {tag} to i32"));
+
+    // cmp ne 0
+    let cmp = ctx.fresh_reg();
+    ctx.emit(&format!("{cmp} = icmp ne i32 {tag32}, 0"));
+
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = zext i1 {cmp} to i32"));
+
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `option_is_none(opt: i64) -> i32`.
+/// Returns 1 if tag == 0.
+fn emit_builtin_option_is_none(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "option_is_none() requires exactly 1 argument (opt: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let opt = emit_expr(ctx, &args[0], Some("i64"));
+
+    // tag = opt >> 32
+    let tag = ctx.fresh_reg();
+    ctx.emit(&format!("{tag} = lshr i64 {}, 32", opt.reg));
+
+    // trunc to i32
+    let tag32 = ctx.fresh_reg();
+    ctx.emit(&format!("{tag32} = trunc i64 {tag} to i32"));
+
+    // cmp eq 0
+    let cmp = ctx.fresh_reg();
+    ctx.emit(&format!("{cmp} = icmp eq i32 {tag32}, 0"));
+
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = zext i1 {cmp} to i32"));
+
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `option_unwrap(opt: i64) -> i32`.
+/// Extracts the value (lower 32 bits). UB if None.
+fn emit_builtin_option_unwrap(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "option_unwrap() requires exactly 1 argument (opt: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let opt = emit_expr(ctx, &args[0], Some("i64"));
+
+    // trunc i64 to i32 -- extracts lower 32 bits (the value)
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = trunc i64 {} to i32", opt.reg));
+
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F2: String builtins -- fat pointer (ptr, len) via axiom_rt.c
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `string_from_literal(lit: ptr) -> i64`.
+/// Creates a packed string from a C string literal.
+fn emit_builtin_string_from_literal(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_strings = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "string_from_literal() requires exactly 1 argument (ptr)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i64".to_string(),
+        };
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call i64 @axiom_string_from_literal(ptr {})",
+        ptr_val.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "i64".to_string(),
+    }
+}
+
+/// Emit built-in `string_len(s: i64) -> i32`.
+fn emit_builtin_string_len(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_strings = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "string_len() requires exactly 1 argument (s: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let s = emit_expr(ctx, &args[0], Some("i64"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call i32 @axiom_string_len(i64 {})",
+        s.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `string_ptr(s: i64) -> ptr`.
+fn emit_builtin_string_ptr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_strings = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "string_ptr() requires exactly 1 argument (s: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let s = emit_expr(ctx, &args[0], Some("i64"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call ptr @axiom_string_ptr(i64 {})",
+        s.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `string_eq(a: i64, b: i64) -> i32`.
+fn emit_builtin_string_eq(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_strings = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "string_eq() requires exactly 2 arguments (a: i64, b: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], Some("i64"));
+    let b = emit_expr(ctx, &args[1], Some("i64"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call i32 @axiom_string_eq(i64 {}, i64 {})",
+        a.reg, b.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `string_print(s: i64)`.
+fn emit_builtin_string_print(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_strings = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "string_print() requires exactly 1 argument (s: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let s = emit_expr(ctx, &args[0], Some("i64"));
+    ctx.emit(&format!("call void @axiom_string_print(i64 {})", s.reg));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F3: Vec (dynamic array) builtins -- axiom_rt.c runtime
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `vec_new(elem_size: i32) -> ptr`.
+fn emit_builtin_vec_new(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_vec = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "vec_new() requires exactly 1 argument (elem_size: i32)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let elem_size = emit_expr(ctx, &args[0], Some("i32"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call ptr @axiom_vec_new(i32 {})",
+        elem_size.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `vec_push_i32(v: ptr, val: i32)`.
+fn emit_builtin_vec_push_i32(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_vec = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "vec_push_i32() requires exactly 2 arguments (v: ptr, val: i32)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let v = emit_expr(ctx, &args[0], Some("ptr"));
+    let val = emit_expr(ctx, &args[1], Some("i32"));
+    ctx.emit(&format!(
+        "call void @axiom_vec_push_i32(ptr {}, i32 {})",
+        v.reg, val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `vec_push_f64(v: ptr, val: f64)`.
+fn emit_builtin_vec_push_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_vec = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "vec_push_f64() requires exactly 2 arguments (v: ptr, val: f64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let v = emit_expr(ctx, &args[0], Some("ptr"));
+    let val = emit_expr(ctx, &args[1], Some("double"));
+    ctx.emit(&format!(
+        "call void @axiom_vec_push_f64(ptr {}, double {})",
+        v.reg, val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `vec_get_i32(v: ptr, index: i32) -> i32`.
+fn emit_builtin_vec_get_i32(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_vec = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "vec_get_i32() requires exactly 2 arguments (v: ptr, index: i32)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let v = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call i32 @axiom_vec_get_i32(ptr {}, i32 {})",
+        v.reg, index.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `vec_get_f64(v: ptr, index: i32) -> f64`.
+fn emit_builtin_vec_get_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_vec = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "vec_get_f64() requires exactly 2 arguments (v: ptr, index: i32)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0.0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let v = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call double @axiom_vec_get_f64(ptr {}, i32 {})",
+        v.reg, index.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `vec_set_i32(v: ptr, index: i32, val: i32)`.
+fn emit_builtin_vec_set_i32(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_vec = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "vec_set_i32() requires exactly 3 arguments (v: ptr, index: i32, val: i32)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let v = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+    let val = emit_expr(ctx, &args[2], Some("i32"));
+    ctx.emit(&format!(
+        "call void @axiom_vec_set_i32(ptr {}, i32 {}, i32 {})",
+        v.reg, index.reg, val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `vec_set_f64(v: ptr, index: i32, val: f64)`.
+fn emit_builtin_vec_set_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_vec = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "vec_set_f64() requires exactly 3 arguments (v: ptr, index: i32, val: f64)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let v = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+    let val = emit_expr(ctx, &args[2], Some("double"));
+    ctx.emit(&format!(
+        "call void @axiom_vec_set_f64(ptr {}, i32 {}, double {})",
+        v.reg, index.reg, val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `vec_len(v: ptr) -> i32`.
+fn emit_builtin_vec_len(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_vec = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "vec_len() requires exactly 1 argument (v: ptr)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let v = emit_expr(ctx, &args[0], Some("ptr"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call i32 @axiom_vec_len(ptr {})",
+        v.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `vec_free(v: ptr)`.
+fn emit_builtin_vec_free(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_vec = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "vec_free() requires exactly 1 argument (v: ptr)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let v = emit_expr(ctx, &args[0], Some("ptr"));
+    ctx.emit(&format!("call void @axiom_vec_free(ptr {})", v.reg));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F5: Function pointer builtins
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `fn_ptr(func_name) -> ptr`.
+/// Returns the address of a named function.
+fn emit_builtin_fn_ptr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "fn_ptr() requires exactly 1 argument (function name as identifier)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    // The argument must be an identifier naming a function.
+    if let HirExprKind::Ident { name } = &args[0].kind {
+        // Verify the function exists.
+        if !ctx.functions.contains_key(name.as_str()) {
+            ctx.errors.push(CodegenError::UndefinedFunction {
+                name: name.clone(),
+            });
+            return LlvmValue {
+                reg: "null".to_string(),
+                ty: "ptr".to_string(),
+            };
+        }
+        // In LLVM IR, a function name IS a pointer (ptr @func_name).
+        // We just return the function as a ptr value.
+        LlvmValue {
+            reg: format!("@{name}"),
+            ty: "ptr".to_string(),
+        }
+    } else {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "fn_ptr() argument must be a function name identifier".to_string(),
+            context: "built-in call".to_string(),
+        });
+        LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        }
+    }
+}
+
+/// Emit built-in `call_fn_ptr_i32(fptr: ptr, arg: i32) -> i32`.
+/// Calls through a function pointer with one i32 argument, returning i32.
+fn emit_builtin_call_fn_ptr_i32(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "call_fn_ptr_i32() requires exactly 2 arguments (fptr: ptr, arg: i32)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let fptr = emit_expr(ctx, &args[0], Some("ptr"));
+    let arg = emit_expr(ctx, &args[1], Some("i32"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call i32 {fptr_reg}(i32 {arg_reg})",
+        fptr_reg = fptr.reg,
+        arg_reg = arg.reg,
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `call_fn_ptr_f64(fptr: ptr, arg: f64) -> f64`.
+/// Calls through a function pointer with one f64 argument, returning f64.
+fn emit_builtin_call_fn_ptr_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "call_fn_ptr_f64() requires exactly 2 arguments (fptr: ptr, arg: f64)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0.0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let fptr = emit_expr(ctx, &args[0], Some("ptr"));
+    let arg = emit_expr(ctx, &args[1], Some("double"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call double {fptr_reg}(double {arg_reg})",
+        fptr_reg = fptr.reg,
+        arg_reg = arg.reg,
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "double".to_string(),
     }
 }
 
@@ -11365,6 +12101,464 @@ fn main() -> i32 {
         assert!(
             ir.contains("declare i32 @axiom_job_dispatch_after(ptr, ptr, i32, i32)"),
             "should declare axiom_job_dispatch_after: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F1: Option (sum type) builtin tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_option_builtins() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // let none_val: i64 = option_none();
+                    stmt(HirStmtKind::Let {
+                        name: "none_val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: Some(call("option_none", vec![])),
+                        mutable: false,
+                    }),
+                    // let some_val: i64 = option_some(42);
+                    stmt(HirStmtKind::Let {
+                        name: "some_val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: Some(call("option_some", vec![int_lit(42)])),
+                        mutable: false,
+                    }),
+                    // let is_some: i32 = option_is_some(some_val);
+                    stmt(HirStmtKind::Let {
+                        name: "is_some".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("option_is_some", vec![ident("some_val")])),
+                        mutable: false,
+                    }),
+                    // let is_none: i32 = option_is_none(none_val);
+                    stmt(HirStmtKind::Let {
+                        name: "is_none".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("option_is_none", vec![ident("none_val")])),
+                        mutable: false,
+                    }),
+                    // let val: i32 = option_unwrap(some_val);
+                    stmt(HirStmtKind::Let {
+                        name: "val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("option_unwrap", vec![ident("some_val")])),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // option_some: should pack tag=1 with value using or + and
+        assert!(
+            ir.contains("zext i32"),
+            "option_some should zero-extend i32 to i64: {ir}"
+        );
+        assert!(
+            ir.contains("or i64"),
+            "option_some should use or to pack tag: {ir}"
+        );
+        assert!(
+            ir.contains("and i64"),
+            "option_some should mask value: {ir}"
+        );
+
+        // option_is_some: should use lshr + icmp ne
+        assert!(
+            ir.contains("lshr i64"),
+            "option_is_some should shift right to get tag: {ir}"
+        );
+        assert!(
+            ir.contains("icmp ne i32"),
+            "option_is_some should compare tag != 0: {ir}"
+        );
+
+        // option_is_none: should use icmp eq
+        assert!(
+            ir.contains("icmp eq i32"),
+            "option_is_none should compare tag == 0: {ir}"
+        );
+
+        // option_unwrap: should truncate i64 to i32
+        assert!(
+            ir.contains("trunc i64"),
+            "option_unwrap should truncate to i32: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F2: String builtin tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_string_builtins() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // let s: i64 = string_from_literal("hello");
+                    stmt(HirStmtKind::Let {
+                        name: "s".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: Some(call("string_from_literal", vec![str_lit("hello")])),
+                        mutable: false,
+                    }),
+                    // let len: i32 = string_len(s);
+                    stmt(HirStmtKind::Let {
+                        name: "len".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("string_len", vec![ident("s")])),
+                        mutable: false,
+                    }),
+                    // let p: ptr = string_ptr(s);
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: Some(call("string_ptr", vec![ident("s")])),
+                        mutable: false,
+                    }),
+                    // let s2: i64 = string_from_literal("hello");
+                    stmt(HirStmtKind::Let {
+                        name: "s2".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: Some(call("string_from_literal", vec![str_lit("hello")])),
+                        mutable: false,
+                    }),
+                    // let eq: i32 = string_eq(s, s2);
+                    stmt(HirStmtKind::Let {
+                        name: "eq".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("string_eq", vec![ident("s"), ident("s2")])),
+                        mutable: false,
+                    }),
+                    // string_print(s);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("string_print", vec![ident("s")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should call runtime functions
+        assert!(
+            ir.contains("call i64 @axiom_string_from_literal(ptr"),
+            "should call axiom_string_from_literal: {ir}"
+        );
+        assert!(
+            ir.contains("call i32 @axiom_string_len(i64"),
+            "should call axiom_string_len: {ir}"
+        );
+        assert!(
+            ir.contains("call ptr @axiom_string_ptr(i64"),
+            "should call axiom_string_ptr: {ir}"
+        );
+        assert!(
+            ir.contains("call i32 @axiom_string_eq(i64"),
+            "should call axiom_string_eq: {ir}"
+        );
+        assert!(
+            ir.contains("call void @axiom_string_print(i64"),
+            "should call axiom_string_print: {ir}"
+        );
+
+        // Should declare extern functions
+        assert!(
+            ir.contains("declare i64 @axiom_string_from_literal(ptr)"),
+            "should declare axiom_string_from_literal: {ir}"
+        );
+        assert!(
+            ir.contains("declare i32 @axiom_string_len(i64)"),
+            "should declare axiom_string_len: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @axiom_string_print(i64)"),
+            "should declare axiom_string_print: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F3: Vec (dynamic array) builtin tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_vec_builtins() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // let v: ptr = vec_new(4);
+                    stmt(HirStmtKind::Let {
+                        name: "v".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: Some(call("vec_new", vec![int_lit(4)])),
+                        mutable: false,
+                    }),
+                    // vec_push_i32(v, 10);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("vec_push_i32", vec![ident("v"), int_lit(10)]),
+                    }),
+                    // vec_push_i32(v, 20);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("vec_push_i32", vec![ident("v"), int_lit(20)]),
+                    }),
+                    // let val: i32 = vec_get_i32(v, 0);
+                    stmt(HirStmtKind::Let {
+                        name: "val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("vec_get_i32", vec![ident("v"), int_lit(0)])),
+                        mutable: false,
+                    }),
+                    // vec_set_i32(v, 0, 99);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("vec_set_i32", vec![ident("v"), int_lit(0), int_lit(99)]),
+                    }),
+                    // let len: i32 = vec_len(v);
+                    stmt(HirStmtKind::Let {
+                        name: "len".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("vec_len", vec![ident("v")])),
+                        mutable: false,
+                    }),
+                    // vec_free(v);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("vec_free", vec![ident("v")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should call runtime functions
+        assert!(
+            ir.contains("call ptr @axiom_vec_new(i32"),
+            "should call axiom_vec_new: {ir}"
+        );
+        assert!(
+            ir.contains("call void @axiom_vec_push_i32(ptr"),
+            "should call axiom_vec_push_i32: {ir}"
+        );
+        assert!(
+            ir.contains("call i32 @axiom_vec_get_i32(ptr"),
+            "should call axiom_vec_get_i32: {ir}"
+        );
+        assert!(
+            ir.contains("call void @axiom_vec_set_i32(ptr"),
+            "should call axiom_vec_set_i32: {ir}"
+        );
+        assert!(
+            ir.contains("call i32 @axiom_vec_len(ptr"),
+            "should call axiom_vec_len: {ir}"
+        );
+        assert!(
+            ir.contains("call void @axiom_vec_free(ptr"),
+            "should call axiom_vec_free: {ir}"
+        );
+
+        // Should declare extern functions
+        assert!(
+            ir.contains("declare ptr @axiom_vec_new(i32)"),
+            "should declare axiom_vec_new: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @axiom_vec_push_i32(ptr, i32)"),
+            "should declare axiom_vec_push_i32: {ir}"
+        );
+        assert!(
+            ir.contains("declare i32 @axiom_vec_get_i32(ptr, i32)"),
+            "should declare axiom_vec_get_i32: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @axiom_vec_free(ptr)"),
+            "should declare axiom_vec_free: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_vec_f64_builtins() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // let v: ptr = vec_new(8);
+                    stmt(HirStmtKind::Let {
+                        name: "v".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::F64)),
+                        },
+                        value: Some(call("vec_new", vec![int_lit(8)])),
+                        mutable: false,
+                    }),
+                    // vec_push_f64(v, 3.14);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("vec_push_f64", vec![ident("v"), float_lit(3.14)]),
+                    }),
+                    // let val: f64 = vec_get_f64(v, 0);
+                    stmt(HirStmtKind::Let {
+                        name: "val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: Some(call("vec_get_f64", vec![ident("v"), int_lit(0)])),
+                        mutable: false,
+                    }),
+                    // vec_set_f64(v, 0, 2.71);
+                    stmt(HirStmtKind::Expr {
+                        expr: call(
+                            "vec_set_f64",
+                            vec![ident("v"), int_lit(0), float_lit(2.71)],
+                        ),
+                    }),
+                    // vec_free(v);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("vec_free", vec![ident("v")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("call void @axiom_vec_push_f64(ptr"),
+            "should call axiom_vec_push_f64: {ir}"
+        );
+        assert!(
+            ir.contains("call double @axiom_vec_get_f64(ptr"),
+            "should call axiom_vec_get_f64: {ir}"
+        );
+        assert!(
+            ir.contains("call void @axiom_vec_set_f64(ptr"),
+            "should call axiom_vec_set_f64: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @axiom_vec_push_f64(ptr, double)"),
+            "should declare axiom_vec_push_f64: {ir}"
+        );
+        assert!(
+            ir.contains("declare double @axiom_vec_get_f64(ptr, i32)"),
+            "should declare axiom_vec_get_f64: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @axiom_vec_set_f64(ptr, i32, double)"),
+            "should declare axiom_vec_set_f64: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F5: Function pointer builtin tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fn_ptr_builtins() {
+        // Define a helper function first, then use fn_ptr / call_fn_ptr_i32
+        let helper = HirFunction {
+            id: nid(0),
+            name: "double_it".to_string(),
+            name_span: span(),
+            annotations: vec![],
+            params: vec![param("x", HirType::Primitive(PrimitiveType::I32))],
+            return_type: HirType::Primitive(PrimitiveType::I32),
+            body: block(vec![stmt(HirStmtKind::Return {
+                value: binop(BinOp::Mul, ident("x"), int_lit(2)),
+            })]),
+            span: span(),
+        };
+
+        let main_func = func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                // let fptr: ptr = fn_ptr(double_it);
+                stmt(HirStmtKind::Let {
+                    name: "fptr".to_string(),
+                    name_span: span(),
+                    ty: HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                    value: Some(call("fn_ptr", vec![ident("double_it")])),
+                    mutable: false,
+                }),
+                // let result: i32 = call_fn_ptr_i32(fptr, 21);
+                stmt(HirStmtKind::Let {
+                    name: "result".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::I32),
+                    value: Some(call(
+                        "call_fn_ptr_i32",
+                        vec![ident("fptr"), int_lit(21)],
+                    )),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Return {
+                    value: ident("result"),
+                }),
+            ]),
+        );
+
+        let m = module(Some("test"), vec![helper, main_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // fn_ptr should produce @double_it reference
+        assert!(
+            ir.contains("@double_it"),
+            "fn_ptr should reference @double_it: {ir}"
+        );
+
+        // call_fn_ptr_i32 should do an indirect call
+        assert!(
+            ir.contains("call i32 "),
+            "call_fn_ptr_i32 should emit indirect call: {ir}"
         );
     }
 }

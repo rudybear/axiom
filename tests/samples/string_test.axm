@@ -1,0 +1,26 @@
+@module string_test;
+@intent("Test string builtins -- fat pointer via runtime");
+
+fn main() -> i32 {
+    // Create strings from literals
+    let hello: i64 = string_from_literal("hello");
+    let world: i64 = string_from_literal("world");
+    let hello2: i64 = string_from_literal("hello");
+
+    // Get length
+    let len: i32 = string_len(hello);
+    print_i32(len);  // should print 5
+
+    // Print strings
+    string_print(hello);  // should print "hello"
+    string_print(world);  // should print "world"
+
+    // Equality test
+    let eq1: i32 = string_eq(hello, hello2);
+    print_i32(eq1);  // should print 1 (equal)
+
+    let eq2: i32 = string_eq(hello, world);
+    print_i32(eq2);  // should print 0 (not equal)
+
+    return 0;
+}
