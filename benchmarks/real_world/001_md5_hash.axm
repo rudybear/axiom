@@ -1,22 +1,14 @@
 @module md5_hash;
-@intent("MD5-inspired hash computation on 10000 64-byte blocks using modular arithmetic");
+@intent("MD5-inspired hash computation on 10000 64-byte blocks using native bitwise ops");
 
 fn main() -> i32 {
     let blocks: i32 = 10000;
-    let mod32: i64 = 4294967296;
 
-    // MD5 initial hash values
-    let a0: i64 = 1732584193;
-    let b0: i64 = 4023233417;
-    let c0: i64 = 2562383102;
-    let d0: i64 = 271733878;
-
-    // Precompute powers of 2 for shift simulation (0..31)
-    let pow2: array[i64, 32] = array_zeros[i64, 32];
-    pow2[0] = 1;
-    for i: i32 in range(1, 32) {
-        pow2[i] = pow2[i - 1] * 2;
-    }
+    // MD5 initial hash values (as signed i32; bitwise ops don't care about sign)
+    let a0: i32 = 1732584193;
+    let b0: i32 = -271733879;
+    let c0: i32 = -1732584194;
+    let d0: i32 = 271733878;
 
     // Per-round shift amounts (s) for MD5
     let s: array[i32, 64] = array_zeros[i32, 64];
@@ -33,24 +25,24 @@ fn main() -> i32 {
     s[48]=6; s[49]=10; s[50]=15; s[51]=21; s[52]=6; s[53]=10; s[54]=15; s[55]=21;
     s[56]=6; s[57]=10; s[58]=15; s[59]=21; s[60]=6; s[61]=10; s[62]=15; s[63]=21;
 
-    // K table (precomputed from sin, stored as i64 for 32-bit unsigned values)
-    let K: array[i64, 64] = array_zeros[i64, 64];
-    K[0]=3614090360; K[1]=3905402710; K[2]=606105819; K[3]=3250441966;
-    K[4]=4118548399; K[5]=1200080426; K[6]=2821735955; K[7]=4249261313;
-    K[8]=1770035416; K[9]=2336552879; K[10]=4294925233; K[11]=2304563134;
-    K[12]=1804603682; K[13]=4254626195; K[14]=2792965006; K[15]=1236535329;
-    K[16]=4129170786; K[17]=3225465664; K[18]=643717713; K[19]=3921069994;
-    K[20]=3593408605; K[21]=38016083; K[22]=3634488961; K[23]=3889429448;
-    K[24]=568446438; K[25]=3275163606; K[26]=4107603335; K[27]=1163531501;
-    K[28]=2850285829; K[29]=4243563512; K[30]=1735328473; K[31]=2368359562;
-    K[32]=4294588738; K[33]=2272392833; K[34]=1839030562; K[35]=4259657740;
-    K[36]=2763975236; K[37]=1272893353; K[38]=4139469664; K[39]=3200236656;
-    K[40]=681279174; K[41]=3936430074; K[42]=3572445317; K[43]=76029189;
-    K[44]=3654602809; K[45]=3873151461; K[46]=530742520; K[47]=3299628645;
-    K[48]=4096336452; K[49]=1126891415; K[50]=2878612391; K[51]=4237533241;
-    K[52]=1700485571; K[53]=2399980690; K[54]=4293915773; K[55]=2240044497;
-    K[56]=1873313359; K[57]=4264355552; K[58]=2734768916; K[59]=1309151649;
-    K[60]=4149444226; K[61]=3174756917; K[62]=718787259; K[63]=3951481745;
+    // K table (precomputed from sin, stored as signed i32)
+    let K: array[i32, 64] = array_zeros[i32, 64];
+    K[0]=-680876936; K[1]=-389564586; K[2]=606105819; K[3]=-1044525330;
+    K[4]=-176418897; K[5]=1200080426; K[6]=-1473231341; K[7]=-45705983;
+    K[8]=1770035416; K[9]=-1958414417; K[10]=-42063; K[11]=-1990404162;
+    K[12]=1804603682; K[13]=-40341101; K[14]=-1502002290; K[15]=1236535329;
+    K[16]=-165796510; K[17]=-1069501632; K[18]=643717713; K[19]=-373897302;
+    K[20]=-701558691; K[21]=38016083; K[22]=-660478335; K[23]=-405537848;
+    K[24]=568446438; K[25]=-1019803690; K[26]=-187363961; K[27]=1163531501;
+    K[28]=-1444681467; K[29]=-51403784; K[30]=1735328473; K[31]=-1926607734;
+    K[32]=-378558; K[33]=-2022574463; K[34]=1839030562; K[35]=-35309556;
+    K[36]=-1530992060; K[37]=1272893353; K[38]=-155497632; K[39]=-1094730640;
+    K[40]=681279174; K[41]=-358537222; K[42]=-722521979; K[43]=76029189;
+    K[44]=-640364487; K[45]=-421815835; K[46]=530742520; K[47]=-995338651;
+    K[48]=-198630844; K[49]=1126891415; K[50]=-1416354905; K[51]=-57434055;
+    K[52]=1700485571; K[53]=-1894986606; K[54]=-1051523; K[55]=-2054922799;
+    K[56]=1873313359; K[57]=-30611744; K[58]=-1560198380; K[59]=1309151649;
+    K[60]=-145523070; K[61]=-1120210379; K[62]=718787259; K[63]=-343485551;
 
     // g index table for each round
     let g_idx: array[i32, 64] = array_zeros[i32, 64];
@@ -68,81 +60,63 @@ fn main() -> i32 {
     }
 
     // Message schedule buffer
-    let M: array[i64, 16] = array_zeros[i64, 16];
+    let M: array[i32, 16] = array_zeros[i32, 16];
 
     for block: i32 in range(0, blocks) {
         // Generate pseudo-random message from block number
-        let seed: i64 = widen(block) * 1103515245 + 12345;
+        let seed: i32 = block;
         for i: i32 in range(0, 16) {
-            seed = (seed * 6364136223846793005 + 1442695040888963407) % mod32;
+            seed = seed *% 1103515245 +% 12345;
             M[i] = seed;
         }
 
-        let a: i64 = a0;
-        let b: i64 = b0;
-        let c: i64 = c0;
-        let d: i64 = d0;
+        let a: i32 = a0;
+        let b: i32 = b0;
+        let c: i32 = c0;
+        let d: i32 = d0;
 
         // 64 rounds
         for i: i32 in range(0, 64) {
-            let f_val: i64 = 0;
+            let f_val: i32 = 0;
             if i < 16 {
                 // F = (B AND C) OR (NOT B AND D)
-                // Simulate: F = (b*c + (mod32-1-b)*d) % mod32
-                // Approximate AND with modular multiply patterns
-                let bc: i64 = (b * c) % mod32;
-                let nb: i64 = (mod32 - 1 - b) % mod32;
-                let nbd: i64 = (nb * d) % mod32;
-                f_val = (bc + nbd) % mod32;
+                f_val = bor(band(b, c), band(bnot(b), d));
             }
             if i >= 16 and i < 32 {
                 // G = (D AND B) OR (NOT D AND C)
-                let db: i64 = (d * b) % mod32;
-                let nd: i64 = (mod32 - 1 - d) % mod32;
-                let ndc: i64 = (nd * c) % mod32;
-                f_val = (db + ndc) % mod32;
+                f_val = bor(band(d, b), band(bnot(d), c));
             }
             if i >= 32 and i < 48 {
                 // H = B XOR C XOR D
-                // XOR(a,b) = a + b - 2*AND(a,b), approximate AND as (a*b)%mod32
-                let bc_and: i64 = (b * c) % mod32;
-                let bc_xor: i64 = (b + c - 2 * bc_and + 2 * mod32) % mod32;
-                let bcd_and: i64 = (bc_xor * d) % mod32;
-                f_val = (bc_xor + d - 2 * bcd_and + 2 * mod32) % mod32;
+                f_val = bxor(bxor(b, c), d);
             }
             if i >= 48 {
                 // I = C XOR (B OR NOT D)
-                let nd: i64 = (mod32 - 1 - d) % mod32;
-                let b_or_nd: i64 = (b + nd - (b * nd) % mod32 + mod32) % mod32;
-                let ci: i64 = (c * b_or_nd) % mod32;
-                f_val = (c + b_or_nd - 2 * ci + 2 * mod32) % mod32;
+                f_val = bxor(c, bor(b, bnot(d)));
             }
 
             let g: i32 = g_idx[i];
-            let temp: i64 = (a + f_val + K[i] + M[g]) % mod32;
+            let temp: i32 = a +% f_val +% K[i] +% M[g];
             let shift: i32 = s[i];
 
-            // Left rotate by shift: (temp << shift) | (temp >> (32 - shift))
-            // Simulate with pow2 array
-            let left: i64 = (temp * pow2[shift]) % mod32;
-            let right: i64 = temp / pow2[32 - shift];
-            let rotated: i64 = (left + right) % mod32;
+            // Left rotate by shift
+            let rotated: i32 = rotl(temp, shift);
 
             // Update: a=d, d=c, c=b, b=b+rotated
-            let new_b: i64 = (b + rotated) % mod32;
+            let new_b: i32 = b +% rotated;
             a = d;
             d = c;
             c = b;
             b = new_b;
         }
 
-        a0 = (a0 + a) % mod32;
-        b0 = (b0 + b) % mod32;
-        c0 = (c0 + c) % mod32;
-        d0 = (d0 + d) % mod32;
+        a0 = a0 +% a;
+        b0 = b0 +% b;
+        c0 = c0 +% c;
+        d0 = d0 +% d;
     }
 
-    let checksum: i64 = (a0 + b0 + c0 + d0) % mod32;
-    print_i64(checksum);
+    let checksum: i32 = a0 +% b0 +% c0 +% d0;
+    print_i32(checksum);
     return 0;
 }
