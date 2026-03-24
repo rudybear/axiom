@@ -1,6 +1,24 @@
 @module conjugate_gradient;
 @intent("Conjugate gradient method solving Ax=b for 1000x1000 sparse symmetric positive-definite system");
 
+@pure
+fn dot_product(a: array[f64, 1000], b: array[f64, 1000], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        sum = sum + a[i] * b[i];
+    }
+    return sum;
+}
+
+@pure
+fn vec_norm(a: array[f64, 1000], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        sum = sum + a[i] * a[i];
+    }
+    return sqrt(sum);
+}
+
 fn main() -> i32 {
     let n: i32 = 1000;
 
@@ -54,10 +72,7 @@ fn main() -> i32 {
     let ap: array[f64, 1000] = array_zeros[f64, 1000];
 
     // rsold = r^T * r
-    let rsold: f64 = 0.0;
-    for i: i32 in range(0, n) {
-        rsold = rsold + r[i] * r[i];
-    }
+    let rsold: f64 = dot_product(r, r, n);
 
     // CG iterations (up to n iterations or convergence)
     let max_iter: i32 = 1000;
@@ -84,10 +99,7 @@ fn main() -> i32 {
         }
 
         // alpha = rsold / (p^T * Ap)
-        let pap: f64 = 0.0;
-        for i: i32 in range(0, n) {
-            pap = pap + p[i] * ap[i];
-        }
+        let pap: f64 = dot_product(p, ap, n);
 
         if pap < tol and pap > 0.0 - tol {
             iter_count = iter;
@@ -107,10 +119,7 @@ fn main() -> i32 {
         }
 
         // rsnew = r^T * r
-        let rsnew: f64 = 0.0;
-        for i: i32 in range(0, n) {
-            rsnew = rsnew + r[i] * r[i];
-        }
+        let rsnew: f64 = dot_product(r, r, n);
 
         iter_count = iter + 1;
 
@@ -144,11 +153,7 @@ fn main() -> i32 {
     residual = sqrt(residual);
 
     // Checksum: solution norm + residual + iter count
-    let x_norm: f64 = 0.0;
-    for i: i32 in range(0, n) {
-        x_norm = x_norm + x[i] * x[i];
-    }
-    x_norm = sqrt(x_norm);
+    let x_norm: f64 = vec_norm(x, n);
 
     let checksum: f64 = x_norm * 1000.0 + residual + to_f64(iter_count);
     print_f64(checksum);

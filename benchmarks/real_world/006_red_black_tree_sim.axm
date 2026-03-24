@@ -1,6 +1,11 @@
 @module red_black_tree_sim;
 @intent("Red-black tree simulation using flat arrays: 50000 inserts and 50000 searches");
 
+@pure
+fn lcg_next(seed: i64) -> i64 {
+    return (1103515245 * seed + 12345) % 2147483648;
+}
+
 fn main() -> i32 {
     let max_nodes: i32 = 60000;
     // Parallel arrays for tree structure
@@ -23,15 +28,12 @@ fn main() -> i32 {
 
     // LCG
     let seed: i64 = 98765;
-    let lcg_a: i64 = 1103515245;
-    let lcg_c: i64 = 12345;
-    let lcg_m: i64 = 2147483648;
 
     let insert_keys: array[i64, 50000] = array_zeros[i64, 50000];
 
     // INSERT 50000 keys using simplified RB-tree insert
     for ins: i32 in range(0, 50000) {
-        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        seed = lcg_next(seed);
         let new_key: i64 = seed;
         insert_keys[ins] = new_key;
 

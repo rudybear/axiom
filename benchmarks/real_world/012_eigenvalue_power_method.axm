@@ -1,6 +1,24 @@
 @module eigenvalue_power_method;
 @intent("Find dominant eigenvalue of 500x500 matrix via power iteration, 200 iterations");
 
+@pure
+fn dot_product(a: array[f64, 500], b: array[f64, 500], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        sum = sum + a[i] * b[i];
+    }
+    return sum;
+}
+
+@pure
+fn vec_norm(a: array[f64, 500], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        sum = sum + a[i] * a[i];
+    }
+    return sqrt(sum);
+}
+
 fn main() -> i32 {
     let n: i32 = 500;
     let n_sq: i32 = 250000;
@@ -48,17 +66,10 @@ fn main() -> i32 {
         }
 
         // Compute eigenvalue estimate: v^T * w (Rayleigh quotient numerator)
-        eigenvalue = 0.0;
-        for i: i32 in range(0, n) {
-            eigenvalue = eigenvalue + v[i] * w[i];
-        }
+        eigenvalue = dot_product(v, w, n);
 
         // Normalize w -> v
-        let norm: f64 = 0.0;
-        for i: i32 in range(0, n) {
-            norm = norm + w[i] * w[i];
-        }
-        norm = sqrt(norm);
+        let norm: f64 = vec_norm(w, n);
 
         if norm > 0.0000001 {
             for i: i32 in range(0, n) {

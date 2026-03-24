@@ -1,6 +1,37 @@
 @module fft_iterative;
 @intent("Cooley-Tukey iterative FFT on 8192 complex numbers with bit-reversal permutation");
 
+@pure
+fn taylor_sin(angle: f64, pi: f64, pi2: f64) -> f64 {
+    let a: f64 = angle - to_f64(truncate(angle / pi2)) * pi2;
+    if a > pi { a = a - pi2; }
+    if a < 0.0 - pi { a = a + pi2; }
+    let a3: f64 = a * a * a;
+    let a5: f64 = a3 * a * a;
+    let a7: f64 = a5 * a * a;
+    return a - a3 / 6.0 + a5 / 120.0 - a7 / 5040.0;
+}
+
+@pure
+fn taylor_cos(angle: f64, pi: f64, pi2: f64) -> f64 {
+    let a: f64 = angle - to_f64(truncate(angle / pi2)) * pi2;
+    if a > pi { a = a - pi2; }
+    if a < 0.0 - pi { a = a + pi2; }
+    let a2: f64 = a * a;
+    return 1.0 - a2 / 2.0 + a2 * a2 / 24.0 - a2 * a2 * a2 / 720.0 + a2 * a2 * a2 * a2 / 40320.0;
+}
+
+@pure
+fn reverse_bits(val: i32, num_bits: i32) -> i32 {
+    let rev: i32 = 0;
+    let tmp: i32 = val;
+    for b: i32 in range(0, num_bits) {
+        rev = rev * 2 + tmp % 2;
+        tmp = tmp / 2;
+    }
+    return rev;
+}
+
 fn main() -> i32 {
     let n: i32 = 8192;
     let pi2: f64 = 6.28318530717959;
@@ -14,23 +45,8 @@ fn main() -> i32 {
         let t: f64 = to_f64(i) / to_f64(n);
         let a1: f64 = pi2 * 100.0 * t;
         let a2: f64 = pi2 * 250.0 * t;
-        // sin via Taylor (reduce to [-pi,pi] first)
-        let a1r: f64 = a1 - to_f64(truncate(a1 / pi2)) * pi2;
-        if a1r > pi { a1r = a1r - pi2; }
-        if a1r < 0.0 - pi { a1r = a1r + pi2; }
-        let a2r: f64 = a2 - to_f64(truncate(a2 / pi2)) * pi2;
-        if a2r > pi { a2r = a2r - pi2; }
-        if a2r < 0.0 - pi { a2r = a2r + pi2; }
-
-        let a1_3: f64 = a1r * a1r * a1r;
-        let a1_5: f64 = a1_3 * a1r * a1r;
-        let a1_7: f64 = a1_5 * a1r * a1r;
-        let s1: f64 = a1r - a1_3 / 6.0 + a1_5 / 120.0 - a1_7 / 5040.0;
-
-        let a2_3: f64 = a2r * a2r * a2r;
-        let a2_5: f64 = a2_3 * a2r * a2r;
-        let a2_7: f64 = a2_5 * a2r * a2r;
-        let s2: f64 = a2r - a2_3 / 6.0 + a2_5 / 120.0 - a2_7 / 5040.0;
+        let s1: f64 = taylor_sin(a1, pi, pi2);
+        let s2: f64 = taylor_sin(a2, pi, pi2);
 
         re[i] = s1 + 0.5 * s2;
         im[i] = 0.0;
@@ -40,13 +56,7 @@ fn main() -> i32 {
     // For n=8192=2^13, we need 13-bit reversal
     let log_n: i32 = 13;
     for i: i32 in range(0, n) {
-        // Reverse bits of i (13 bits)
-        let rev: i32 = 0;
-        let tmp: i32 = i;
-        for b: i32 in range(0, log_n) {
-            rev = rev * 2 + tmp % 2;
-            tmp = tmp / 2;
-        }
+        let rev: i32 = reverse_bits(i, log_n);
         if rev > i {
             let tmp_re: f64 = re[i];
             let tmp_im: f64 = im[i];
@@ -67,13 +77,8 @@ fn main() -> i32 {
         while group < n {
             for k: i32 in range(0, half) {
                 let angle: f64 = angle_step * to_f64(k);
-                // cos and sin via Taylor
-                let ar: f64 = angle - to_f64(truncate(angle / pi2)) * pi2;
-                if ar > pi { ar = ar - pi2; }
-                if ar < 0.0 - pi { ar = ar + pi2; }
-                let ar2: f64 = ar * ar;
-                let cos_a: f64 = 1.0 - ar2 / 2.0 + ar2 * ar2 / 24.0 - ar2 * ar2 * ar2 / 720.0 + ar2 * ar2 * ar2 * ar2 / 40320.0;
-                let sin_a: f64 = ar - ar * ar2 / 6.0 + ar * ar2 * ar2 / 120.0 - ar * ar2 * ar2 * ar2 / 5040.0;
+                let cos_a: f64 = taylor_cos(angle, pi, pi2);
+                let sin_a: f64 = taylor_sin(angle, pi, pi2);
 
                 let even_idx: i32 = group + k;
                 let odd_idx: i32 = group + k + half;

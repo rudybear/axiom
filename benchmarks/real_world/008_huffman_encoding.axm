@@ -1,6 +1,22 @@
 @module huffman_encoding;
 @intent("Huffman encoding: build frequency table, construct tree, compute total encoded bit length");
 
+@pure
+fn lcg_next(seed: i64) -> i64 {
+    return (1103515245 * seed + 12345) % 2147483648;
+}
+
+@pure
+fn skewed_byte(seed: i64) -> i32 {
+    let raw: i64 = seed % 1000;
+    let byte_val: i32 = 0;
+    if raw < 200 { byte_val = narrow(seed % 10); }
+    if raw >= 200 and raw < 500 { byte_val = 10 + narrow(seed % 30); }
+    if raw >= 500 and raw < 800 { byte_val = 40 + narrow(seed % 60); }
+    if raw >= 800 { byte_val = 100 + narrow(seed % 156); }
+    return byte_val;
+}
+
 fn main() -> i32 {
     let data_size: i32 = 200000;
     let alpha_size: i32 = 256;
@@ -8,21 +24,12 @@ fn main() -> i32 {
     // Generate pseudo-random data with non-uniform distribution
     let freq: array[i64, 256] = array_zeros[i64, 256];
     let seed: i64 = 42;
-    let lcg_a: i64 = 1103515245;
-    let lcg_c: i64 = 12345;
-    let lcg_m: i64 = 2147483648;
 
     // Build data and frequency table
     let data: array[i32, 200000] = array_zeros[i32, 200000];
     for i: i32 in range(0, data_size) {
-        seed = (lcg_a * seed + lcg_c) % lcg_m;
-        // Skewed distribution: favor lower values
-        let raw: i64 = seed % 1000;
-        let byte_val: i32 = 0;
-        if raw < 200 { byte_val = narrow(seed % 10); }
-        if raw >= 200 and raw < 500 { byte_val = 10 + narrow(seed % 30); }
-        if raw >= 500 and raw < 800 { byte_val = 40 + narrow(seed % 60); }
-        if raw >= 800 { byte_val = 100 + narrow(seed % 156); }
+        seed = lcg_next(seed);
+        let byte_val: i32 = skewed_byte(seed);
         data[i] = byte_val;
         freq[byte_val] = freq[byte_val] + 1;
     }

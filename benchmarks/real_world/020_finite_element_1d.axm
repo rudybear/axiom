@@ -1,6 +1,18 @@
 @module finite_element_1d;
 @intent("1D finite element method: assemble stiffness matrix, apply BCs, solve via Gaussian elimination, 2000 elements");
 
+@pure
+fn taylor_sin(arg: f64, pi: f64) -> f64 {
+    let a: f64 = arg - to_f64(truncate(arg / (2.0 * pi))) * 2.0 * pi;
+    if a > pi { a = a - 2.0 * pi; }
+    if a < 0.0 - pi { a = a + 2.0 * pi; }
+    let a3: f64 = a * a * a;
+    let a5: f64 = a3 * a * a;
+    let a7: f64 = a5 * a * a;
+    let a9: f64 = a7 * a * a;
+    return a - a3 / 6.0 + a5 / 120.0 - a7 / 5040.0 + a9 / 362880.0;
+}
+
 fn main() -> i32 {
     let n_elem: i32 = 2000;
     let n_nodes: i32 = 2001;
@@ -61,15 +73,7 @@ fn main() -> i32 {
 
         // f(x) at midpoint: sin(pi*x/10) * (1 + pi^2/100)
         let arg: f64 = pi * x_mid / domain_len;
-        // sin via Taylor (reduce to [-pi, pi])
-        let a: f64 = arg - to_f64(truncate(arg / (2.0 * pi))) * 2.0 * pi;
-        if a > pi { a = a - 2.0 * pi; }
-        if a < 0.0 - pi { a = a + 2.0 * pi; }
-        let a3: f64 = a * a * a;
-        let a5: f64 = a3 * a * a;
-        let a7: f64 = a5 * a * a;
-        let a9: f64 = a7 * a * a;
-        let sin_val: f64 = a - a3 / 6.0 + a5 / 120.0 - a7 / 5040.0 + a9 / 362880.0;
+        let sin_val: f64 = taylor_sin(arg, pi);
 
         let f_val: f64 = sin_val * (1.0 + pi * pi / 100.0);
 
@@ -127,14 +131,7 @@ fn main() -> i32 {
     for idx: i32 in range(0, n_nodes) {
         let x: f64 = to_f64(idx) * h;
         let arg: f64 = pi * x / domain_len;
-        let a: f64 = arg - to_f64(truncate(arg / (2.0 * pi))) * 2.0 * pi;
-        if a > pi { a = a - 2.0 * pi; }
-        if a < 0.0 - pi { a = a + 2.0 * pi; }
-        let a3: f64 = a * a * a;
-        let a5: f64 = a3 * a * a;
-        let a7: f64 = a5 * a * a;
-        let a9: f64 = a7 * a * a;
-        let u_exact: f64 = a - a3 / 6.0 + a5 / 120.0 - a7 / 5040.0 + a9 / 362880.0;
+        let u_exact: f64 = taylor_sin(arg, pi);
 
         let err: f64 = u[idx] - u_exact;
         if err < 0.0 { err = 0.0 - err; }

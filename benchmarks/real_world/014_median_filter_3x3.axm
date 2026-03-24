@@ -1,6 +1,23 @@
 @module median_filter_3x3;
 @intent("3x3 median filter on 512x512 image using sorting network for 9 elements");
 
+@pure
+fn lcg_next(seed: i64) -> i64 {
+    return (1103515245 * seed + 12345) % 2147483648;
+}
+
+@pure
+fn min_i32(a: i32, b: i32) -> i32 {
+    if a < b { return a; }
+    return b;
+}
+
+@pure
+fn max_i32(a: i32, b: i32) -> i32 {
+    if a > b { return a; }
+    return b;
+}
+
 fn main() -> i32 {
     let width: i32 = 512;
     let height: i32 = 512;
@@ -11,12 +28,9 @@ fn main() -> i32 {
 
     // Generate noisy image
     let seed: i64 = 54321;
-    let lcg_a: i64 = 1103515245;
-    let lcg_c: i64 = 12345;
-    let lcg_m: i64 = 2147483648;
 
     for i: i32 in range(0, total) {
-        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        seed = lcg_next(seed);
         // Base gradient + salt-and-pepper noise
         let y: i32 = i / width;
         let x: i32 = i % width;
