@@ -42,6 +42,7 @@
 pub mod agent_api;
 pub mod benchmark;
 pub mod history;
+pub mod llm_optimizer;
 pub mod proposal;
 pub mod surface;
 pub mod transfer;
