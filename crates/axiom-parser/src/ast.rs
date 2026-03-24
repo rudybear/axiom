@@ -200,7 +200,23 @@ pub enum Annotation {
     Export,
     /// `@lifetime(scope|static|manual)` — declares allocation lifetime.
     Lifetime(String),
+    /// `@parallel_for(shared_read: [...], shared_write: [...], reduction(+: var), private: [...])`
+    /// — marks a for loop for parallel execution with data sharing clauses.
+    ParallelFor(ParallelForConfig),
     Custom(String, Vec<AnnotationValue>),
+}
+
+/// Configuration for `@parallel_for` data sharing clauses.
+#[derive(Debug, Clone)]
+pub struct ParallelForConfig {
+    /// Variables that are read (but never written) inside the loop body.
+    pub shared_read: Vec<String>,
+    /// Variables that are written (with disjoint index access) inside the loop body.
+    pub shared_write: Vec<String>,
+    /// Reduction operations: (operator, variable) — e.g., ("+", "total_energy").
+    pub reductions: Vec<(String, String)>,
+    /// Variables that are private to each iteration (thread-local copy).
+    pub private: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

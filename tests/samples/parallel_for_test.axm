@@ -1,0 +1,29 @@
+@module parallel_for_test;
+
+fn main() -> i32 {
+    let n: i32 = 1000;
+    let data: ptr[f64] = heap_alloc(n, 8);
+    let results: ptr[f64] = heap_alloc(n, 8);
+
+    // Initialize
+    for i: i32 in range(0, n) {
+        ptr_write_f64(data, i, to_f64(i));
+    }
+
+    // Parallel computation (validated by compiler)
+    @parallel_for(shared_read: [data], shared_write: [results])
+    for i: i32 in range(0, n) {
+        let val: f64 = ptr_read_f64(data, i);
+        ptr_write_f64(results, i, val * val);
+    }
+
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        sum = sum + ptr_read_f64(results, i);
+    }
+
+    print_f64(sum);
+    heap_free(data);
+    heap_free(results);
+    return 0;
+}
