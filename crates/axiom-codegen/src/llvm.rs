@@ -128,6 +128,9 @@ struct CodegenContext {
     needs_realloc: bool,
     /// Whether `@free` is needed (heap_free).
     needs_free: bool,
+    /// Whether arena builtins are used (arena_create/arena_alloc/etc.).
+    /// When true, `@malloc` and `@free` declarations are also emitted.
+    needs_arena: bool,
     /// Collected errors.
     errors: Vec<CodegenError>,
     /// Whether the current basic block has been terminated (ret or br).
@@ -182,6 +185,7 @@ impl CodegenContext {
             needs_calloc: false,
             needs_realloc: false,
             needs_free: false,
+            needs_arena: false,
             errors: Vec::new(),
             block_terminated: false,
             current_return_type: String::new(),
@@ -431,7 +435,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             "declare i32 @llvm.fshr.i32(i32, i32, i32)"
         );
     }
-    if ctx.needs_malloc {
+    if ctx.needs_malloc || ctx.needs_arena {
         let _ = writeln!(ctx.output, "declare noalias ptr @malloc(i64)");
     }
     if ctx.needs_calloc {
@@ -440,7 +444,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     if ctx.needs_realloc {
         let _ = writeln!(ctx.output, "declare noalias ptr @realloc(ptr, i64)");
     }
-    if ctx.needs_free {
+    if ctx.needs_free || ctx.needs_arena {
         let _ = writeln!(ctx.output, "declare void @free(ptr)");
     }
 
@@ -1789,6 +1793,10 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "ptr_write_i32" => return emit_builtin_ptr_write(ctx, args, "i32"),
             "ptr_write_i64" => return emit_builtin_ptr_write(ctx, args, "i64"),
             "ptr_write_f64" => return emit_builtin_ptr_write(ctx, args, "double"),
+            "arena_create" => return emit_builtin_arena_create(ctx, args),
+            "arena_alloc" => return emit_builtin_arena_alloc(ctx, args),
+            "arena_reset" => return emit_builtin_arena_reset(ctx, args),
+            "arena_destroy" => return emit_builtin_arena_destroy(ctx, args),
             _ => {}
         }
 
@@ -2746,6 +2754,206 @@ fn emit_builtin_heap_realloc(ctx: &mut CodegenContext, args: &[HirExpr]) -> Llvm
     LlvmValue {
         reg: result_reg,
         ty: "ptr".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arena (bump) allocator builtins
+// ---------------------------------------------------------------------------
+//
+// Arena layout: { ptr base, i64 offset, i64 capacity }  (24 bytes)
+//   offset 0:  ptr to backing memory (from malloc)
+//   offset 8:  current bump offset (i64)
+//   offset 16: total capacity in bytes (i64)
+//
+// All arena builtins are emitted inline as LLVM IR -- no runtime library needed.
+
+/// Emit built-in `arena_create(size_bytes: i32) -> ptr`.
+///
+/// Allocates a 24-byte arena struct and a backing buffer of `size_bytes`.
+/// Returns a pointer to the arena struct.
+fn emit_builtin_arena_create(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_arena = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "arena_create() requires exactly 1 argument (size_bytes)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let size = emit_expr(ctx, &args[0], Some("i32"));
+
+    // Widen size to i64.
+    let size64 = ctx.fresh_reg();
+    ctx.emit(&format!("{size64} = sext i32 {} to i64", size.reg));
+
+    // Allocate the arena struct (24 bytes: ptr + i64 + i64).
+    let arena = ctx.fresh_reg();
+    ctx.emit(&format!("{arena} = call noalias ptr @malloc(i64 24)"));
+
+    // Allocate the backing buffer.
+    let base = ctx.fresh_reg();
+    ctx.emit(&format!("{base} = call noalias ptr @malloc(i64 {size64})"));
+
+    // Store base pointer at arena+0.
+    ctx.emit(&format!("store ptr {base}, ptr {arena}"));
+
+    // Store offset = 0 at arena+8.
+    let off_ptr = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{off_ptr} = getelementptr i8, ptr {arena}, i64 8"
+    ));
+    ctx.emit(&format!("store i64 0, ptr {off_ptr}"));
+
+    // Store capacity at arena+16.
+    let cap_ptr = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{cap_ptr} = getelementptr i8, ptr {arena}, i64 16"
+    ));
+    ctx.emit(&format!("store i64 {size64}, ptr {cap_ptr}"));
+
+    LlvmValue {
+        reg: arena,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `arena_alloc(arena: ptr, count: i32, elem_size: i32) -> ptr`.
+///
+/// Bump-allocates `count * elem_size` bytes from the arena. Returns a pointer
+/// to the allocated region. No bounds checking (by design -- the arena is
+/// pre-sized by the programmer).
+fn emit_builtin_arena_alloc(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_arena = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "arena_alloc() requires exactly 3 arguments (arena, count, elem_size)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let arena_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let count = emit_expr(ctx, &args[1], Some("i32"));
+    let elem_size = emit_expr(ctx, &args[2], Some("i32"));
+
+    // Widen count and elem_size to i64.
+    let count64 = ctx.fresh_reg();
+    ctx.emit(&format!("{count64} = sext i32 {} to i64", count.reg));
+    let elem64 = ctx.fresh_reg();
+    ctx.emit(&format!("{elem64} = sext i32 {} to i64", elem_size.reg));
+
+    // total = count * elem_size
+    let total = ctx.fresh_reg();
+    ctx.emit(&format!("{total} = mul i64 {count64}, {elem64}"));
+
+    // Load base pointer from arena+0.
+    let base = ctx.fresh_reg();
+    ctx.emit(&format!("{base} = load ptr, ptr {}", arena_val.reg));
+
+    // Load current offset from arena+8.
+    let off_ptr = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{off_ptr} = getelementptr i8, ptr {}, i64 8",
+        arena_val.reg
+    ));
+    let offset = ctx.fresh_reg();
+    ctx.emit(&format!("{offset} = load i64, ptr {off_ptr}"));
+
+    // result = base + offset
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = getelementptr i8, ptr {base}, i64 {offset}"
+    ));
+
+    // new_offset = offset + total
+    let new_offset = ctx.fresh_reg();
+    ctx.emit(&format!("{new_offset} = add i64 {offset}, {total}"));
+
+    // Store new_offset back at arena+8.
+    ctx.emit(&format!("store i64 {new_offset}, ptr {off_ptr}"));
+
+    LlvmValue {
+        reg: result,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `arena_reset(arena: ptr)`.
+///
+/// Resets the arena offset to 0, instantly "freeing" all allocations.
+fn emit_builtin_arena_reset(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_arena = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "arena_reset() requires exactly 1 argument (arena)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let arena_val = emit_expr(ctx, &args[0], Some("ptr"));
+
+    // Store 0 to offset at arena+8.
+    let off_ptr = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{off_ptr} = getelementptr i8, ptr {}, i64 8",
+        arena_val.reg
+    ));
+    ctx.emit(&format!("store i64 0, ptr {off_ptr}"));
+
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `arena_destroy(arena: ptr)`.
+///
+/// Frees the backing buffer and the arena struct itself.
+fn emit_builtin_arena_destroy(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_arena = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "arena_destroy() requires exactly 1 argument (arena)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let arena_val = emit_expr(ctx, &args[0], Some("ptr"));
+
+    // Load base pointer from arena+0.
+    let base = ctx.fresh_reg();
+    ctx.emit(&format!("{base} = load ptr, ptr {}", arena_val.reg));
+
+    // Free the backing buffer.
+    ctx.emit(&format!("call void @free(ptr {base})"));
+
+    // Free the arena struct.
+    ctx.emit(&format!("call void @free(ptr {})", arena_val.reg));
+
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
     }
 }
 
@@ -6451,6 +6659,331 @@ fn main() -> i32 {
         assert!(
             !ir.contains("@realloc"),
             "should not declare realloc when unused: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Arena (bump) allocator builtin tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_arena_create() {
+        // arena_create(1048576) should emit two malloc calls + stores for struct fields.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arena".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("arena_create", vec![int_lit(1048576)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Should allocate 24 bytes for the arena struct.
+        assert!(
+            ir.contains("call noalias ptr @malloc(i64 24)"),
+            "arena_create should malloc 24 bytes for arena struct: {ir}"
+        );
+        // Should allocate the backing buffer.
+        assert!(
+            ir.contains("call noalias ptr @malloc(i64 %"),
+            "arena_create should malloc the backing buffer: {ir}"
+        );
+        // Should store offset = 0.
+        assert!(
+            ir.contains("store i64 0, ptr %"),
+            "arena_create should store offset = 0: {ir}"
+        );
+        // Should emit GEP for offset field at +8.
+        assert!(
+            ir.contains("getelementptr i8, ptr %"),
+            "arena_create should emit GEP for struct fields: {ir}"
+        );
+        // Should declare malloc.
+        assert!(
+            ir.contains("declare noalias ptr @malloc(i64)"),
+            "arena_create should declare malloc: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_arena_alloc() {
+        // arena_alloc(arena, 100, 4) should emit GEP + load offset + bump + store.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arena".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("arena_create", vec![int_lit(4096)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Let {
+                        name: "data".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call(
+                            "arena_alloc",
+                            vec![ident("arena"), int_lit(100), int_lit(4)],
+                        ),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Should load the base pointer.
+        assert!(
+            ir.contains("load ptr, ptr %"),
+            "arena_alloc should load base pointer: {ir}"
+        );
+        // Should load the offset.
+        assert!(
+            ir.contains("load i64, ptr %"),
+            "arena_alloc should load offset: {ir}"
+        );
+        // Should compute total = count * elem_size.
+        assert!(
+            ir.contains("mul i64"),
+            "arena_alloc should compute total bytes: {ir}"
+        );
+        // Should compute new_offset = offset + total.
+        assert!(
+            ir.contains("add i64"),
+            "arena_alloc should bump the offset: {ir}"
+        );
+        // Should compute result pointer = base + offset via GEP.
+        let gep_count = ir.matches("getelementptr i8, ptr %").count();
+        assert!(
+            gep_count >= 2,
+            "arena_alloc should emit GEP for struct fields and result pointer (got {gep_count}): {ir}"
+        );
+    }
+
+    #[test]
+    fn test_arena_reset() {
+        // arena_reset(arena) should store 0 to the offset field.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arena".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("arena_create", vec![int_lit(4096)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("arena_reset", vec![ident("arena")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // The reset emits a GEP to arena+8 then store i64 0.
+        // Count "store i64 0" -- arena_create stores one (offset=0), arena_reset stores another.
+        let store_zero_count = ir.matches("store i64 0, ptr %").count();
+        assert!(
+            store_zero_count >= 2,
+            "arena_reset should store 0 to offset (found {store_zero_count} store-zero ops): {ir}"
+        );
+    }
+
+    #[test]
+    fn test_arena_destroy() {
+        // arena_destroy(arena) should free the base buffer and the arena struct.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "arena".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("arena_create", vec![int_lit(4096)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Expr {
+                        expr: call("arena_destroy", vec![ident("arena")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Should emit two free calls (one for base, one for arena struct).
+        let free_count = ir.matches("call void @free(ptr").count();
+        assert!(
+            free_count == 2,
+            "arena_destroy should emit exactly 2 free calls (got {free_count}): {ir}"
+        );
+        // Should declare free.
+        assert!(
+            ir.contains("declare void @free(ptr)"),
+            "arena_destroy should declare free: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_arena_program() {
+        // Full integration: create arena, alloc, write, read, reset, reuse, destroy.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // let arena: ptr[i32] = arena_create(4096);
+                    stmt(HirStmtKind::Let {
+                        name: "arena".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call("arena_create", vec![int_lit(4096)]),
+                        mutable: false,
+                    }),
+                    // let data: ptr[i32] = arena_alloc(arena, 10, 4);
+                    stmt(HirStmtKind::Let {
+                        name: "data".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call(
+                            "arena_alloc",
+                            vec![ident("arena"), int_lit(10), int_lit(4)],
+                        ),
+                        mutable: false,
+                    }),
+                    // ptr_write_i32(data, 0, 42);
+                    stmt(HirStmtKind::Expr {
+                        expr: call(
+                            "ptr_write_i32",
+                            vec![ident("data"), int_lit(0), int_lit(42)],
+                        ),
+                    }),
+                    // let val: i32 = ptr_read_i32(data, 0);
+                    stmt(HirStmtKind::Let {
+                        name: "val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("ptr_read_i32", vec![ident("data"), int_lit(0)]),
+                        mutable: false,
+                    }),
+                    // arena_reset(arena);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("arena_reset", vec![ident("arena")]),
+                    }),
+                    // let reused: ptr[i32] = arena_alloc(arena, 5, 4);
+                    stmt(HirStmtKind::Let {
+                        name: "reused".to_string(),
+                        name_span: span(),
+                        ty: HirType::Ptr {
+                            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        },
+                        value: call(
+                            "arena_alloc",
+                            vec![ident("arena"), int_lit(5), int_lit(4)],
+                        ),
+                        mutable: false,
+                    }),
+                    // arena_destroy(arena);
+                    stmt(HirStmtKind::Expr {
+                        expr: call("arena_destroy", vec![ident("arena")]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Verify all key components are present.
+        assert!(
+            ir.contains("call noalias ptr @malloc(i64 24)"),
+            "should emit malloc for arena struct: {ir}"
+        );
+        assert!(
+            ir.contains("getelementptr i8, ptr"),
+            "should emit GEP for arena struct fields: {ir}"
+        );
+        assert!(
+            ir.contains("load ptr, ptr"),
+            "should load base pointer: {ir}"
+        );
+        assert!(
+            ir.contains("load i64, ptr"),
+            "should load offset: {ir}"
+        );
+        assert!(
+            ir.contains("mul i64"),
+            "should compute total bytes: {ir}"
+        );
+        assert!(
+            ir.contains("add i64"),
+            "should bump offset: {ir}"
+        );
+        let free_count = ir.matches("call void @free(ptr").count();
+        assert!(
+            free_count == 2,
+            "should emit 2 free calls for destroy (got {free_count}): {ir}"
+        );
+        assert!(
+            ir.contains("declare noalias ptr @malloc(i64)"),
+            "should declare malloc: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @free(ptr)"),
+            "should declare free: {ir}"
         );
     }
 }
