@@ -34,13 +34,6 @@ fn main() -> i32 {
     k[56]=1955562222; k[57]=2024104815; k[58]=2227730452; k[59]=2361852424;
     k[60]=2428436474; k[61]=2756734187; k[62]=3204031479; k[63]=3329325298;
 
-    // Powers of 2 for shift simulation
-    let pow2: array[i64, 32] = array_zeros[i64, 32];
-    pow2[0] = 1;
-    for i: i32 in range(1, 32) {
-        pow2[i] = pow2[i - 1] * 2;
-    }
-
     let w: array[i64, 64] = array_zeros[i64, 64];
 
     for block: i32 in range(0, blocks) {
@@ -54,26 +47,18 @@ fn main() -> i32 {
         // Message schedule expansion: w[16..63]
         for i: i32 in range(16, 64) {
             // sigma0: ROTR(w[i-15],7) XOR ROTR(w[i-15],18) XOR SHR(w[i-15],3)
-            // Simulate ROTR(x, n) = (x / pow2[n] + x * pow2[32-n]) % mod32
             let w15: i64 = w[i - 15];
-            let r7: i64 = (w15 / pow2[7] + w15 * pow2[25]) % mod32;
-            let r18: i64 = (w15 / pow2[18] + w15 * pow2[14]) % mod32;
-            let sh3: i64 = w15 / pow2[3];
-            // XOR via: a^b = a+b - 2*(a*b % mod32)  (approximate AND)
-            let xor1_and: i64 = (r7 * r18) % mod32;
-            let xor1: i64 = (r7 + r18 - 2 * xor1_and + 2 * mod32) % mod32;
-            let xor2_and: i64 = (xor1 * sh3) % mod32;
-            let s0: i64 = (xor1 + sh3 - 2 * xor2_and + 2 * mod32) % mod32;
+            let r7: i64 = rotr(w15, 7);
+            let r18: i64 = rotr(w15, 18);
+            let sh3: i64 = lshr(w15, 3);
+            let s0: i64 = bxor(bxor(r7, r18), sh3);
 
             // sigma1: ROTR(w[i-2],17) XOR ROTR(w[i-2],19) XOR SHR(w[i-2],10)
             let w2: i64 = w[i - 2];
-            let r17: i64 = (w2 / pow2[17] + w2 * pow2[15]) % mod32;
-            let r19: i64 = (w2 / pow2[19] + w2 * pow2[13]) % mod32;
-            let sh10: i64 = w2 / pow2[10];
-            let xor3_and: i64 = (r17 * r19) % mod32;
-            let xor3: i64 = (r17 + r19 - 2 * xor3_and + 2 * mod32) % mod32;
-            let xor4_and: i64 = (xor3 * sh10) % mod32;
-            let s1: i64 = (xor3 + sh10 - 2 * xor4_and + 2 * mod32) % mod32;
+            let r17: i64 = rotr(w2, 17);
+            let r19: i64 = rotr(w2, 19);
+            let sh10: i64 = lshr(w2, 10);
+            let s1: i64 = bxor(bxor(r17, r19), sh10);
 
             w[i] = (w[i - 16] + s0 + w[i - 7] + s1) % mod32;
         }
@@ -90,40 +75,18 @@ fn main() -> i32 {
         // 64 compression rounds
         for i: i32 in range(0, 64) {
             // Sigma1(e) = ROTR(e,6) XOR ROTR(e,11) XOR ROTR(e,25)
-            let re6: i64 = (e / pow2[6] + e * pow2[26]) % mod32;
-            let re11: i64 = (e / pow2[11] + e * pow2[21]) % mod32;
-            let re25: i64 = (e / pow2[25] + e * pow2[7]) % mod32;
-            let x1_and: i64 = (re6 * re11) % mod32;
-            let x1: i64 = (re6 + re11 - 2 * x1_and + 2 * mod32) % mod32;
-            let x2_and: i64 = (x1 * re25) % mod32;
-            let S1: i64 = (x1 + re25 - 2 * x2_and + 2 * mod32) % mod32;
+            let S1: i64 = bxor(bxor(rotr(e, 6), rotr(e, 11)), rotr(e, 25));
 
             // Ch(e,f,g) = (e AND f) XOR (NOT e AND g)
-            let ef: i64 = (e * f) % mod32;
-            let ne: i64 = (mod32 - 1 - e) % mod32;
-            let neg: i64 = (ne * g) % mod32;
-            let ch_and: i64 = (ef * neg) % mod32;
-            let ch: i64 = (ef + neg - 2 * ch_and + 2 * mod32) % mod32;
+            let ch: i64 = bxor(band(e, f), band(bnot(e), g));
 
             let temp1: i64 = (hh + S1 + ch + k[i] + w[i]) % mod32;
 
             // Sigma0(a) = ROTR(a,2) XOR ROTR(a,13) XOR ROTR(a,22)
-            let ra2: i64 = (a / pow2[2] + a * pow2[30]) % mod32;
-            let ra13: i64 = (a / pow2[13] + a * pow2[19]) % mod32;
-            let ra22: i64 = (a / pow2[22] + a * pow2[10]) % mod32;
-            let x3_and: i64 = (ra2 * ra13) % mod32;
-            let x3: i64 = (ra2 + ra13 - 2 * x3_and + 2 * mod32) % mod32;
-            let x4_and: i64 = (x3 * ra22) % mod32;
-            let S0: i64 = (x3 + ra22 - 2 * x4_and + 2 * mod32) % mod32;
+            let S0: i64 = bxor(bxor(rotr(a, 2), rotr(a, 13)), rotr(a, 22));
 
             // Maj(a,b,c) = (a AND b) XOR (a AND c) XOR (b AND c)
-            let ab: i64 = (a * b) % mod32;
-            let ac: i64 = (a * c) % mod32;
-            let bc: i64 = (b * c) % mod32;
-            let m1_and: i64 = (ab * ac) % mod32;
-            let m1: i64 = (ab + ac - 2 * m1_and + 2 * mod32) % mod32;
-            let m2_and: i64 = (m1 * bc) % mod32;
-            let maj: i64 = (m1 + bc - 2 * m2_and + 2 * mod32) % mod32;
+            let maj: i64 = bxor(bxor(band(a, b), band(a, c)), band(b, c));
 
             let temp2: i64 = (S0 + maj) % mod32;
 

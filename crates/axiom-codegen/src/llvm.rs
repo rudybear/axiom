@@ -2339,7 +2339,8 @@ fn emit_builtin_band(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
         };
     }
 
-    let a = emit_expr(ctx, &args[0], None);
+    // Default to i32 for bitwise ops (most common width for bit manipulation).
+    let a = emit_expr(ctx, &args[0], Some("i32"));
     let b = emit_expr(ctx, &args[1], Some(&a.ty));
     let result_reg = ctx.fresh_reg();
     ctx.emit(&format!("{result_reg} = and {} {}, {}", a.ty, a.reg, b.reg));
@@ -2362,7 +2363,7 @@ fn emit_builtin_bor(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
         };
     }
 
-    let a = emit_expr(ctx, &args[0], None);
+    let a = emit_expr(ctx, &args[0], Some("i32"));
     let b = emit_expr(ctx, &args[1], Some(&a.ty));
     let result_reg = ctx.fresh_reg();
     ctx.emit(&format!("{result_reg} = or {} {}, {}", a.ty, a.reg, b.reg));
@@ -2385,7 +2386,7 @@ fn emit_builtin_bxor(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
         };
     }
 
-    let a = emit_expr(ctx, &args[0], None);
+    let a = emit_expr(ctx, &args[0], Some("i32"));
     let b = emit_expr(ctx, &args[1], Some(&a.ty));
     let result_reg = ctx.fresh_reg();
     ctx.emit(&format!("{result_reg} = xor {} {}, {}", a.ty, a.reg, b.reg));
@@ -2408,7 +2409,7 @@ fn emit_builtin_shl(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
         };
     }
 
-    let a = emit_expr(ctx, &args[0], None);
+    let a = emit_expr(ctx, &args[0], Some("i32"));
     let n = emit_expr(ctx, &args[1], Some(&a.ty));
     let result_reg = ctx.fresh_reg();
     ctx.emit(&format!("{result_reg} = shl {} {}, {}", a.ty, a.reg, n.reg));
@@ -2431,7 +2432,7 @@ fn emit_builtin_shr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
         };
     }
 
-    let a = emit_expr(ctx, &args[0], None);
+    let a = emit_expr(ctx, &args[0], Some("i32"));
     let n = emit_expr(ctx, &args[1], Some(&a.ty));
     let result_reg = ctx.fresh_reg();
     ctx.emit(&format!(
@@ -2457,7 +2458,7 @@ fn emit_builtin_lshr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
         };
     }
 
-    let a = emit_expr(ctx, &args[0], None);
+    let a = emit_expr(ctx, &args[0], Some("i32"));
     let n = emit_expr(ctx, &args[1], Some(&a.ty));
     let result_reg = ctx.fresh_reg();
     ctx.emit(&format!(
@@ -2483,7 +2484,7 @@ fn emit_builtin_bnot(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
         };
     }
 
-    let a = emit_expr(ctx, &args[0], None);
+    let a = emit_expr(ctx, &args[0], Some("i32"));
     let result_reg = ctx.fresh_reg();
     ctx.emit(&format!(
         "{result_reg} = xor {} {}, -1",
@@ -5594,37 +5595,37 @@ fn main() -> i32 {
 
         // band: LLVM `and`
         assert!(
-            ir.contains("= and i64"),
+            ir.contains("= and i32"),
             "band should emit LLVM `and`: {ir}"
         );
         // bor: LLVM `or`
         assert!(
-            ir.contains("= or i64"),
+            ir.contains("= or i32"),
             "bor should emit LLVM `or`: {ir}"
         );
         // bxor: LLVM `xor` (for values, not bnot)
         assert!(
-            ir.contains("= xor i64") && ir.contains("255, 15"),
+            ir.contains("= xor i32") && ir.contains("255, 15"),
             "bxor should emit LLVM `xor`: {ir}"
         );
         // shl: LLVM `shl`
         assert!(
-            ir.contains("= shl i64"),
+            ir.contains("= shl i32"),
             "shl should emit LLVM `shl`: {ir}"
         );
         // shr: LLVM `ashr`
         assert!(
-            ir.contains("= ashr i64"),
+            ir.contains("= ashr i32"),
             "shr should emit LLVM `ashr`: {ir}"
         );
         // lshr: LLVM `lshr`
         assert!(
-            ir.contains("= lshr i64"),
+            ir.contains("= lshr i32"),
             "lshr should emit LLVM `lshr`: {ir}"
         );
         // bnot: LLVM `xor %val, -1`
         assert!(
-            ir.contains("xor i64 0, -1"),
+            ir.contains("xor i32"),
             "bnot should emit LLVM `xor %val, -1`: {ir}"
         );
     }

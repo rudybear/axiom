@@ -3,34 +3,25 @@
 
 int main(void) {
     uint64_t mod32 = 4294967296ULL;
-    uint64_t poly = 3988292384ULL;
+    uint32_t poly = 0xEDB88320U; /* 3988292384 */
 
-    uint64_t pow2[32];
-    pow2[0] = 1;
-    for (int i = 1; i < 32; i++) pow2[i] = pow2[i-1] * 2;
-
-    uint64_t table[256];
+    /* Build CRC-32 lookup table (256 entries) */
+    uint32_t table[256];
     for (int i = 0; i < 256; i++) {
-        uint64_t crc = (uint64_t)i;
+        uint32_t crc = (uint32_t)i;
         for (int j = 0; j < 8; j++) {
-            uint64_t low_bit = crc % 2;
-            crc = crc / 2;
-            if (low_bit == 1) {
-                uint64_t and_acc = 0;
-                for (int bit = 0; bit < 32; bit++) {
-                    uint64_t c_bit = (crc / pow2[bit]) % 2;
-                    uint64_t p_bit = (poly / pow2[bit]) % 2;
-                    and_acc += c_bit * p_bit * pow2[bit];
-                }
-                crc = crc + poly - 2 * and_acc;
-                crc = ((crc % mod32) + mod32) % mod32;
+            uint32_t low_bit = crc & 1;
+            crc >>= 1;
+            if (low_bit) {
+                crc ^= poly;
             }
         }
         table[i] = crc;
     }
 
+    /* Process pseudo-random bytes */
     int nbytes = 500000;
-    uint64_t crc = mod32 - 1;
+    uint32_t crc = 0xFFFFFFFFU;
     uint64_t seed = 12345;
     uint64_t lcg_a = 1103515245ULL;
     uint64_t lcg_c = 12345ULL;
@@ -38,37 +29,16 @@ int main(void) {
 
     for (int i = 0; i < nbytes; i++) {
         seed = (lcg_a * seed + lcg_c) % lcg_m;
-        uint64_t byte_val = seed % 256;
+        uint32_t byte_val = (uint32_t)(seed & 0xFF);
 
-        uint64_t low_crc = crc % 256;
-        uint64_t acc = 0;
-        for (int bit = 0; bit < 8; bit++) {
-            uint64_t c_bit = (low_crc / pow2[bit]) % 2;
-            uint64_t b_bit = (byte_val / pow2[bit]) % 2;
-            acc += c_bit * b_bit * pow2[bit];
-        }
-        uint64_t idx = (low_crc + byte_val - 2 * acc + 512) % 256;
-        uint64_t table_val = table[(int)idx];
-
-        uint64_t shifted_crc = crc / 256;
-
-        uint64_t xor_acc = 0;
-        for (int bit = 0; bit < 32; bit++) {
-            uint64_t t_bit = (table_val / pow2[bit]) % 2;
-            uint64_t s_bit = (shifted_crc / pow2[bit]) % 2;
-            xor_acc += t_bit * s_bit * pow2[bit];
-        }
-        crc = (table_val + shifted_crc - 2 * xor_acc + 2 * mod32) % mod32;
+        /* CRC update: crc = table[(crc ^ byte) & 0xFF] ^ (crc >> 8) */
+        uint32_t idx = (crc ^ byte_val) & 0xFF;
+        crc = table[idx] ^ (crc >> 8);
     }
 
-    uint64_t mask = mod32 - 1;
-    uint64_t xf_acc = 0;
-    for (int bit = 0; bit < 32; bit++) {
-        uint64_t c_bit = (crc / pow2[bit]) % 2;
-        xf_acc += c_bit * pow2[bit];
-    }
-    uint64_t final_crc = (crc + mask - 2 * xf_acc + 2 * mod32) % mod32;
+    /* Final XOR with 0xFFFFFFFF */
+    uint32_t final_crc = crc ^ 0xFFFFFFFFU;
 
-    printf("%lld\n", (long long)final_crc);
+    printf("%lld\n", (long long)(uint64_t)final_crc);
     return 0;
 }

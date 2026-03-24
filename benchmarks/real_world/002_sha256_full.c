@@ -1,6 +1,10 @@
 #include <stdio.h>
 #include <stdint.h>
 
+static inline uint32_t rotr32(uint32_t x, int n) {
+    return (x >> n) | (x << (32 - n));
+}
+
 int main(void) {
     int blocks = 10000;
     uint64_t mod32 = 4294967296ULL;
@@ -27,10 +31,6 @@ int main(void) {
         2428436474,2756734187,3204031479,3329325298
     };
 
-    uint64_t pow2[32];
-    pow2[0] = 1;
-    for (int i = 1; i < 32; i++) pow2[i] = pow2[i-1] * 2;
-
     uint64_t w[64];
 
     for (int block = 0; block < blocks; block++) {
@@ -41,23 +41,17 @@ int main(void) {
         }
 
         for (int i = 16; i < 64; i++) {
-            uint64_t w15 = w[i-15];
-            uint64_t r7 = (w15/pow2[7] + w15*pow2[25]) % mod32;
-            uint64_t r18 = (w15/pow2[18] + w15*pow2[14]) % mod32;
-            uint64_t sh3 = w15/pow2[3];
-            uint64_t xor1_and = (r7*r18) % mod32;
-            uint64_t xor1 = (r7+r18 - 2*xor1_and + 2*mod32) % mod32;
-            uint64_t xor2_and = (xor1*sh3) % mod32;
-            uint64_t s0 = (xor1+sh3 - 2*xor2_and + 2*mod32) % mod32;
+            uint32_t w15 = (uint32_t)w[i-15];
+            uint32_t r7 = rotr32(w15, 7);
+            uint32_t r18 = rotr32(w15, 18);
+            uint32_t sh3 = w15 >> 3;
+            uint32_t s0 = r7 ^ r18 ^ sh3;
 
-            uint64_t w2 = w[i-2];
-            uint64_t r17 = (w2/pow2[17] + w2*pow2[15]) % mod32;
-            uint64_t r19 = (w2/pow2[19] + w2*pow2[13]) % mod32;
-            uint64_t sh10 = w2/pow2[10];
-            uint64_t xor3_and = (r17*r19) % mod32;
-            uint64_t xor3 = (r17+r19 - 2*xor3_and + 2*mod32) % mod32;
-            uint64_t xor4_and = (xor3*sh10) % mod32;
-            uint64_t s1 = (xor3+sh10 - 2*xor4_and + 2*mod32) % mod32;
+            uint32_t w2 = (uint32_t)w[i-2];
+            uint32_t r17 = rotr32(w2, 17);
+            uint32_t r19 = rotr32(w2, 19);
+            uint32_t sh10 = w2 >> 10;
+            uint32_t s1 = r17 ^ r19 ^ sh10;
 
             w[i] = (w[i-16] + s0 + w[i-7] + s1) % mod32;
         }
@@ -65,37 +59,17 @@ int main(void) {
         uint64_t a=h0, b=h1, c=h2, d=h3, e=h4, f=h5, g=h6, hh=h7;
 
         for (int i = 0; i < 64; i++) {
-            uint64_t re6 = (e/pow2[6] + e*pow2[26]) % mod32;
-            uint64_t re11 = (e/pow2[11] + e*pow2[21]) % mod32;
-            uint64_t re25 = (e/pow2[25] + e*pow2[7]) % mod32;
-            uint64_t x1_and = (re6*re11) % mod32;
-            uint64_t x1 = (re6+re11 - 2*x1_and + 2*mod32) % mod32;
-            uint64_t x2_and = (x1*re25) % mod32;
-            uint64_t S1 = (x1+re25 - 2*x2_and + 2*mod32) % mod32;
+            uint32_t e32 = (uint32_t)e;
+            uint32_t S1 = rotr32(e32, 6) ^ rotr32(e32, 11) ^ rotr32(e32, 25);
 
-            uint64_t ef = (e*f) % mod32;
-            uint64_t ne = (mod32-1-e) % mod32;
-            uint64_t neg_val = (ne*g) % mod32;
-            uint64_t ch_and = (ef*neg_val) % mod32;
-            uint64_t ch = (ef+neg_val - 2*ch_and + 2*mod32) % mod32;
+            uint32_t ch = (e32 & (uint32_t)f) ^ (~e32 & (uint32_t)g);
 
             uint64_t temp1 = (hh + S1 + ch + k[i] + w[i]) % mod32;
 
-            uint64_t ra2 = (a/pow2[2] + a*pow2[30]) % mod32;
-            uint64_t ra13 = (a/pow2[13] + a*pow2[19]) % mod32;
-            uint64_t ra22 = (a/pow2[22] + a*pow2[10]) % mod32;
-            uint64_t x3_and = (ra2*ra13) % mod32;
-            uint64_t x3 = (ra2+ra13 - 2*x3_and + 2*mod32) % mod32;
-            uint64_t x4_and = (x3*ra22) % mod32;
-            uint64_t S0 = (x3+ra22 - 2*x4_and + 2*mod32) % mod32;
+            uint32_t a32 = (uint32_t)a;
+            uint32_t S0 = rotr32(a32, 2) ^ rotr32(a32, 13) ^ rotr32(a32, 22);
 
-            uint64_t ab = (a*b) % mod32;
-            uint64_t ac = (a*c) % mod32;
-            uint64_t bc = (b*c) % mod32;
-            uint64_t m1_and = (ab*ac) % mod32;
-            uint64_t m1 = (ab+ac - 2*m1_and + 2*mod32) % mod32;
-            uint64_t m2_and = (m1*bc) % mod32;
-            uint64_t maj = (m1+bc - 2*m2_and + 2*mod32) % mod32;
+            uint32_t maj = (a32 & (uint32_t)b) ^ (a32 & (uint32_t)c) ^ ((uint32_t)b & (uint32_t)c);
 
             uint64_t temp2 = (S0 + maj) % mod32;
 

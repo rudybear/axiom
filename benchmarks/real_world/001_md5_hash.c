@@ -1,6 +1,10 @@
 #include <stdio.h>
 #include <stdint.h>
 
+static inline uint32_t rotl32(uint32_t x, int n) {
+    return (x << n) | (x >> (32 - n));
+}
+
 int main(void) {
     int blocks = 10000;
     uint64_t mod32 = 4294967296ULL;
@@ -9,12 +13,6 @@ int main(void) {
     uint64_t b0 = 4023233417ULL;
     uint64_t c0 = 2562383102ULL;
     uint64_t d0 = 271733878ULL;
-
-    uint64_t pow2[32];
-    pow2[0] = 1;
-    for (int i = 1; i < 32; i++) {
-        pow2[i] = pow2[i-1] * 2;
-    }
 
     int s[64] = {
         7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
@@ -60,36 +58,27 @@ int main(void) {
         uint64_t a = a0, b = b0, c = c0, d = d0;
 
         for (int i = 0; i < 64; i++) {
-            uint64_t f_val = 0;
+            uint32_t b32 = (uint32_t)b, c32 = (uint32_t)c, d32 = (uint32_t)d;
+            uint32_t f_val;
             if (i < 16) {
-                uint64_t bc = (b * c) % mod32;
-                uint64_t nb = (mod32 - 1 - b) % mod32;
-                uint64_t nbd = (nb * d) % mod32;
-                f_val = (bc + nbd) % mod32;
+                // F = (B AND C) OR (NOT B AND D)
+                f_val = (b32 & c32) | (~b32 & d32);
             } else if (i < 32) {
-                uint64_t db = (d * b) % mod32;
-                uint64_t nd = (mod32 - 1 - d) % mod32;
-                uint64_t ndc = (nd * c) % mod32;
-                f_val = (db + ndc) % mod32;
+                // G = (D AND B) OR (NOT D AND C)
+                f_val = (d32 & b32) | (~d32 & c32);
             } else if (i < 48) {
-                uint64_t bc_and = (b * c) % mod32;
-                uint64_t bc_xor = (b + c - 2 * bc_and + 2 * mod32) % mod32;
-                uint64_t bcd_and = (bc_xor * d) % mod32;
-                f_val = (bc_xor + d - 2 * bcd_and + 2 * mod32) % mod32;
+                // H = B XOR C XOR D
+                f_val = b32 ^ c32 ^ d32;
             } else {
-                uint64_t nd = (mod32 - 1 - d) % mod32;
-                uint64_t b_or_nd = (b + nd - (b * nd) % mod32 + mod32) % mod32;
-                uint64_t ci = (c * b_or_nd) % mod32;
-                f_val = (c + b_or_nd - 2 * ci + 2 * mod32) % mod32;
+                // I = C XOR (B OR NOT D)
+                f_val = c32 ^ (b32 | ~d32);
             }
 
             int g = g_idx[i];
             uint64_t temp = (a + f_val + K[i] + M[g]) % mod32;
             int shift = s[i];
 
-            uint64_t left = (temp * pow2[shift]) % mod32;
-            uint64_t right = temp / pow2[32 - shift];
-            uint64_t rotated = (left + right) % mod32;
+            uint32_t rotated = rotl32((uint32_t)temp, shift);
 
             uint64_t new_b = (b + rotated) % mod32;
             a = d;
