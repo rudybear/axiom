@@ -91,6 +91,12 @@ enum Commands {
         #[arg(long, default_value = "10")]
         iterations: usize,
     },
+
+    /// Format an AXIOM source file (parse → HIR → pretty-print)
+    Fmt {
+        /// Input .axm file
+        input: String,
+    },
 }
 
 fn main() -> miette::Result<()> {
@@ -165,6 +171,32 @@ fn main() -> miette::Result<()> {
         } => run_optimize(&input, iterations, &target, api_key.as_deref(), dry_run, &agent),
 
         Commands::Profile { input, iterations } => run_profile(&input, iterations),
+
+        Commands::Fmt { input } => {
+            let source = std::fs::read_to_string(&input)
+                .map_err(|e| miette::miette!("Failed to read {}: {}", input, e))?;
+            let result = axiom_parser::parse(&source);
+            if result.has_errors() {
+                eprintln!("--- Parse Errors ---");
+                for err in &result.errors {
+                    eprintln!("  {err}");
+                }
+                return Err(miette::miette!("parsing failed with {} error(s)", result.errors.len()));
+            }
+            match axiom_hir::lower(&result.module) {
+                Ok(hir_module) => {
+                    println!("{hir_module}");
+                    Ok(())
+                }
+                Err(errors) => {
+                    eprintln!("--- HIR Lowering Errors ---");
+                    for err in &errors {
+                        eprintln!("  {err}");
+                    }
+                    Err(miette::miette!("HIR lowering failed with {} error(s)", errors.len()))
+                }
+            }
+        }
 
         Commands::Compile { input, output, emit, target } => {
             let source = std::fs::read_to_string(&input)

@@ -564,6 +564,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         let _ = writeln!(ctx.output, "declare i64 @axiom_clock_ns()");
         let _ = writeln!(ctx.output, "declare i32 @axiom_get_argc()");
         let _ = writeln!(ctx.output, "declare ptr @axiom_get_argv(i32)");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_cpu_features()");
     }
 
     // Emit coroutine extern declarations (also part of axiom_rt.c).
@@ -715,6 +716,35 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         }
     }
 
+    // E2: Emit basic DWARF debug info (compile unit metadata).
+    // This provides minimal debug information so debuggers can identify the source.
+    {
+        let dbg_file_id = ctx.fresh_metadata_id();
+        let dbg_cu_id = ctx.fresh_metadata_id();
+        let flags_id = ctx.fresh_metadata_id();
+        ctx.emit_blank();
+        let _ = writeln!(
+            ctx.output,
+            "!llvm.dbg.cu = !{{!{dbg_cu_id}}}"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "!llvm.module.flags = !{{!{flags_id}}}"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "!{dbg_cu_id} = distinct !DICompileUnit(language: DW_LANG_C, file: !{dbg_file_id}, producer: \"axiom\", isOptimized: false, emissionKind: LineTablesOnly)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "!{dbg_file_id} = !DIFile(filename: \"{module_name}.axm\", directory: \".\")"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "!{flags_id} = !{{i32 2, !\"Debug Info Version\", i32 3}}"
+        );
+    }
+
     // Emit warnings as LLVM IR comments so they appear in the output but
     // do not affect the IR semantics.
     if !ctx.warnings.is_empty() {
@@ -792,6 +822,8 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_string_ptr")
         || ir.contains("@axiom_string_eq")
         || ir.contains("@axiom_string_print")
+        // CPUID feature detection
+        || ir.contains("@axiom_cpu_features")
 }
 
 /// Register a struct type in the codegen context.
@@ -1972,6 +2004,13 @@ fn emit_for(
                     "!{vec_enable_id} = !{{!\"llvm.loop.vectorize.enable\", i1 true}}"
                 ));
                 md_operands.push(format!("!{vec_enable_id}"));
+
+                // P3: Hint preferred SIMD width (8 lanes) for @vectorizable loops.
+                let vec_width_id = ctx.fresh_metadata_id();
+                ctx.metadata_entries.push(format!(
+                    "!{vec_width_id} = !{{!\"llvm.loop.vectorize.width\", i32 8}}"
+                ));
+                md_operands.push(format!("!{vec_width_id}"));
             }
 
             if is_parallel {
@@ -2798,6 +2837,15 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "fn_ptr" => return emit_builtin_fn_ptr(ctx, args),
             "call_fn_ptr_i32" => return emit_builtin_call_fn_ptr_i32(ctx, args),
             "call_fn_ptr_f64" => return emit_builtin_call_fn_ptr_f64(ctx, args),
+            // Result (error handling) builtins -- tagged union packed into i64
+            "result_ok" => return emit_builtin_result_ok(ctx, args),
+            "result_err" => return emit_builtin_result_err(ctx, args),
+            "result_is_ok" => return emit_builtin_result_is_ok(ctx, args),
+            "result_is_err" => return emit_builtin_result_is_err(ctx, args),
+            "result_unwrap" => return emit_builtin_result_unwrap(ctx, args),
+            "result_err_code" => return emit_builtin_result_err_code(ctx, args),
+            // CPUID feature detection (axiom_rt.c)
+            "cpu_features" => return emit_builtin_cpu_features(ctx, args),
             _ => {}
         }
 
@@ -5404,6 +5452,221 @@ fn emit_builtin_option_unwrap(ctx: &mut CodegenContext, args: &[HirExpr]) -> Llv
     // trunc i64 to i32 -- extracts lower 32 bits (the value)
     let result = ctx.fresh_reg();
     ctx.emit(&format!("{result} = trunc i64 {} to i32", opt.reg));
+
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F7: Result (error handling) builtins -- tagged union packed into i64
+// Packing: (tag << 32) | (value & 0xFFFFFFFF). Tag 1 = Ok, Tag 0 = Err.
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `result_ok(val: i32) -> i64`.
+/// Packs tag=1 + val into i64: (1 << 32) | (val & 0xFFFFFFFF).
+fn emit_builtin_result_ok(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "result_ok() requires exactly 1 argument (val: i32)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i64".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("i32"));
+
+    // Zero-extend val to i64
+    let val64 = ctx.fresh_reg();
+    ctx.emit(&format!("{val64} = zext i32 {} to i64", val.reg));
+
+    // Mask to lower 32 bits
+    let masked = ctx.fresh_reg();
+    ctx.emit(&format!("{masked} = and i64 {val64}, 4294967295"));
+
+    // tag = 1 << 32 = 4294967296
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = or i64 {masked}, 4294967296"));
+
+    LlvmValue {
+        reg: result,
+        ty: "i64".to_string(),
+    }
+}
+
+/// Emit built-in `result_err(code: i32) -> i64`.
+/// Packs tag=0 + code into i64: (0 << 32) | (code & 0xFFFFFFFF) = just the code.
+fn emit_builtin_result_err(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "result_err() requires exactly 1 argument (code: i32)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i64".to_string(),
+        };
+    }
+
+    let code = emit_expr(ctx, &args[0], Some("i32"));
+
+    // Zero-extend code to i64 (tag is 0, so upper 32 bits are 0)
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = zext i32 {} to i64", code.reg));
+
+    LlvmValue {
+        reg: result,
+        ty: "i64".to_string(),
+    }
+}
+
+/// Emit built-in `result_is_ok(r: i64) -> i32`.
+/// Returns 1 if tag == 1 (upper 32 bits == 1).
+fn emit_builtin_result_is_ok(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "result_is_ok() requires exactly 1 argument (r: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let r = emit_expr(ctx, &args[0], Some("i64"));
+
+    // tag = r >> 32
+    let tag = ctx.fresh_reg();
+    ctx.emit(&format!("{tag} = lshr i64 {}, 32", r.reg));
+
+    let tag32 = ctx.fresh_reg();
+    ctx.emit(&format!("{tag32} = trunc i64 {tag} to i32"));
+
+    // cmp eq 1 (Ok tag)
+    let cmp = ctx.fresh_reg();
+    ctx.emit(&format!("{cmp} = icmp eq i32 {tag32}, 1"));
+
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = zext i1 {cmp} to i32"));
+
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `result_is_err(r: i64) -> i32`.
+/// Returns 1 if tag == 0 (upper 32 bits == 0).
+fn emit_builtin_result_is_err(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "result_is_err() requires exactly 1 argument (r: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let r = emit_expr(ctx, &args[0], Some("i64"));
+
+    // tag = r >> 32
+    let tag = ctx.fresh_reg();
+    ctx.emit(&format!("{tag} = lshr i64 {}, 32", r.reg));
+
+    let tag32 = ctx.fresh_reg();
+    ctx.emit(&format!("{tag32} = trunc i64 {tag} to i32"));
+
+    // cmp eq 0 (Err tag)
+    let cmp = ctx.fresh_reg();
+    ctx.emit(&format!("{cmp} = icmp eq i32 {tag32}, 0"));
+
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = zext i1 {cmp} to i32"));
+
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `result_unwrap(r: i64) -> i32`.
+/// Extracts the Ok value (lower 32 bits). UB if Err.
+fn emit_builtin_result_unwrap(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "result_unwrap() requires exactly 1 argument (r: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let r = emit_expr(ctx, &args[0], Some("i64"));
+
+    // trunc i64 to i32 -- extracts lower 32 bits (the value)
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = trunc i64 {} to i32", r.reg));
+
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `result_err_code(r: i64) -> i32`.
+/// Extracts the Err code (lower 32 bits). Same as unwrap but semantically for errors.
+fn emit_builtin_result_err_code(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "result_err_code() requires exactly 1 argument (r: i64)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let r = emit_expr(ctx, &args[0], Some("i64"));
+
+    // trunc i64 to i32 -- extracts lower 32 bits (the error code)
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = trunc i64 {} to i32", r.reg));
+
+    LlvmValue {
+        reg: result,
+        ty: "i32".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P2: CPUID Feature Detection -- axiom_rt.c runtime
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `cpu_features() -> i32`.
+/// Calls the runtime's `axiom_cpu_features()` which returns a bitmask:
+///   Bit 0: SSE4.2, Bit 1: AVX, Bit 2: AVX2, Bit 3: AVX-512F.
+fn emit_builtin_cpu_features(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+
+    if !args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "cpu_features() takes no arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = call i32 @axiom_cpu_features()"));
 
     LlvmValue {
         reg: result,
@@ -12559,6 +12822,267 @@ fn main() -> i32 {
         assert!(
             ir.contains("call i32 "),
             "call_fn_ptr_i32 should emit indirect call: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // F7: Result (error handling) builtin tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_result_builtins() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // let ok_val: i64 = result_ok(42);
+                    stmt(HirStmtKind::Let {
+                        name: "ok_val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: Some(call("result_ok", vec![int_lit(42)])),
+                        mutable: false,
+                    }),
+                    // let err_val: i64 = result_err(1);
+                    stmt(HirStmtKind::Let {
+                        name: "err_val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I64),
+                        value: Some(call("result_err", vec![int_lit(1)])),
+                        mutable: false,
+                    }),
+                    // let is_ok: i32 = result_is_ok(ok_val);
+                    stmt(HirStmtKind::Let {
+                        name: "is_ok".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("result_is_ok", vec![ident("ok_val")])),
+                        mutable: false,
+                    }),
+                    // let is_err: i32 = result_is_err(err_val);
+                    stmt(HirStmtKind::Let {
+                        name: "is_err".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("result_is_err", vec![ident("err_val")])),
+                        mutable: false,
+                    }),
+                    // let unwrapped: i32 = result_unwrap(ok_val);
+                    stmt(HirStmtKind::Let {
+                        name: "unwrapped".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("result_unwrap", vec![ident("ok_val")])),
+                        mutable: false,
+                    }),
+                    // let err_code: i32 = result_err_code(err_val);
+                    stmt(HirStmtKind::Let {
+                        name: "err_code".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("result_err_code", vec![ident("err_val")])),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // result_ok: should pack with tag=1
+        assert!(
+            ir.contains("or i64") && ir.contains("4294967296"),
+            "result_ok should pack tag 1 << 32: {ir}"
+        );
+
+        // result_err: should zero-extend (tag=0, just the code)
+        assert!(
+            ir.contains("zext i32"),
+            "result_err should zero-extend code to i64: {ir}"
+        );
+
+        // result_is_ok: should check tag == 1
+        assert!(
+            ir.contains("icmp eq i32") && ir.contains(", 1"),
+            "result_is_ok should compare tag to 1: {ir}"
+        );
+
+        // result_is_err: should check tag == 0
+        assert!(
+            ir.contains("icmp eq i32") && ir.contains(", 0"),
+            "result_is_err should compare tag to 0: {ir}"
+        );
+
+        // result_unwrap / result_err_code: should trunc i64 to i32
+        // Count trunc instructions (at least 4: is_ok, is_err, unwrap, err_code)
+        let trunc_count = ir.matches("trunc i64").count();
+        assert!(
+            trunc_count >= 4,
+            "should have at least 4 trunc i64 instructions for tag extraction and value extraction, got {trunc_count}: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P2: CPUID feature detection test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cpu_features_builtin() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "features".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("cpu_features", vec![])),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: ident("features"),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should call axiom_cpu_features
+        assert!(
+            ir.contains("call i32 @axiom_cpu_features()"),
+            "should call axiom_cpu_features: {ir}"
+        );
+
+        // Should declare the runtime function
+        assert!(
+            ir.contains("declare i32 @axiom_cpu_features()"),
+            "should declare axiom_cpu_features: {ir}"
+        );
+
+        // Should need runtime
+        assert!(
+            needs_runtime(&ir),
+            "cpu_features should trigger runtime linking"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // P3: vectorize.width metadata test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_vectorize_width_metadata() {
+        // @vectorizable function with a for loop should get vectorize.width metadata.
+        let sum_func = func_with_annotations(
+            "vec_sum_width",
+            vec![
+                param(
+                    "arr",
+                    HirType::Array {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        size: 100,
+                    },
+                ),
+                param("n", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "sum".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::I32),
+                    value: Some(int_lit(0)),
+                    mutable: true,
+                }),
+                stmt(HirStmtKind::For {
+                    var: "i".to_string(),
+                    var_span: span(),
+                    var_type: HirType::Primitive(PrimitiveType::I32),
+                    iterable: call("range", vec![int_lit(0), ident("n")]),
+                    body: block(vec![stmt(HirStmtKind::Assign {
+                        target: ident("sum"),
+                        value: binop(BinOp::Add, ident("sum"), int_lit(1)),
+                    })]),
+                }),
+                stmt(HirStmtKind::Return {
+                    value: ident("sum"),
+                }),
+            ]),
+            vec![vectorizable_ann()],
+        );
+
+        let m = module(Some("test"), vec![sum_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should have vectorize.width metadata with width 8
+        assert!(
+            ir.contains("llvm.loop.vectorize.width"),
+            "should have vectorize.width metadata: {ir}"
+        );
+        assert!(
+            ir.contains("!\"llvm.loop.vectorize.width\", i32 8"),
+            "should have vectorize.width = 8: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // E2: DWARF debug info test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dwarf_debug_info() {
+        let m = module(
+            Some("myprogram"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![stmt(HirStmtKind::Return {
+                    value: int_lit(0),
+                })]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Should have debug compile unit
+        assert!(
+            ir.contains("!llvm.dbg.cu"),
+            "should have !llvm.dbg.cu metadata: {ir}"
+        );
+
+        // Should have DICompileUnit
+        assert!(
+            ir.contains("DICompileUnit"),
+            "should have DICompileUnit: {ir}"
+        );
+
+        // Should have DIFile with the module name
+        assert!(
+            ir.contains("DIFile(filename: \"myprogram.axm\""),
+            "should have DIFile with module name: {ir}"
+        );
+
+        // Should have Debug Info Version flag
+        assert!(
+            ir.contains("Debug Info Version"),
+            "should have Debug Info Version module flag: {ir}"
+        );
+
+        // Should have producer = axiom
+        assert!(
+            ir.contains("producer: \"axiom\""),
+            "should have producer axiom: {ir}"
         );
     }
 }
