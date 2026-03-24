@@ -185,7 +185,27 @@ pub fn build_optimization_prompt(ctx: &OptimizationContext) -> String {
     p.push_str("You are an expert performance engineer analyzing an AXIOM program. ");
     p.push_str("AXIOM is a systems programming language with tunable `?param` holes ");
     p.push_str("inside `@strategy` blocks. Your job is to suggest concrete values for ");
-    p.push_str("these parameters that will maximize performance.\n\n");
+    p.push_str("these parameters AND structural code changes that will maximize performance.\n\n");
+
+    // Optimization Knowledge Base — accumulated wisdom from past sessions
+    if let Ok(knowledge) = std::fs::read_to_string("docs/OPTIMIZATION_KNOWLEDGE.md") {
+        p.push_str("## Optimization Knowledge Base (from past sessions)\n\n");
+        // Include the rules section (skip the header and metadata)
+        for line in knowledge.lines() {
+            if line.starts_with("## Rule") || line.starts_with("## Anti-Pattern") {
+                p.push_str(&format!("{line}\n"));
+            } else if line.starts_with("**Pattern:**")
+                || line.starts_with("**When to apply:")
+                || line.starts_with("**Why:**")
+                || line.starts_with("**Impact:**")
+            {
+                p.push_str(&format!("{line}\n"));
+            }
+        }
+        p.push_str("\nApply any relevant rules from the knowledge base above. ");
+        p.push_str("If you discover a NEW optimization pattern, note it in your reasoning ");
+        p.push_str("so it can be added to the knowledge base.\n\n");
+    }
 
     // Source code
     p.push_str("## Source Code\n\n```axiom\n");
