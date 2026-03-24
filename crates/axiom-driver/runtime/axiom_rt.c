@@ -10,6 +10,7 @@
  * Linked only when the AXIOM program uses runtime builtins.
  */
 
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -770,32 +771,32 @@ int axiom_num_cores(void) {
 
 #endif /* _WIN32 / POSIX -- threading */
 
-/* ── Renderer Stub API (Vulkan FFI / Lux shader loading) ───────────── */
+/* ── Renderer API ────────────────────────────────────────────────────── */
 /*
- * Provides a minimal rendering API that AXIOM programs call to create
- * windows, load SPIR-V shaders (compiled by Lux), build pipelines,
- * and draw geometry.
+ * Provides a rendering API that AXIOM programs call to create windows,
+ * load SPIR-V shaders (compiled by Lux), build pipelines, and draw
+ * geometry.
  *
- * CURRENT STATE: Phase 7 MVP -- stub implementation that prints
- * lifecycle events and validates the API contract.  No actual window
- * or GPU work is done.
+ * On Windows: real windowed renderer using Win32 API + software
+ * rasterization.  Creates an actual window, maintains a pixel
+ * framebuffer, blits via StretchDIBits.  Implements edge-function
+ * triangle rasterization and point drawing.
  *
- * FUTURE: Replace this section with a real Vulkan (or platform)
- * implementation.  The C API surface is intentionally thin so the
- * AXIOM language only needs ~10 extern declarations rather than the
- * 200+ raw Vulkan functions.
+ * On other platforms: headless stub that prints lifecycle events.
  *
  * API summary:
- *   axiom_renderer_create(w, h, title) -> ptr   Create a renderer context
- *   axiom_renderer_destroy(r)                    Destroy the renderer
- *   axiom_renderer_begin_frame(r) -> i32         Begin a frame (1=ok, 0=fail)
- *   axiom_renderer_end_frame(r)                  End a frame (present)
- *   axiom_renderer_should_close(r) -> i32        1 if window should close
- *   axiom_renderer_draw_triangles(r, pos, col, n) Draw n vertices as tris
- *   axiom_renderer_get_time(r) -> f64            Elapsed time in seconds
- *   axiom_shader_load(r, path, stage) -> ptr     Load SPIR-V shader module
- *   axiom_pipeline_create(r, vert, frag) -> ptr  Create a graphics pipeline
- *   axiom_renderer_bind_pipeline(r, p)           Bind a pipeline for drawing
+ *   axiom_renderer_create(w, h, title) -> ptr     Create a renderer context
+ *   axiom_renderer_destroy(r)                      Destroy the renderer
+ *   axiom_renderer_begin_frame(r) -> i32           Begin a frame (1=ok, 0=fail)
+ *   axiom_renderer_end_frame(r)                    End a frame (present)
+ *   axiom_renderer_should_close(r) -> i32          1 if window should close
+ *   axiom_renderer_clear(r, color)                 Clear framebuffer
+ *   axiom_renderer_draw_triangles(r, pos, col, n)  Draw n vertices as tris
+ *   axiom_renderer_draw_points(r, x, y, col, n)   Draw n colored points
+ *   axiom_renderer_get_time(r) -> f64              Elapsed time in seconds
+ *   axiom_shader_load(r, path, stage) -> ptr       Load SPIR-V shader module
+ *   axiom_pipeline_create(r, vert, frag) -> ptr    Create a graphics pipeline
+ *   axiom_renderer_bind_pipeline(r, p)             Bind a pipeline for drawing
  */
 
 /* Shader stage constants (matches Vulkan VkShaderStageFlagBits layout). */
@@ -808,25 +809,12 @@ int axiom_num_cores(void) {
 /* Maximum number of pipelines. */
 #define AXIOM_MAX_PIPELINES 32
 
-/* ---- Renderer state ---------------------------------------------------- */
-
-typedef struct {
-    int   width;
-    int   height;
-    char  title[256];
-    int   should_close;
-    int   frame_count;
-    /* Start time for axiom_renderer_get_time (in clock ticks). */
-    long long start_time_ns;
-} AxiomRenderer;
-
 /* ---- Shader module (loaded SPIR-V) ------------------------------------- */
 
 typedef struct {
     int   active;
     int   stage;          /* 0 = vertex, 1 = fragment */
     char  path[512];
-    /* Future: VkShaderModule handle, SPIR-V bytecode pointer, etc. */
 } AxiomShaderModule;
 
 /* ---- Graphics pipeline ------------------------------------------------- */
@@ -835,13 +823,58 @@ typedef struct {
     int   active;
     int   vert_index;     /* index into shader_modules[] */
     int   frag_index;     /* index into shader_modules[] */
-    /* Future: VkPipeline, VkPipelineLayout, descriptor sets, etc. */
 } AxiomPipeline;
 
 static AxiomShaderModule axiom_shader_modules[AXIOM_MAX_SHADERS];
 static AxiomPipeline     axiom_pipelines[AXIOM_MAX_PIPELINES];
 
-/* ---- Renderer lifecycle ------------------------------------------------ */
+/* ======================================================================== */
+/* Win32 windowed software renderer                                         */
+/* ======================================================================== */
+
+#if defined(_WIN32)
+
+/* windows.h is already included above for coroutines/threading. */
+
+/* ---- Renderer state ---------------------------------------------------- */
+
+typedef struct {
+    int           width;
+    int           height;
+    char          title[256];
+    int           should_close;
+    int           frame_count;
+    long long     start_time_ns;
+    /* Win32 windowing */
+    HWND          hwnd;
+    HDC           hdc;
+    BITMAPINFO    bmi;
+    /* Software framebuffer: BGRA pixel array (0xAARRGGBB in little-endian) */
+    unsigned int *framebuffer;
+} AxiomRenderer;
+
+/* Global renderer pointer for the window procedure callback. */
+static AxiomRenderer *axiom_renderer_global = NULL;
+
+static LRESULT CALLBACK axiom_wnd_proc(HWND hwnd, UINT msg,
+                                        WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CLOSE:
+    case WM_DESTROY:
+        if (axiom_renderer_global) {
+            axiom_renderer_global->should_close = 1;
+        }
+        return 0;
+    case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE) {
+            if (axiom_renderer_global) {
+                axiom_renderer_global->should_close = 1;
+            }
+        }
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
 
 void *axiom_renderer_create(int width, int height, const char *title) {
     AxiomRenderer *r = (AxiomRenderer *)calloc(1, sizeof(AxiomRenderer));
@@ -853,19 +886,71 @@ void *axiom_renderer_create(int width, int height, const char *title) {
     r->frame_count  = 0;
     r->start_time_ns = axiom_clock_ns();
 
-    /* Copy title (truncate if needed). */
+    /* Copy title. */
     if (title) {
         size_t len = strlen(title);
         if (len >= sizeof(r->title)) len = sizeof(r->title) - 1;
         memcpy(r->title, title, len);
         r->title[len] = '\0';
     } else {
-        r->title[0] = '\0';
+        strcpy(r->title, "AXIOM");
     }
 
-    printf("[AXIOM Renderer] Created %dx%d window: \"%s\" (stub)\n",
+    /* Allocate framebuffer. */
+    r->framebuffer = (unsigned int *)calloc((size_t)(width * height),
+                                            sizeof(unsigned int));
+    if (!r->framebuffer) {
+        free(r);
+        return NULL;
+    }
+
+    /* Register window class (idempotent -- RegisterClassW returns 0 if
+       already registered, but that is fine). */
+    WNDCLASSW wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc   = axiom_wnd_proc;
+    wc.hInstance      = GetModuleHandleW(NULL);
+    wc.lpszClassName  = L"AxiomRendererClass";
+    wc.hCursor        = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+    wc.hbrBackground  = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    RegisterClassW(&wc);
+
+    /* Convert title to wide string. */
+    wchar_t wtitle[256];
+    MultiByteToWideChar(CP_UTF8, 0, r->title, -1, wtitle, 256);
+
+    /* Compute window rect that gives us the desired *client* area. */
+    RECT wr = { 0, 0, width, height };
+    AdjustWindowRectEx(&wr, WS_OVERLAPPEDWINDOW, FALSE, 0);
+
+    r->hwnd = CreateWindowExW(
+        0, L"AxiomRendererClass", wtitle,
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT,
+        wr.right - wr.left, wr.bottom - wr.top,
+        NULL, NULL, GetModuleHandleW(NULL), NULL
+    );
+
+    if (!r->hwnd) {
+        free(r->framebuffer);
+        free(r);
+        return NULL;
+    }
+
+    r->hdc = GetDC(r->hwnd);
+    axiom_renderer_global = r;
+
+    /* Setup BITMAPINFO for StretchDIBits blitting. */
+    memset(&r->bmi, 0, sizeof(BITMAPINFO));
+    r->bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    r->bmi.bmiHeader.biWidth       = width;
+    r->bmi.bmiHeader.biHeight      = -height; /* negative = top-down */
+    r->bmi.bmiHeader.biPlanes      = 1;
+    r->bmi.bmiHeader.biBitCount    = 32;
+    r->bmi.bmiHeader.biCompression = BI_RGB;
+
+    printf("[AXIOM Renderer] Created %dx%d window: \"%s\" (Win32 software)\n",
            width, height, r->title);
-    printf("[AXIOM Renderer] Backend: headless stub (Vulkan planned)\n");
 
     return r;
 }
@@ -873,8 +958,20 @@ void *axiom_renderer_create(int width, int height, const char *title) {
 void axiom_renderer_destroy(void *renderer) {
     if (!renderer) return;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
+
     printf("[AXIOM Renderer] Destroyed after %d frames: \"%s\"\n",
            r->frame_count, r->title);
+
+    if (r->hdc && r->hwnd) {
+        ReleaseDC(r->hwnd, r->hdc);
+    }
+    if (r->hwnd) {
+        DestroyWindow(r->hwnd);
+    }
+    if (axiom_renderer_global == r) {
+        axiom_renderer_global = NULL;
+    }
+    free(r->framebuffer);
     free(r);
 }
 
@@ -882,18 +979,44 @@ void axiom_renderer_destroy(void *renderer) {
 
 int axiom_renderer_begin_frame(void *renderer) {
     if (!renderer) return 0;
-    /* Stub: always succeeds.
-     * Future: acquire swapchain image, begin command buffer. */
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+
+    /* Pump Win32 message queue so the window stays responsive. */
+    MSG msg;
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_QUIT) {
+            r->should_close = 1;
+            return 0;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    if (r->should_close) return 0;
     return 1;
 }
 
 void axiom_renderer_end_frame(void *renderer) {
     if (!renderer) return;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
+
+    /* Blit the software framebuffer to the window. */
+    StretchDIBits(
+        r->hdc,
+        0, 0, r->width, r->height,          /* dest rect */
+        0, 0, r->width, r->height,          /* src rect */
+        r->framebuffer,
+        &r->bmi,
+        DIB_RGB_COLORS,
+        SRCCOPY
+    );
+    GdiFlush();
+
     r->frame_count++;
-    /* Stub: print progress every 10 frames for visibility. */
-    if (r->frame_count <= 3 || r->frame_count % 10 == 0) {
-        printf("[AXIOM Renderer] Frame %d complete\n", r->frame_count);
+
+    /* Print progress for first few frames and periodically. */
+    if (r->frame_count <= 3 || r->frame_count % 50 == 0) {
+        printf("[AXIOM Renderer] Frame %d presented\n", r->frame_count);
     }
 }
 
@@ -903,27 +1026,140 @@ int axiom_renderer_should_close(void *renderer) {
     return r->should_close;
 }
 
-/* ---- Drawing ----------------------------------------------------------- */
+/* ---- Clear -------------------------------------------------------------- */
+
+void axiom_renderer_clear(void *renderer, unsigned int color) {
+    if (!renderer) return;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+    int total = r->width * r->height;
+    int i;
+    /* Fast path for black (color == 0). */
+    if (color == 0) {
+        memset(r->framebuffer, 0, (size_t)total * sizeof(unsigned int));
+    } else {
+        for (i = 0; i < total; i++) {
+            r->framebuffer[i] = color;
+        }
+    }
+}
+
+/* ---- Drawing: points ---------------------------------------------------- */
+
+/* Draw colored points.  x_arr and y_arr are arrays of f64 positions,
+   colors is an array of u32 (0xRRGGBB), count is the number of points. */
+void axiom_renderer_draw_points(void *renderer,
+                                const double *x_arr,
+                                const double *y_arr,
+                                const unsigned int *colors,
+                                int count) {
+    if (!renderer || !x_arr || !y_arr || !colors) return;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+    int w = r->width;
+    int h = r->height;
+    unsigned int *fb = r->framebuffer;
+    int i;
+
+    for (i = 0; i < count; i++) {
+        int px = (int)(x_arr[i] + 0.5);
+        int py = (int)(y_arr[i] + 0.5);
+        /* Draw a 2x2 point for visibility. */
+        if (px >= 0 && px < w - 1 && py >= 0 && py < h - 1) {
+            unsigned int c = colors[i] | 0xFF000000u; /* ensure opaque */
+            fb[py * w + px]           = c;
+            fb[py * w + px + 1]       = c;
+            fb[(py + 1) * w + px]     = c;
+            fb[(py + 1) * w + px + 1] = c;
+        } else if (px >= 0 && px < w && py >= 0 && py < h) {
+            /* Edge pixel: draw single point. */
+            fb[py * w + px] = colors[i] | 0xFF000000u;
+        }
+    }
+}
+
+/* ---- Drawing: triangles ------------------------------------------------- */
+
+/* Helper: integer min/max of 3 values. */
+static int axiom_min3i(int a, int b, int c) {
+    int m = a < b ? a : b;
+    return m < c ? m : c;
+}
+static int axiom_max3i(int a, int b, int c) {
+    int m = a > b ? a : b;
+    return m > c ? m : c;
+}
+
+/* Edge function for triangle rasterization.
+   Returns positive if (px,py) is on the left side of edge (ax,ay)->(bx,by). */
+static int axiom_edge_func(int ax, int ay, int bx, int by, int px, int py) {
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
 
 void axiom_renderer_draw_triangles(void *renderer,
                                    const float *positions,
-                                   const float *colors,
+                                   const float *colors_f,
                                    int vertex_count) {
-    if (!renderer) return;
-    (void)positions;
-    (void)colors;
+    if (!renderer || !positions) return;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
+    int w = r->width;
+    int h = r->height;
+    unsigned int *fb = r->framebuffer;
 
-    /* Stub: log the first draw call per frame for debugging. */
-    if (r->frame_count == 0) {
-        printf("[AXIOM Renderer] draw_triangles: %d vertices "
-               "(%.2f,%.2f,%.2f)...\n",
-               vertex_count,
-               positions ? positions[0] : 0.0f,
-               positions ? positions[1] : 0.0f,
-               positions ? positions[2] : 0.0f);
+    /* Each triangle is 3 vertices, each vertex has 2 floats (x, y)
+       in the positions array, and 3 floats (r, g, b) in the colors array. */
+    int tri_count = vertex_count / 3;
+    int t;
+    for (t = 0; t < tri_count; t++) {
+        int base_p = t * 6;  /* 3 vertices * 2 coords */
+        int base_c = t * 9;  /* 3 vertices * 3 color channels */
+
+        int x0 = (int)(positions[base_p + 0] + 0.5f);
+        int y0 = (int)(positions[base_p + 1] + 0.5f);
+        int x1 = (int)(positions[base_p + 2] + 0.5f);
+        int y1 = (int)(positions[base_p + 3] + 0.5f);
+        int x2 = (int)(positions[base_p + 4] + 0.5f);
+        int y2 = (int)(positions[base_p + 5] + 0.5f);
+
+        /* Flat color from first vertex (for simplicity). */
+        unsigned int cr = 255, cg = 255, cb = 255;
+        if (colors_f) {
+            cr = (unsigned int)(colors_f[base_c + 0] * 255.0f);
+            cg = (unsigned int)(colors_f[base_c + 1] * 255.0f);
+            cb = (unsigned int)(colors_f[base_c + 2] * 255.0f);
+            if (cr > 255) cr = 255;
+            if (cg > 255) cg = 255;
+            if (cb > 255) cb = 255;
+        }
+        unsigned int color = 0xFF000000u | (cr << 16) | (cg << 8) | cb;
+
+        /* Bounding box, clipped to screen. */
+        int minX = axiom_min3i(x0, x1, x2);
+        int minY = axiom_min3i(y0, y1, y2);
+        int maxX = axiom_max3i(x0, x1, x2);
+        int maxY = axiom_max3i(y0, y1, y2);
+        if (minX < 0) minX = 0;
+        if (minY < 0) minY = 0;
+        if (maxX >= w) maxX = w - 1;
+        if (maxY >= h) maxY = h - 1;
+
+        /* Compute twice the triangle area (for winding check). */
+        int area2 = axiom_edge_func(x0, y0, x1, y1, x2, y2);
+        if (area2 == 0) continue; /* degenerate triangle */
+
+        /* Rasterize via edge functions. */
+        int py, px;
+        for (py = minY; py <= maxY; py++) {
+            for (px = minX; px <= maxX; px++) {
+                int e0 = axiom_edge_func(x0, y0, x1, y1, px, py);
+                int e1 = axiom_edge_func(x1, y1, x2, y2, px, py);
+                int e2 = axiom_edge_func(x2, y2, x0, y0, px, py);
+                /* Accept pixel if all edge functions have same sign. */
+                if ((e0 >= 0 && e1 >= 0 && e2 >= 0) ||
+                    (e0 <= 0 && e1 <= 0 && e2 <= 0)) {
+                    fb[py * w + px] = color;
+                }
+            }
+        }
     }
-    /* Future: record vkCmdDraw into command buffer. */
 }
 
 /* ---- Time -------------------------------------------------------------- */
@@ -939,9 +1175,8 @@ double axiom_renderer_get_time(void *renderer) {
 
 void *axiom_shader_load(void *renderer, const char *spv_path, int stage) {
     if (!renderer || !spv_path) return NULL;
-    (void)renderer;  /* Future: device handle lives inside renderer. */
+    (void)renderer;
 
-    /* Find a free slot. */
     int i;
     for (i = 0; i < AXIOM_MAX_SHADERS; i++) {
         if (!axiom_shader_modules[i].active) {
@@ -960,10 +1195,8 @@ void *axiom_shader_load(void *renderer, const char *spv_path, int stage) {
                                                ? "fragment"
                                                : "unknown";
 
-            printf("[AXIOM Renderer] Loaded %s shader: \"%s\" (slot %d, stub)\n",
+            printf("[AXIOM Renderer] Loaded %s shader: \"%s\" (slot %d)\n",
                    stage_name, spv_path, i);
-
-            /* Future: read SPIR-V file, call vkCreateShaderModule. */
             return s;
         }
     }
@@ -978,14 +1211,12 @@ void *axiom_pipeline_create(void *renderer, void *vert_shader, void *frag_shader
     if (!renderer) return NULL;
     (void)renderer;
 
-    /* Find a free pipeline slot. */
     int i;
     for (i = 0; i < AXIOM_MAX_PIPELINES; i++) {
         if (!axiom_pipelines[i].active) {
             AxiomPipeline *p = &axiom_pipelines[i];
             p->active = 1;
 
-            /* Compute indices from pointers (for debug display). */
             if (vert_shader) {
                 p->vert_index = (int)(((AxiomShaderModule *)vert_shader)
                                       - axiom_shader_modules);
@@ -1000,10 +1231,8 @@ void *axiom_pipeline_create(void *renderer, void *vert_shader, void *frag_shader
             }
 
             printf("[AXIOM Renderer] Created pipeline %d "
-                   "(vert=%d, frag=%d, stub)\n",
+                   "(vert=%d, frag=%d)\n",
                    i, p->vert_index, p->frag_index);
-
-            /* Future: create VkPipeline with these shader stages. */
             return p;
         }
     }
@@ -1016,6 +1245,148 @@ void axiom_renderer_bind_pipeline(void *renderer, void *pipeline) {
     if (!renderer || !pipeline) return;
     (void)renderer;
     (void)pipeline;
-    /* Stub: nothing to do.
-     * Future: vkCmdBindPipeline(). */
 }
+
+#else /* !_WIN32 -- headless stub for non-Windows platforms */
+
+/* ---- Renderer state (headless stub) ------------------------------------ */
+
+typedef struct {
+    int   width;
+    int   height;
+    char  title[256];
+    int   should_close;
+    int   frame_count;
+    long long start_time_ns;
+} AxiomRenderer;
+
+void *axiom_renderer_create(int width, int height, const char *title) {
+    AxiomRenderer *r = (AxiomRenderer *)calloc(1, sizeof(AxiomRenderer));
+    if (!r) return NULL;
+
+    r->width  = width;
+    r->height = height;
+    r->should_close = 0;
+    r->frame_count  = 0;
+    r->start_time_ns = axiom_clock_ns();
+
+    if (title) {
+        size_t len = strlen(title);
+        if (len >= sizeof(r->title)) len = sizeof(r->title) - 1;
+        memcpy(r->title, title, len);
+        r->title[len] = '\0';
+    } else {
+        r->title[0] = '\0';
+    }
+
+    printf("[AXIOM Renderer] Created %dx%d window: \"%s\" (headless stub)\n",
+           width, height, r->title);
+    return r;
+}
+
+void axiom_renderer_destroy(void *renderer) {
+    if (!renderer) return;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+    printf("[AXIOM Renderer] Destroyed after %d frames: \"%s\"\n",
+           r->frame_count, r->title);
+    free(r);
+}
+
+int axiom_renderer_begin_frame(void *renderer) {
+    if (!renderer) return 0;
+    return 1;
+}
+
+void axiom_renderer_end_frame(void *renderer) {
+    if (!renderer) return;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+    r->frame_count++;
+    if (r->frame_count <= 3 || r->frame_count % 50 == 0) {
+        printf("[AXIOM Renderer] Frame %d complete\n", r->frame_count);
+    }
+}
+
+int axiom_renderer_should_close(void *renderer) {
+    if (!renderer) return 1;
+    return ((AxiomRenderer *)renderer)->should_close;
+}
+
+void axiom_renderer_clear(void *renderer, unsigned int color) {
+    (void)renderer; (void)color;
+}
+
+void axiom_renderer_draw_points(void *renderer,
+                                const double *x_arr,
+                                const double *y_arr,
+                                const unsigned int *colors,
+                                int count) {
+    (void)renderer; (void)x_arr; (void)y_arr; (void)colors; (void)count;
+}
+
+void axiom_renderer_draw_triangles(void *renderer,
+                                   const float *positions,
+                                   const float *colors,
+                                   int vertex_count) {
+    if (!renderer) return;
+    (void)positions; (void)colors;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+    if (r->frame_count == 0) {
+        printf("[AXIOM Renderer] draw_triangles: %d vertices (stub)\n",
+               vertex_count);
+    }
+}
+
+double axiom_renderer_get_time(void *renderer) {
+    if (!renderer) return 0.0;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+    long long now = axiom_clock_ns();
+    return (double)(now - r->start_time_ns) / 1000000000.0;
+}
+
+void *axiom_shader_load(void *renderer, const char *spv_path, int stage) {
+    if (!renderer || !spv_path) return NULL;
+    (void)renderer;
+    int i;
+    for (i = 0; i < AXIOM_MAX_SHADERS; i++) {
+        if (!axiom_shader_modules[i].active) {
+            AxiomShaderModule *s = &axiom_shader_modules[i];
+            s->active = 1;
+            s->stage  = stage;
+            size_t len = strlen(spv_path);
+            if (len >= sizeof(s->path)) len = sizeof(s->path) - 1;
+            memcpy(s->path, spv_path, len);
+            s->path[len] = '\0';
+            printf("[AXIOM Renderer] Loaded %s shader: \"%s\" (slot %d, stub)\n",
+                   (stage == 0) ? "vertex" : "fragment", spv_path, i);
+            return s;
+        }
+    }
+    return NULL;
+}
+
+void *axiom_pipeline_create(void *renderer, void *vert_shader, void *frag_shader) {
+    if (!renderer) return NULL;
+    (void)renderer;
+    int i;
+    for (i = 0; i < AXIOM_MAX_PIPELINES; i++) {
+        if (!axiom_pipelines[i].active) {
+            AxiomPipeline *p = &axiom_pipelines[i];
+            p->active = 1;
+            p->vert_index = vert_shader
+                ? (int)(((AxiomShaderModule *)vert_shader) - axiom_shader_modules)
+                : -1;
+            p->frag_index = frag_shader
+                ? (int)(((AxiomShaderModule *)frag_shader) - axiom_shader_modules)
+                : -1;
+            printf("[AXIOM Renderer] Created pipeline %d (stub)\n", i);
+            return p;
+        }
+    }
+    return NULL;
+}
+
+void axiom_renderer_bind_pipeline(void *renderer, void *pipeline) {
+    (void)renderer; (void)pipeline;
+}
+
+#endif /* _WIN32 / headless stub */

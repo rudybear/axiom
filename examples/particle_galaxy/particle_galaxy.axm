@@ -1,5 +1,5 @@
 @module particle_galaxy;
-@intent("10K particle galaxy: N-body physics, rendering, zero per-frame allocations, parallel jobs");
+@intent("10K particle galaxy: N-body physics, real windowed rendering, zero per-frame allocations, parallel jobs");
 @constraint { per_frame_allocations: 0 };
 
 // =============================================================================
@@ -10,7 +10,7 @@
 //
 //   - 10,000 particles in a spiral galaxy formation
 //   - N-body gravitational physics (O(n) center-of-mass approximation)
-//   - Renderer integration (stub API for lifecycle + draw calls)
+//   - Real windowed renderer (Win32 software rasterization)
 //   - Zero per-frame heap allocations (arena + frame arena pattern)
 //   - Parallel job system initialization
 //   - SOA (Struct of Arrays) layout for cache-friendly iteration
@@ -18,12 +18,13 @@
 //   - Deterministic checksum for verification
 //
 // Component layout (SOA):
-//   x[N]     : f64   position X
-//   y[N]     : f64   position Y
-//   vx[N]    : f64   velocity X
-//   vy[N]    : f64   velocity Y
-//   mass[N]  : f64   particle mass
-//   alive[N] : i32   1 = active, 0 = dead
+//   x[N]      : f64   position X
+//   y[N]      : f64   position Y
+//   vx[N]     : f64   velocity X
+//   vy[N]     : f64   velocity Y
+//   mass[N]   : f64   particle mass
+//   alive[N]  : i32   1 = active, 0 = dead
+//   colors[N] : i32   0xRRGGBB color per particle
 //
 // All arrays reside in a single 8 MB arena.
 // Per-frame scratch data uses a separate 1 MB frame arena (reset each frame).
@@ -196,7 +197,8 @@ fn main() -> i32 {
     let vx:    ptr[f64] = arena_alloc(arena, n, 8);
     let vy:    ptr[f64] = arena_alloc(arena, n, 8);
     let mass:  ptr[f64] = arena_alloc(arena, n, 8);
-    let alive: ptr[i32] = arena_alloc(arena, n, 4);
+    let alive:  ptr[i32] = arena_alloc(arena, n, 4);
+    let colors: ptr[i32] = arena_alloc(arena, n, 4);
 
     // RNG seed
     let seed_ptr: ptr[i64] = arena_alloc(arena, 1, 8);
@@ -214,17 +216,40 @@ fn main() -> i32 {
         let cos_approx: f64 = 1.0 - angle * angle / 2.0 + angle * angle * angle * angle / 24.0;
         let sin_approx: f64 = angle - angle * angle * angle / 6.0 + angle * angle * angle * angle * angle / 120.0;
 
-        ptr_write_f64(x, i, 500.0 + spiral_r * cos_approx);
-        ptr_write_f64(y, i, 500.0 + spiral_r * sin_approx);
+        ptr_write_f64(x, i, 400.0 + spiral_r * cos_approx);
+        ptr_write_f64(y, i, 400.0 + spiral_r * sin_approx);
 
         // Tangential velocity for orbital motion
-        let px: f64 = ptr_read_f64(x, i) - 500.0;
-        let py: f64 = ptr_read_f64(y, i) - 500.0;
+        let px: f64 = ptr_read_f64(x, i) - 400.0;
+        let py: f64 = ptr_read_f64(y, i) - 400.0;
         ptr_write_f64(vx, i, 0.0 - py * 0.001);
         ptr_write_f64(vy, i, px * 0.001);
 
         ptr_write_f64(mass, i, lcg_next_f64(seed_ptr, 1.0) + 0.1);
         ptr_write_i32(alive, i, 1);
+
+        // Color based on radius: inner = hot white/blue, outer = cool red/orange
+        // radius goes from ~10 to ~810 (approx)
+        // Map radius to a color gradient
+        let r_frac: f64 = radius / 400.0;  // 0.0 to 1.0 roughly
+        let cr: i32 = 200;
+        let cg: i32 = 150;
+        let cb: i32 = 255;
+        if r_frac > 0.3 {
+            // mid-range: yellow/orange
+            cr = 255;
+            cg = 180;
+            cb = 80;
+        }
+        if r_frac > 0.6 {
+            // outer: red/crimson
+            cr = 255;
+            cg = 80;
+            cb = 40;
+        }
+        // Pack as 0xRRGGBB (i32)
+        let color_val: i32 = cr * 65536 + cg * 256 + cb;
+        ptr_write_i32(colors, i, color_val);
     }
 
     let alive_count: i32 = count_alive(alive, n);
@@ -232,9 +257,9 @@ fn main() -> i32 {
     print_i32(alive_count);
 
     // -----------------------------------------------------------------------
-    // Create renderer (stub: prints lifecycle events)
+    // Create renderer (real windowed renderer on Win32, stub otherwise)
     // -----------------------------------------------------------------------
-    let r: ptr[i32] = renderer_create(800, 600, "Particle Galaxy");
+    let r: ptr[i32] = renderer_create(800, 800, "AXIOM - Particle Galaxy (10K particles)");
 
     // Frame arena for per-frame scratch data (1 MB, reset each frame)
     let frame_arena: ptr[i32] = arena_create(1048576);
@@ -277,16 +302,15 @@ fn main() -> i32 {
 
         // --- Render frame ---
         renderer_begin_frame(r);
-        // In a real engine with Vulkan backend:
-        //   renderer_draw_points(r, x, y, colors, n);
-        // Stub backend prints frame count.
+        renderer_clear(r, 0);
+        renderer_draw_points(r, x, y, colors, n);
         renderer_end_frame(r);
 
         // Despawn particles that drift too far from center (radius > 2000)
         for i: i32 in range(0, n) {
             if ptr_read_i32(alive, i) == 1 {
-                let px: f64 = ptr_read_f64(x, i) - 500.0;
-                let py: f64 = ptr_read_f64(y, i) - 500.0;
+                let px: f64 = ptr_read_f64(x, i) - 400.0;
+                let py: f64 = ptr_read_f64(y, i) - 400.0;
                 let dist_sq: f64 = px * px + py * py;
                 if dist_sq > 4000000.0 {
                     ptr_write_i32(alive, i, 0);

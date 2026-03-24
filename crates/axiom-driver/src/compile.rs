@@ -177,6 +177,14 @@ fn invoke_clang_core(
         // if only non-threaded builtins were called.
         #[cfg(not(target_os = "windows"))]
         cmd.arg("-lpthread");
+        // On Windows, the renderer uses Win32 GDI for windowed software
+        // rasterization.  Link gdi32 and user32 unconditionally when the
+        // runtime is present -- they are harmless if the renderer is unused.
+        #[cfg(target_os = "windows")]
+        {
+            cmd.arg("-lgdi32");
+            cmd.arg("-luser32");
+        }
     }
 
     cmd.arg("-o")

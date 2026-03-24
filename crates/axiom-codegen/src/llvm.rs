@@ -602,10 +602,20 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             ctx.output,
             "declare i32 @axiom_renderer_should_close(ptr)"
         );
+        // Clear framebuffer
+        let _ = writeln!(
+            ctx.output,
+            "declare void @axiom_renderer_clear(ptr, i32)"
+        );
         // Drawing
         let _ = writeln!(
             ctx.output,
             "declare void @axiom_renderer_draw_triangles(ptr, ptr, ptr, i32)"
+        );
+        // Point drawing (for particle systems: x_arr, y_arr as f64*, colors as i32*)
+        let _ = writeln!(
+            ctx.output,
+            "declare void @axiom_renderer_draw_points(ptr, ptr, ptr, ptr, i32)"
         );
         // Time
         let _ = writeln!(
@@ -686,7 +696,9 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_renderer_begin_frame")
         || ir.contains("@axiom_renderer_end_frame")
         || ir.contains("@axiom_renderer_should_close")
+        || ir.contains("@axiom_renderer_clear")
         || ir.contains("@axiom_renderer_draw_triangles")
+        || ir.contains("@axiom_renderer_draw_points")
         || ir.contains("@axiom_renderer_get_time")
         || ir.contains("@axiom_shader_load")
         || ir.contains("@axiom_pipeline_create")
@@ -2511,7 +2523,9 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "renderer_begin_frame" => return emit_builtin_renderer_begin_frame(ctx, args),
             "renderer_end_frame" => return emit_builtin_renderer_end_frame(ctx, args),
             "renderer_should_close" => return emit_builtin_renderer_should_close(ctx, args),
+            "renderer_clear" => return emit_builtin_renderer_clear(ctx, args),
             "renderer_draw_triangles" => return emit_builtin_renderer_draw_triangles(ctx, args),
+            "renderer_draw_points" => return emit_builtin_renderer_draw_points(ctx, args),
             "renderer_get_time" => return emit_builtin_renderer_get_time(ctx, args),
             "shader_load" => return emit_builtin_shader_load(ctx, args),
             "pipeline_create" => return emit_builtin_pipeline_create(ctx, args),
@@ -4605,10 +4619,71 @@ fn emit_builtin_renderer_should_close(ctx: &mut CodegenContext, args: &[HirExpr]
     }
 }
 
+/// Emit built-in `renderer_clear(r: ptr, color: i32)`.
+///
+/// Calls `axiom_renderer_clear(r, color)` which fills the framebuffer with the
+/// given 0xRRGGBB color value.
+fn emit_builtin_renderer_clear(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "renderer_clear() requires exactly 2 arguments (renderer, color)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let color_val = emit_expr(ctx, &args[1], Some("i32"));
+    ctx.emit(&format!(
+        "call void @axiom_renderer_clear(ptr {}, i32 {})",
+        renderer_val.reg, color_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `renderer_draw_points(r: ptr, x_arr: ptr, y_arr: ptr, colors: ptr, count: i32)`.
+///
+/// Calls `axiom_renderer_draw_points(r, x, y, col, n)` which draws `n` colored
+/// points.  `x_arr` and `y_arr` are arrays of f64 positions, `colors` is an
+/// array of u32 (0xRRGGBB) values.
+fn emit_builtin_renderer_draw_points(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 5 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "renderer_draw_points() requires exactly 5 arguments (renderer, x_arr, y_arr, colors, count)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let x_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let y_val = emit_expr(ctx, &args[2], Some("ptr"));
+    let colors_val = emit_expr(ctx, &args[3], Some("ptr"));
+    let count_val = emit_expr(ctx, &args[4], Some("i32"));
+    ctx.emit(&format!(
+        "call void @axiom_renderer_draw_points(ptr {}, ptr {}, ptr {}, ptr {}, i32 {})",
+        renderer_val.reg, x_val.reg, y_val.reg, colors_val.reg, count_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
 /// Emit built-in `renderer_draw_triangles(r: ptr, positions: ptr, colors: ptr, count: i32)`.
 ///
-/// Calls `axiom_renderer_draw_triangles(r, pos, col, n)`.  In the stub, this
-/// logs the vertex count.  With Vulkan, it records draw commands.
+/// Calls `axiom_renderer_draw_triangles(r, pos, col, n)` which draws
+/// vertex_count/3 triangles using software rasterization.
 fn emit_builtin_renderer_draw_triangles(
     ctx: &mut CodegenContext,
     args: &[HirExpr],
