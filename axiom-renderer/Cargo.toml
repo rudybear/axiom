@@ -1,0 +1,15 @@
+[package]
+name = "axiom-renderer"
+version = "0.1.0"
+edition = "2021"
+description = "AXIOM GPU renderer — wgpu-backed cdylib exposing C ABI for AXIOM programs"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wgpu = "24"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+raw-window-handle = "0.6"

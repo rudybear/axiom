@@ -317,6 +317,7 @@ fn main() -> miette::Result<()> {
                     let compile_opts = compile::CompileOptions {
                         target_arch: target.clone(),
                         optimize_for,
+                        ir_text: Some(llvm_ir.clone()),
                     };
 
                     compile::compile_to_binary_with_options(&llvm_ir, &output_path, &compile_opts)?;
