@@ -230,6 +230,8 @@ pub struct HirStmt {
     pub kind: HirStmtKind,
     /// Span covering the entire statement.
     pub span: Span,
+    /// Annotations on this statement (e.g., `@lifetime(scope)` on a let binding).
+    pub annotations: Vec<HirAnnotation>,
 }
 
 /// Statement variants.
@@ -520,6 +522,8 @@ pub enum HirAnnotationKind {
     OptimizationLog(Vec<OptLogEntry>),
     /// `@export` - C calling convention, externally visible.
     Export,
+    /// `@lifetime(scope|static|manual)` - declares allocation lifetime for escape analysis.
+    Lifetime(String),
     /// `@custom(name, args)` - extensibility.
     Custom(String, Vec<AnnotationValue>),
 }

@@ -177,6 +177,11 @@ fn write_block_contents(f: &mut fmt::Formatter<'_>, block: &HirBlock, indent: us
 fn write_stmt(f: &mut fmt::Formatter<'_>, stmt: &HirStmt, indent: usize) -> fmt::Result {
     let prefix = "    ".repeat(indent);
 
+    // Display any annotations on this statement.
+    for ann in &stmt.annotations {
+        writeln!(f, "{prefix}{ann}")?;
+    }
+
     match &stmt.kind {
         HirStmtKind::Let {
             name,
@@ -483,6 +488,7 @@ impl fmt::Display for HirAnnotation {
                 write!(f, "@optimization_log {{ ... }}")
             }
             HirAnnotationKind::Export => write!(f, "@export"),
+            HirAnnotationKind::Lifetime(scope) => write!(f, "@lifetime({scope})"),
             HirAnnotationKind::Custom(name, args) => {
                 write!(f, "@{name}")?;
                 if !args.is_empty() {
