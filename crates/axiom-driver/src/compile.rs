@@ -271,6 +271,10 @@ mod tests {
         // IR with a runtime function declaration should need the runtime.
         let ir_with_rt = "declare i64 @axiom_clock_ns()\ndefine i32 @main() {\n  ret i32 0\n}\n";
         assert!(axiom_codegen::needs_runtime(ir_with_rt));
+
+        // IR with coroutine declarations should also need the runtime.
+        let ir_with_coro = "declare i32 @axiom_coro_create(ptr, i32)\ndefine i32 @main() {\n  ret i32 0\n}\n";
+        assert!(axiom_codegen::needs_runtime(ir_with_coro));
     }
 
     #[test]
@@ -282,5 +286,11 @@ mod tests {
         assert!(AXIOM_RT_C.contains("axiom_clock_ns"));
         assert!(AXIOM_RT_C.contains("axiom_get_argc"));
         assert!(AXIOM_RT_C.contains("axiom_get_argv"));
+        // Coroutine functions should also be present.
+        assert!(AXIOM_RT_C.contains("axiom_coro_create"));
+        assert!(AXIOM_RT_C.contains("axiom_coro_resume"));
+        assert!(AXIOM_RT_C.contains("axiom_coro_yield"));
+        assert!(AXIOM_RT_C.contains("axiom_coro_is_done"));
+        assert!(AXIOM_RT_C.contains("axiom_coro_destroy"));
     }
 }

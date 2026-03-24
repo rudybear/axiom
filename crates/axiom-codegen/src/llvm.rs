@@ -145,9 +145,12 @@ struct CodegenContext {
     /// Whether arena builtins are used (arena_create/arena_alloc/etc.).
     /// When true, `@malloc` and `@free` declarations are also emitted.
     needs_arena: bool,
-    /// Whether the AXIOM C runtime is needed (file I/O, clock, argc/argv).
+    /// Whether the AXIOM C runtime is needed (file I/O, clock, argc/argv, coroutines).
     /// When true, `axiom_rt.c` must be linked alongside the `.ll` file.
     needs_runtime: bool,
+    /// Whether coroutine builtins are used (coro_create/coro_resume/etc.).
+    /// When true, coroutine extern declarations are emitted and the runtime is linked.
+    needs_coroutines: bool,
     /// Registry of struct types (name → StructInfo).
     struct_registry: HashMap<String, StructInfo>,
     /// Collected errors.
@@ -206,6 +209,7 @@ impl CodegenContext {
             needs_free: false,
             needs_arena: false,
             needs_runtime: false,
+            needs_coroutines: false,
             struct_registry: HashMap::new(),
             errors: Vec::new(),
             block_terminated: false,
@@ -528,6 +532,15 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         let _ = writeln!(ctx.output, "declare ptr @axiom_get_argv(i32)");
     }
 
+    // Emit coroutine extern declarations (also part of axiom_rt.c).
+    if ctx.needs_coroutines {
+        let _ = writeln!(ctx.output, "declare i32 @axiom_coro_create(ptr, i32)");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_coro_resume(i32)");
+        let _ = writeln!(ctx.output, "declare void @axiom_coro_yield(i32)");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_coro_is_done(i32)");
+        let _ = writeln!(ctx.output, "declare void @axiom_coro_destroy(i32)");
+    }
+
     // Emit attribute groups.
     if !ctx.attribute_groups.is_empty() {
         ctx.emit_blank();
@@ -561,6 +574,11 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_clock_ns")
         || ir.contains("@axiom_get_argc")
         || ir.contains("@axiom_get_argv")
+        || ir.contains("@axiom_coro_create")
+        || ir.contains("@axiom_coro_resume")
+        || ir.contains("@axiom_coro_yield")
+        || ir.contains("@axiom_coro_is_done")
+        || ir.contains("@axiom_coro_destroy")
 }
 
 /// Register a struct type in the codegen context.
@@ -2339,6 +2357,12 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "clock_ns" => return emit_builtin_clock_ns(ctx, args),
             "get_argc" => return emit_builtin_get_argc(ctx, args),
             "get_argv" => return emit_builtin_get_argv(ctx, args),
+            // Coroutine builtins (axiom_rt.c -- fibers/ucontext)
+            "coro_create" => return emit_builtin_coro_create(ctx, args),
+            "coro_resume" => return emit_builtin_coro_resume(ctx, args),
+            "coro_yield" => return emit_builtin_coro_yield(ctx, args),
+            "coro_is_done" => return emit_builtin_coro_is_done(ctx, args),
+            "coro_destroy" => return emit_builtin_coro_destroy(ctx, args),
             _ => {}
         }
 
@@ -3677,6 +3701,170 @@ fn emit_builtin_get_argv(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValu
     LlvmValue {
         reg: result_reg,
         ty: "ptr".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Coroutine builtins (axiom_rt.c -- OS fibers / ucontext)
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `coro_create(func: ptr, arg: i32) -> i32`.
+///
+/// Creates a new coroutine that will run `func(arg)` when resumed.
+/// Returns a handle (non-negative) on success, or -1 on failure.
+/// The `func` argument must be a function name (resolved to a function pointer).
+fn emit_builtin_coro_create(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_coroutines = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "coro_create() requires exactly 2 arguments (func, arg)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "-1".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    // The first argument should be a function name (identifier).
+    // We emit it as a function pointer cast to the expected type.
+    let func_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let arg_val = emit_expr(ctx, &args[1], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_coro_create(ptr {}, i32 {})",
+        func_val.reg, arg_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `coro_resume(handle: i32) -> i32`.
+///
+/// Resumes the coroutine identified by `handle`. Returns the value that was
+/// passed to `coro_yield`, or -1 if the coroutine is already done.
+fn emit_builtin_coro_resume(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_coroutines = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "coro_resume() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "-1".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_coro_resume(i32 {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `coro_yield(value: i32)`.
+///
+/// Suspends the currently running coroutine and passes `value` back to the
+/// caller (the code that called `coro_resume`).
+fn emit_builtin_coro_yield(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_coroutines = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "coro_yield() requires exactly 1 argument (value)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let value_val = emit_expr(ctx, &args[0], Some("i32"));
+
+    ctx.emit(&format!(
+        "call void @axiom_coro_yield(i32 {})",
+        value_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `coro_is_done(handle: i32) -> i32`.
+///
+/// Returns 1 if the coroutine has finished executing, 0 otherwise.
+fn emit_builtin_coro_is_done(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_coroutines = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "coro_is_done() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "1".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_coro_is_done(i32 {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `coro_destroy(handle: i32)`.
+///
+/// Frees the resources (stack/fiber) associated with the coroutine.
+fn emit_builtin_coro_destroy(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_coroutines = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "coro_destroy() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("i32"));
+
+    ctx.emit(&format!(
+        "call void @axiom_coro_destroy(i32 {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
     }
 }
 
@@ -8555,5 +8743,200 @@ fn main() -> i32 {
             ir.contains("declare void @axiom_file_write(ptr, ptr, i64)"),
             "should declare axiom_file_write: {ir}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Coroutine builtin tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_coro_resume_builtin() {
+        // coro_resume(handle: i32) -> i32
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("coro_resume", vec![int_lit(0)])),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call i32 @axiom_coro_resume(i32"),
+            "should call axiom_coro_resume: {ir}"
+        );
+        assert!(
+            ir.contains("declare i32 @axiom_coro_resume(i32)"),
+            "should declare axiom_coro_resume: {ir}"
+        );
+        assert!(
+            needs_runtime(&ir),
+            "IR using coro_resume should need runtime"
+        );
+    }
+
+    #[test]
+    fn test_coro_yield_builtin() {
+        // coro_yield(value: i32)
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Expr {
+                        expr: call("coro_yield", vec![int_lit(42)]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call void @axiom_coro_yield(i32"),
+            "should call axiom_coro_yield: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @axiom_coro_yield(i32)"),
+            "should declare axiom_coro_yield: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_coro_is_done_builtin() {
+        // coro_is_done(handle: i32) -> i32
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "done".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: Some(call("coro_is_done", vec![int_lit(0)])),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call i32 @axiom_coro_is_done(i32"),
+            "should call axiom_coro_is_done: {ir}"
+        );
+        assert!(
+            ir.contains("declare i32 @axiom_coro_is_done(i32)"),
+            "should declare axiom_coro_is_done: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_coro_destroy_builtin() {
+        // coro_destroy(handle: i32)
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Expr {
+                        expr: call("coro_destroy", vec![int_lit(0)]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("call void @axiom_coro_destroy(i32"),
+            "should call axiom_coro_destroy: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @axiom_coro_destroy(i32)"),
+            "should declare axiom_coro_destroy: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_coro_all_declarations_emitted() {
+        // When any coroutine builtin is used, all 5 extern declarations should be emitted.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Expr {
+                        expr: call("coro_yield", vec![int_lit(1)]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("declare i32 @axiom_coro_create(ptr, i32)"),
+            "should declare axiom_coro_create: {ir}"
+        );
+        assert!(
+            ir.contains("declare i32 @axiom_coro_resume(i32)"),
+            "should declare axiom_coro_resume: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @axiom_coro_yield(i32)"),
+            "should declare axiom_coro_yield: {ir}"
+        );
+        assert!(
+            ir.contains("declare i32 @axiom_coro_is_done(i32)"),
+            "should declare axiom_coro_is_done: {ir}"
+        );
+        assert!(
+            ir.contains("declare void @axiom_coro_destroy(i32)"),
+            "should declare axiom_coro_destroy: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_coro_needs_runtime() {
+        // Coroutine builtins should trigger needs_runtime detection.
+        assert!(needs_runtime("declare i32 @axiom_coro_create(ptr, i32)"));
+        assert!(needs_runtime("declare i32 @axiom_coro_resume(i32)"));
+        assert!(needs_runtime("declare void @axiom_coro_yield(i32)"));
+        assert!(needs_runtime("declare i32 @axiom_coro_is_done(i32)"));
+        assert!(needs_runtime("declare void @axiom_coro_destroy(i32)"));
+        // Non-coroutine, non-runtime IR should not trigger.
+        assert!(!needs_runtime("define i32 @main() { ret i32 0 }"));
     }
 }
