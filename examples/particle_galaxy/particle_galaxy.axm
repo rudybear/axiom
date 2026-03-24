@@ -182,9 +182,9 @@ fn main() -> i32 {
     let dt: f64 = 0.001;
     let g: f64 = 0.1;
     let damping: f64 = 0.9999;
-    let frames: i32 = 100;
+    let frames: i32 = 10000;
 
-    print("Particle Galaxy: 10000 particles, 100 frames");
+    print("Particle Galaxy: 10000 particles, 10000 frames — close window to exit");
 
     // -----------------------------------------------------------------------
     // Arena for persistent particle data (8 MB)
@@ -273,7 +273,7 @@ fn main() -> i32 {
     let t0: i64 = clock_ns();
     let frame: i32 = 0;
 
-    while frame < frames {
+    while frame < frames and renderer_should_close(r) == 0 {
         // Reset frame arena -- O(1), zero malloc
         arena_reset(frame_arena);
 
