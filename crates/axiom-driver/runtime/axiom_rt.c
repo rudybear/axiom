@@ -1,10 +1,12 @@
 /*
  * axiom_rt.c -- Tiny C runtime for AXIOM I/O primitives, coroutines,
- * threading primitives, and a parallel job dispatch system.
+ * threading primitives, a parallel job dispatch system, and a stub
+ * rendering API (Vulkan FFI / Lux shader loading infrastructure).
  *
  * Provides file I/O, command-line arguments, a nanosecond clock,
  * stackful coroutines via OS fibers (Windows) or ucontext (POSIX),
- * thread creation/join, atomics, mutexes, and a thread-pool job system.
+ * thread creation/join, atomics, mutexes, a thread-pool job system,
+ * and a renderer stub API designed for future Vulkan implementation.
  * Linked only when the AXIOM program uses runtime builtins.
  */
 
@@ -767,3 +769,253 @@ int axiom_num_cores(void) {
 }
 
 #endif /* _WIN32 / POSIX -- threading */
+
+/* ── Renderer Stub API (Vulkan FFI / Lux shader loading) ───────────── */
+/*
+ * Provides a minimal rendering API that AXIOM programs call to create
+ * windows, load SPIR-V shaders (compiled by Lux), build pipelines,
+ * and draw geometry.
+ *
+ * CURRENT STATE: Phase 7 MVP -- stub implementation that prints
+ * lifecycle events and validates the API contract.  No actual window
+ * or GPU work is done.
+ *
+ * FUTURE: Replace this section with a real Vulkan (or platform)
+ * implementation.  The C API surface is intentionally thin so the
+ * AXIOM language only needs ~10 extern declarations rather than the
+ * 200+ raw Vulkan functions.
+ *
+ * API summary:
+ *   axiom_renderer_create(w, h, title) -> ptr   Create a renderer context
+ *   axiom_renderer_destroy(r)                    Destroy the renderer
+ *   axiom_renderer_begin_frame(r) -> i32         Begin a frame (1=ok, 0=fail)
+ *   axiom_renderer_end_frame(r)                  End a frame (present)
+ *   axiom_renderer_should_close(r) -> i32        1 if window should close
+ *   axiom_renderer_draw_triangles(r, pos, col, n) Draw n vertices as tris
+ *   axiom_renderer_get_time(r) -> f64            Elapsed time in seconds
+ *   axiom_shader_load(r, path, stage) -> ptr     Load SPIR-V shader module
+ *   axiom_pipeline_create(r, vert, frag) -> ptr  Create a graphics pipeline
+ *   axiom_renderer_bind_pipeline(r, p)           Bind a pipeline for drawing
+ */
+
+/* Shader stage constants (matches Vulkan VkShaderStageFlagBits layout). */
+#define AXIOM_SHADER_STAGE_VERTEX   0
+#define AXIOM_SHADER_STAGE_FRAGMENT 1
+
+/* Maximum number of loaded shader modules. */
+#define AXIOM_MAX_SHADERS   64
+
+/* Maximum number of pipelines. */
+#define AXIOM_MAX_PIPELINES 32
+
+/* ---- Renderer state ---------------------------------------------------- */
+
+typedef struct {
+    int   width;
+    int   height;
+    char  title[256];
+    int   should_close;
+    int   frame_count;
+    /* Start time for axiom_renderer_get_time (in clock ticks). */
+    long long start_time_ns;
+} AxiomRenderer;
+
+/* ---- Shader module (loaded SPIR-V) ------------------------------------- */
+
+typedef struct {
+    int   active;
+    int   stage;          /* 0 = vertex, 1 = fragment */
+    char  path[512];
+    /* Future: VkShaderModule handle, SPIR-V bytecode pointer, etc. */
+} AxiomShaderModule;
+
+/* ---- Graphics pipeline ------------------------------------------------- */
+
+typedef struct {
+    int   active;
+    int   vert_index;     /* index into shader_modules[] */
+    int   frag_index;     /* index into shader_modules[] */
+    /* Future: VkPipeline, VkPipelineLayout, descriptor sets, etc. */
+} AxiomPipeline;
+
+static AxiomShaderModule axiom_shader_modules[AXIOM_MAX_SHADERS];
+static AxiomPipeline     axiom_pipelines[AXIOM_MAX_PIPELINES];
+
+/* ---- Renderer lifecycle ------------------------------------------------ */
+
+void *axiom_renderer_create(int width, int height, const char *title) {
+    AxiomRenderer *r = (AxiomRenderer *)calloc(1, sizeof(AxiomRenderer));
+    if (!r) return NULL;
+
+    r->width  = width;
+    r->height = height;
+    r->should_close = 0;
+    r->frame_count  = 0;
+    r->start_time_ns = axiom_clock_ns();
+
+    /* Copy title (truncate if needed). */
+    if (title) {
+        size_t len = strlen(title);
+        if (len >= sizeof(r->title)) len = sizeof(r->title) - 1;
+        memcpy(r->title, title, len);
+        r->title[len] = '\0';
+    } else {
+        r->title[0] = '\0';
+    }
+
+    printf("[AXIOM Renderer] Created %dx%d window: \"%s\" (stub)\n",
+           width, height, r->title);
+    printf("[AXIOM Renderer] Backend: headless stub (Vulkan planned)\n");
+
+    return r;
+}
+
+void axiom_renderer_destroy(void *renderer) {
+    if (!renderer) return;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+    printf("[AXIOM Renderer] Destroyed after %d frames: \"%s\"\n",
+           r->frame_count, r->title);
+    free(r);
+}
+
+/* ---- Frame operations -------------------------------------------------- */
+
+int axiom_renderer_begin_frame(void *renderer) {
+    if (!renderer) return 0;
+    /* Stub: always succeeds.
+     * Future: acquire swapchain image, begin command buffer. */
+    return 1;
+}
+
+void axiom_renderer_end_frame(void *renderer) {
+    if (!renderer) return;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+    r->frame_count++;
+    /* Stub: print progress every 10 frames for visibility. */
+    if (r->frame_count <= 3 || r->frame_count % 10 == 0) {
+        printf("[AXIOM Renderer] Frame %d complete\n", r->frame_count);
+    }
+}
+
+int axiom_renderer_should_close(void *renderer) {
+    if (!renderer) return 1;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+    return r->should_close;
+}
+
+/* ---- Drawing ----------------------------------------------------------- */
+
+void axiom_renderer_draw_triangles(void *renderer,
+                                   const float *positions,
+                                   const float *colors,
+                                   int vertex_count) {
+    if (!renderer) return;
+    (void)positions;
+    (void)colors;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+
+    /* Stub: log the first draw call per frame for debugging. */
+    if (r->frame_count == 0) {
+        printf("[AXIOM Renderer] draw_triangles: %d vertices "
+               "(%.2f,%.2f,%.2f)...\n",
+               vertex_count,
+               positions ? positions[0] : 0.0f,
+               positions ? positions[1] : 0.0f,
+               positions ? positions[2] : 0.0f);
+    }
+    /* Future: record vkCmdDraw into command buffer. */
+}
+
+/* ---- Time -------------------------------------------------------------- */
+
+double axiom_renderer_get_time(void *renderer) {
+    if (!renderer) return 0.0;
+    AxiomRenderer *r = (AxiomRenderer *)renderer;
+    long long now = axiom_clock_ns();
+    return (double)(now - r->start_time_ns) / 1000000000.0;
+}
+
+/* ---- Shader loading (SPIR-V from Lux) --------------------------------- */
+
+void *axiom_shader_load(void *renderer, const char *spv_path, int stage) {
+    if (!renderer || !spv_path) return NULL;
+    (void)renderer;  /* Future: device handle lives inside renderer. */
+
+    /* Find a free slot. */
+    int i;
+    for (i = 0; i < AXIOM_MAX_SHADERS; i++) {
+        if (!axiom_shader_modules[i].active) {
+            AxiomShaderModule *s = &axiom_shader_modules[i];
+            s->active = 1;
+            s->stage  = stage;
+
+            size_t len = strlen(spv_path);
+            if (len >= sizeof(s->path)) len = sizeof(s->path) - 1;
+            memcpy(s->path, spv_path, len);
+            s->path[len] = '\0';
+
+            const char *stage_name = (stage == AXIOM_SHADER_STAGE_VERTEX)
+                                         ? "vertex"
+                                         : (stage == AXIOM_SHADER_STAGE_FRAGMENT)
+                                               ? "fragment"
+                                               : "unknown";
+
+            printf("[AXIOM Renderer] Loaded %s shader: \"%s\" (slot %d, stub)\n",
+                   stage_name, spv_path, i);
+
+            /* Future: read SPIR-V file, call vkCreateShaderModule. */
+            return s;
+        }
+    }
+
+    printf("[AXIOM Renderer] ERROR: no free shader slots\n");
+    return NULL;
+}
+
+/* ---- Pipeline creation ------------------------------------------------- */
+
+void *axiom_pipeline_create(void *renderer, void *vert_shader, void *frag_shader) {
+    if (!renderer) return NULL;
+    (void)renderer;
+
+    /* Find a free pipeline slot. */
+    int i;
+    for (i = 0; i < AXIOM_MAX_PIPELINES; i++) {
+        if (!axiom_pipelines[i].active) {
+            AxiomPipeline *p = &axiom_pipelines[i];
+            p->active = 1;
+
+            /* Compute indices from pointers (for debug display). */
+            if (vert_shader) {
+                p->vert_index = (int)(((AxiomShaderModule *)vert_shader)
+                                      - axiom_shader_modules);
+            } else {
+                p->vert_index = -1;
+            }
+            if (frag_shader) {
+                p->frag_index = (int)(((AxiomShaderModule *)frag_shader)
+                                      - axiom_shader_modules);
+            } else {
+                p->frag_index = -1;
+            }
+
+            printf("[AXIOM Renderer] Created pipeline %d "
+                   "(vert=%d, frag=%d, stub)\n",
+                   i, p->vert_index, p->frag_index);
+
+            /* Future: create VkPipeline with these shader stages. */
+            return p;
+        }
+    }
+
+    printf("[AXIOM Renderer] ERROR: no free pipeline slots\n");
+    return NULL;
+}
+
+void axiom_renderer_bind_pipeline(void *renderer, void *pipeline) {
+    if (!renderer || !pipeline) return;
+    (void)renderer;
+    (void)pipeline;
+    /* Stub: nothing to do.
+     * Future: vkCmdBindPipeline(). */
+}

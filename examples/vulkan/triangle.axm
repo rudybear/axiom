@@ -1,0 +1,62 @@
+@module triangle;
+@intent("Minimal rendering: display a colored triangle using the AXIOM renderer stub API");
+
+// Triangle rendering demo.
+//
+// This example exercises the renderer lifecycle, draw calls, and frame loop.
+// With the stub backend it prints lifecycle events to stdout.
+// When a real Vulkan backend is wired up, it will open a window and render
+// a rainbow triangle using Lux-compiled SPIR-V shaders.
+
+fn main() -> i32 {
+    let r: ptr[i32] = renderer_create(800, 600, "AXIOM Triangle");
+
+    // Load Lux-compiled SPIR-V shaders (uncomment when shaders exist):
+    // let vert: ptr[i32] = shader_load(r, "triangle.vert.spv", 0);
+    // let frag: ptr[i32] = shader_load(r, "triangle.frag.spv", 1);
+    // let pipeline: ptr[i32] = pipeline_create(r, vert, frag);
+
+    // Triangle vertices: 3 vertices x 3 components (x, y, z)
+    let positions: array[f64, 9] = array_zeros[f64, 9];
+    // Top vertex
+    positions[0] = 0.0;
+    positions[1] = 0.5;
+    positions[2] = 0.0;
+    // Bottom-left vertex
+    positions[3] = -0.5;
+    positions[4] = -0.5;
+    positions[5] = 0.0;
+    // Bottom-right vertex
+    positions[6] = 0.5;
+    positions[7] = -0.5;
+    positions[8] = 0.0;
+
+    // Vertex colors: 3 vertices x 3 components (r, g, b)
+    let colors: array[f64, 9] = array_zeros[f64, 9];
+    // Red
+    colors[0] = 1.0;
+    colors[1] = 0.0;
+    colors[2] = 0.0;
+    // Green
+    colors[3] = 0.0;
+    colors[4] = 1.0;
+    colors[5] = 0.0;
+    // Blue
+    colors[6] = 0.0;
+    colors[7] = 0.0;
+    colors[8] = 1.0;
+
+    // Render loop: run for 100 frames or until the window closes
+    let frames: i32 = 0;
+    while renderer_should_close(r) == 0 and frames < 100 {
+        renderer_begin_frame(r);
+        // renderer_bind_pipeline(r, pipeline);
+        renderer_draw_triangles(r, positions, colors, 3);
+        renderer_end_frame(r);
+        frames = frames + 1;
+    }
+
+    print_i32(frames);
+    renderer_destroy(r);
+    return 0;
+}
