@@ -59,6 +59,8 @@ struct FuncAnnotations {
     is_vectorizable: bool,
     /// Whether the function has any array/pointer parameter reads (for memory attribute).
     reads_arg_memory: bool,
+    /// Whether the function body writes through pointers (ptr_write_* calls).
+    writes_arg_memory: bool,
     /// Whether the function is annotated with `@lifetime(scope)`.
     is_lifetime_scope: bool,
 }
@@ -185,6 +187,8 @@ struct CodegenContext {
     next_attr_group: u32,
     /// Bodies of @const functions for compile-time evaluation.
     const_func_bodies: HashMap<String, HirFunction>,
+    /// Non-fatal warnings emitted during codegen (e.g., aliasing detection).
+    warnings: Vec<String>,
 }
 
 impl CodegenContext {
@@ -232,6 +236,7 @@ impl CodegenContext {
             attr_group_map: HashMap::new(),
             next_attr_group: 0,
             const_func_bodies: HashMap::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -318,7 +323,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             .any(|a| matches!(a.kind, HirAnnotationKind::Export));
         let uses_fastcc = func.name != "main" && !is_export;
 
-        let func_annots = extract_func_annotations(&func.annotations, &func.params);
+        let func_annots = extract_func_annotations(&func.annotations, &func.params, &func.body);
 
         ctx.functions.insert(
             func.name.clone(),
@@ -654,6 +659,15 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         }
     }
 
+    // Emit warnings as LLVM IR comments so they appear in the output but
+    // do not affect the IR semantics.
+    if !ctx.warnings.is_empty() {
+        ctx.emit_blank();
+        for w in &ctx.warnings {
+            let _ = writeln!(ctx.output, "; {w}");
+        }
+    }
+
     if !ctx.errors.is_empty() {
         return Err(ctx.errors);
     }
@@ -734,10 +748,84 @@ fn register_struct(ctx: &mut CodegenContext, s: &HirStruct) {
     );
 }
 
+/// Scan a function body for `ptr_write_*` calls, indicating the function writes through pointers.
+///
+/// Walks the HIR block recursively, checking for calls to `ptr_write_i32`, `ptr_write_i64`,
+/// or `ptr_write_f64` builtins. Returns `true` if any such call is found.
+fn function_writes_through_ptrs(body: &HirBlock) -> bool {
+    fn expr_has_ptr_write(expr: &HirExpr) -> bool {
+        match &expr.kind {
+            HirExprKind::Call { func, args } => {
+                // Check if the callee is a ptr_write_* builtin.
+                if let HirExprKind::Ident { name } = &func.kind {
+                    if name == "ptr_write_i32"
+                        || name == "ptr_write_i64"
+                        || name == "ptr_write_f64"
+                    {
+                        return true;
+                    }
+                }
+                // Also check callee expression and arguments recursively.
+                if expr_has_ptr_write(func) {
+                    return true;
+                }
+                args.iter().any(expr_has_ptr_write)
+            }
+            HirExprKind::BinaryOp { lhs, rhs, .. } => {
+                expr_has_ptr_write(lhs) || expr_has_ptr_write(rhs)
+            }
+            HirExprKind::UnaryOp { operand, .. } => expr_has_ptr_write(operand),
+            HirExprKind::Index { expr, indices } => {
+                expr_has_ptr_write(expr) || indices.iter().any(expr_has_ptr_write)
+            }
+            HirExprKind::FieldAccess { expr, .. } => expr_has_ptr_write(expr),
+            HirExprKind::MethodCall { expr, args, .. } => {
+                expr_has_ptr_write(expr) || args.iter().any(expr_has_ptr_write)
+            }
+            _ => false,
+        }
+    }
+
+    fn block_has_ptr_write(blk: &HirBlock) -> bool {
+        blk.stmts.iter().any(|s| stmt_has_ptr_write(&s.kind))
+    }
+
+    fn stmt_has_ptr_write(kind: &HirStmtKind) -> bool {
+        match kind {
+            HirStmtKind::Let { value, .. } => {
+                value.as_ref().is_some_and(expr_has_ptr_write)
+            }
+            HirStmtKind::Assign { target, value } => {
+                expr_has_ptr_write(target) || expr_has_ptr_write(value)
+            }
+            HirStmtKind::Return { value } => expr_has_ptr_write(value),
+            HirStmtKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                expr_has_ptr_write(condition)
+                    || block_has_ptr_write(then_block)
+                    || else_block.as_ref().is_some_and(block_has_ptr_write)
+            }
+            HirStmtKind::For {
+                iterable, body, ..
+            } => expr_has_ptr_write(iterable) || block_has_ptr_write(body),
+            HirStmtKind::While { condition, body } => {
+                expr_has_ptr_write(condition) || block_has_ptr_write(body)
+            }
+            HirStmtKind::Expr { expr } => expr_has_ptr_write(expr),
+        }
+    }
+
+    block_has_ptr_write(body)
+}
+
 /// Extract optimization annotation flags from a function's annotations.
 fn extract_func_annotations(
     annotations: &[axiom_hir::HirAnnotation],
     params: &[HirParam],
+    body: &HirBlock,
 ) -> FuncAnnotations {
     let mut annots = FuncAnnotations::default();
     for ann in annotations {
@@ -761,6 +849,10 @@ fn extract_func_annotations(
                 | HirType::UserDefined(_)
         )
     });
+    // Scan function body for ptr_write_* calls to determine if the function writes through pointers.
+    if annots.reads_arg_memory {
+        annots.writes_arg_memory = function_writes_through_ptrs(body);
+    }
     annots
 }
 
@@ -792,7 +884,7 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     ctx.current_return_type = ret_type.clone();
 
     // Extract optimization annotations for the current function.
-    let func_annots = extract_func_annotations(&func.annotations, &func.params);
+    let func_annots = extract_func_annotations(&func.annotations, &func.params, &func.body);
     ctx.current_func_is_pure = func_annots.is_pure;
     ctx.current_func_is_const = func_annots.is_const;
     ctx.current_func_is_vectorizable = func_annots.is_vectorizable;
@@ -858,8 +950,13 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
 
 /// Build the function attribute suffix string (e.g., ` #0`).
 ///
-/// For `@pure` functions: memory(none) or memory(argmem: read) + nounwind
-/// For `@const` functions: memory(none) + nounwind + speculatable
+/// For `@pure` functions (no willreturn, no nosync):
+///
+/// - No ptr params: `memory(none) nounwind`
+/// - Ptr params, no writes: `memory(argmem: read) nounwind`
+/// - Ptr params, has writes: `memory(argmem: readwrite) nounwind`
+///
+/// For `@const` functions: `memory(none) nounwind willreturn nosync speculatable`
 fn build_func_attr_suffix(ctx: &mut CodegenContext, annots: &FuncAnnotations) -> String {
     if !annots.is_pure && !annots.is_const {
         return String::new();
@@ -869,6 +966,8 @@ fn build_func_attr_suffix(ctx: &mut CodegenContext, annots: &FuncAnnotations) ->
 
     if annots.is_const {
         // @const implies no memory access, speculatable.
+        // @const functions MUST terminate (verified during const-eval), so willreturn is safe.
+        // memory(none) makes synchronization impossible, so nosync is trivially true.
         attrs.push("memory(none)");
         attrs.push("nounwind");
         attrs.push("willreturn");
@@ -876,15 +975,20 @@ fn build_func_attr_suffix(ctx: &mut CodegenContext, annots: &FuncAnnotations) ->
         attrs.push("speculatable");
     } else if annots.is_pure {
         if annots.reads_arg_memory {
-            // @pure with pointer args: reads argument memory only.
-            attrs.push("memory(argmem: read)");
+            if annots.writes_arg_memory {
+                // @pure with pointer args that writes through pointers.
+                attrs.push("memory(argmem: readwrite)");
+            } else {
+                // @pure with pointer args: reads argument memory only.
+                attrs.push("memory(argmem: read)");
+            }
         } else {
             // @pure without pointer args: no memory access at all.
             attrs.push("memory(none)");
         }
         attrs.push("nounwind");
-        attrs.push("willreturn");
-        attrs.push("nosync");
+        // NOTE: no willreturn — cannot prove termination for @pure functions with loops.
+        // NOTE: no nosync — @pure functions may be called from parallel worker threads.
     }
 
     let attrs_str = attrs.join(" ");
@@ -2577,6 +2681,36 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
                             reg: format!("{result}"),
                             ty: func_info.return_type,
                         };
+                    }
+                }
+            }
+        }
+
+        // Check for obvious pointer aliasing at this call site.
+        // AXIOM language rule: pointer parameters must not alias each other.
+        // Emit a warning if the same variable is passed as two different pointer arguments.
+        {
+            let mut ptr_args: Vec<(usize, &str)> = Vec::new();
+            for (i, arg) in args.iter().enumerate() {
+                let is_ptr = func_info
+                    .param_types
+                    .get(i)
+                    .map(|t| t == "ptr")
+                    .unwrap_or(false);
+                if is_ptr {
+                    if let HirExprKind::Ident { name: arg_name } = &arg.kind {
+                        ptr_args.push((i, arg_name.as_str()));
+                    }
+                }
+            }
+            for i in 0..ptr_args.len() {
+                for j in (i + 1)..ptr_args.len() {
+                    if ptr_args[i].1 == ptr_args[j].1 {
+                        ctx.warnings.push(format!(
+                            "warning: pointer argument '{}' passed as both param {} and param {} \
+                             to '{}'. AXIOM requires pointer parameters to be non-aliasing.",
+                            ptr_args[i].1, ptr_args[i].0, ptr_args[j].0, name
+                        ));
                     }
                 }
             }
@@ -4402,6 +4536,8 @@ fn emit_builtin_job_dispatch(ctx: &mut CodegenContext, args: &[HirExpr]) -> Llvm
     let data_val = emit_expr(ctx, &args[1], Some("ptr"));
     let total_val = emit_expr(ctx, &args[2], Some("i32"));
 
+    // Release fence: ensure main thread's stores are visible to worker threads.
+    ctx.emit("fence release");
     ctx.emit(&format!(
         "call void @axiom_job_dispatch(ptr {}, ptr {}, i32 {})",
         func_val.reg, data_val.reg, total_val.reg
@@ -4427,6 +4563,8 @@ fn emit_builtin_job_wait(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValu
     }
 
     ctx.emit("call void @axiom_job_wait()");
+    // Acquire fence: ensure worker threads' stores are visible to main thread.
+    ctx.emit("fence acquire");
     LlvmValue {
         reg: "0".to_string(),
         ty: "void".to_string(),
@@ -7329,10 +7467,15 @@ fn main() -> i32 {
             ir.contains("nounwind"),
             "pure function should have nounwind: {ir}"
         );
-        // Should have willreturn.
+        // @pure should NOT have willreturn (cannot prove termination).
         assert!(
-            ir.contains("willreturn"),
-            "pure function should have willreturn: {ir}"
+            !ir.contains("willreturn"),
+            "@pure function should NOT have willreturn: {ir}"
+        );
+        // @pure should NOT have nosync (may be called from parallel workers).
+        assert!(
+            !ir.contains("nosync"),
+            "@pure function should NOT have nosync: {ir}"
         );
     }
 
@@ -9906,5 +10049,530 @@ fn main() -> i32 {
         assert!(needs_runtime("declare void @axiom_coro_destroy(i32)"));
         // Non-coroutine, non-runtime IR should not trigger.
         assert!(!needs_runtime("define i32 @main() { ret i32 0 }"));
+    }
+
+    // ======================================================================
+    // MT-1: Memory safety and correctness tests
+    // ======================================================================
+
+    // T1: @pure with ptr params AND ptr_write_* calls -> memory(argmem: readwrite)
+    #[test]
+    fn test_pure_with_ptr_writes_gets_argmem_readwrite() {
+        let compute_func = func_with_annotations(
+            "compute_chunk",
+            vec![
+                param(
+                    "data",
+                    HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                ),
+                param("start", HirType::Primitive(PrimitiveType::I32)),
+                param("end", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Unknown("void".to_string()),
+            block(vec![stmt(HirStmtKind::Expr {
+                expr: call(
+                    "ptr_write_i32",
+                    vec![ident("data"), ident("start"), int_lit(42)],
+                ),
+            })]),
+            vec![pure_ann()],
+        );
+
+        let m = module(Some("test"), vec![compute_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("memory(argmem: readwrite)"),
+            "@pure with ptr_write should get memory(argmem: readwrite): {ir}"
+        );
+        assert!(
+            !ir.contains("memory(argmem: read)\"") && !ir.contains("memory(argmem: read) "),
+            "@pure with ptr_write should NOT get memory(argmem: read) alone: {ir}"
+        );
+    }
+
+    // T2: @pure with ptr params but NO ptr_write_* calls -> memory(argmem: read)
+    #[test]
+    fn test_pure_with_ptr_readonly_gets_argmem_read() {
+        let sum_func = func_with_annotations(
+            "sum_arr",
+            vec![
+                param(
+                    "arr",
+                    HirType::Array {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                        size: 10,
+                    },
+                ),
+                param("n", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: int_lit(0),
+            })]),
+            vec![pure_ann()],
+        );
+
+        let m = module(Some("test"), vec![sum_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("memory(argmem: read)"),
+            "@pure with ptr params but no writes should get memory(argmem: read): {ir}"
+        );
+        assert!(
+            !ir.contains("memory(argmem: readwrite)"),
+            "@pure without writes should NOT get readwrite: {ir}"
+        );
+    }
+
+    // T3: @pure with ptr params still gets noalias (language rule)
+    #[test]
+    fn test_noalias_on_pure_with_ptr() {
+        let sum_func = func_with_annotations(
+            "sum_arr",
+            vec![
+                param(
+                    "arr",
+                    HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                ),
+                param("n", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: int_lit(0),
+            })]),
+            vec![pure_ann()],
+        );
+
+        let m = module(Some("test"), vec![sum_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("ptr noalias %arr"),
+            "@pure function ptr params should have noalias (language rule): {ir}"
+        );
+    }
+
+    // T4: Non-@pure with ptr params still gets noalias (language rule)
+    #[test]
+    fn test_noalias_on_non_pure_with_ptr() {
+        let write_func = func_with_annotations(
+            "write_arr",
+            vec![
+                param(
+                    "arr",
+                    HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                ),
+                param("n", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Unknown("void".to_string()),
+            block(vec![stmt(HirStmtKind::Expr {
+                expr: call(
+                    "ptr_write_i32",
+                    vec![ident("arr"), int_lit(0), int_lit(42)],
+                ),
+            })]),
+            vec![], // No @pure annotation
+        );
+
+        let m = module(Some("test"), vec![write_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("ptr noalias %arr"),
+            "non-@pure function ptr params should have noalias (language rule): {ir}"
+        );
+    }
+
+    // T5: fence acquire after job_wait
+    #[test]
+    fn test_fence_acquire_after_job_wait() {
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Expr {
+                        expr: call("job_wait", vec![]),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Find the positions: fence acquire must come AFTER call void @axiom_job_wait()
+        let wait_pos = ir.find("call void @axiom_job_wait()");
+        let fence_pos = ir.find("fence acquire");
+        assert!(
+            wait_pos.is_some(),
+            "should emit call void @axiom_job_wait(): {ir}"
+        );
+        assert!(
+            fence_pos.is_some(),
+            "should emit fence acquire after job_wait: {ir}"
+        );
+        assert!(
+            fence_pos.unwrap() > wait_pos.unwrap(),
+            "fence acquire should come AFTER job_wait call: {ir}"
+        );
+    }
+
+    // T6: fence release before job_dispatch
+    #[test]
+    fn test_fence_release_before_job_dispatch() {
+        // job_dispatch(func, data, total_items) needs ptr args.
+        // We use heap_alloc for both func_ptr and data to avoid undefined variable errors.
+        let main_func = func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "func_ptr".to_string(),
+                    name_span: span(),
+                    ty: HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                    value: Some(call("heap_alloc", vec![int_lit(1), int_lit(4)])),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Let {
+                    name: "data".to_string(),
+                    name_span: span(),
+                    ty: HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                    value: Some(call("heap_alloc", vec![int_lit(10), int_lit(4)])),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Expr {
+                    expr: call(
+                        "job_dispatch",
+                        vec![ident("func_ptr"), ident("data"), int_lit(10)],
+                    ),
+                }),
+                stmt(HirStmtKind::Return {
+                    value: int_lit(0),
+                }),
+            ]),
+        );
+
+        let m = module(Some("test"), vec![main_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Find the positions: fence release must come BEFORE call void @axiom_job_dispatch(...)
+        let fence_pos = ir.find("fence release");
+        let dispatch_pos = ir.find("call void @axiom_job_dispatch(");
+        assert!(
+            fence_pos.is_some(),
+            "should emit fence release before job_dispatch: {ir}"
+        );
+        assert!(
+            dispatch_pos.is_some(),
+            "should emit call void @axiom_job_dispatch: {ir}"
+        );
+        assert!(
+            fence_pos.unwrap() < dispatch_pos.unwrap(),
+            "fence release should come BEFORE job_dispatch call: {ir}"
+        );
+    }
+
+    // T7: @pure does NOT get nosync
+    #[test]
+    fn test_no_nosync_on_pure() {
+        let fib_func = func_with_annotations(
+            "fib",
+            vec![param("n", HirType::Primitive(PrimitiveType::I64))],
+            HirType::Primitive(PrimitiveType::I64),
+            block(vec![stmt(HirStmtKind::Return {
+                value: ident("n"),
+            })]),
+            vec![pure_ann()],
+        );
+
+        let m = module(Some("test"), vec![fib_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            !ir.contains("nosync"),
+            "@pure function should NOT have nosync: {ir}"
+        );
+    }
+
+    // T8: @const still gets nosync
+    #[test]
+    fn test_nosync_on_const() {
+        let square_func = func_with_annotations(
+            "square",
+            vec![param("n", HirType::Primitive(PrimitiveType::I32))],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: binop(BinOp::Mul, ident("n"), ident("n")),
+            })]),
+            vec![const_ann()],
+        );
+
+        let m = module(Some("test"), vec![square_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("nosync"),
+            "@const function should have nosync: {ir}"
+        );
+    }
+
+    // T9: @pure with scalar only -> memory(none)
+    #[test]
+    fn test_pure_scalar_only_memory_none() {
+        let add_func = func_with_annotations(
+            "add",
+            vec![
+                param("a", HirType::Primitive(PrimitiveType::I32)),
+                param("b", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: binop(BinOp::Add, ident("a"), ident("b")),
+            })]),
+            vec![pure_ann()],
+        );
+
+        let m = module(Some("test"), vec![add_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("memory(none)"),
+            "@pure with scalar params only should get memory(none): {ir}"
+        );
+        assert!(
+            ir.contains("nounwind"),
+            "@pure should have nounwind: {ir}"
+        );
+        assert!(
+            !ir.contains("willreturn"),
+            "@pure should NOT have willreturn: {ir}"
+        );
+        assert!(
+            !ir.contains("nosync"),
+            "@pure should NOT have nosync: {ir}"
+        );
+    }
+
+    // T10: @pure does NOT get willreturn
+    #[test]
+    fn test_no_willreturn_on_pure() {
+        // @pure function with a loop (potential non-termination)
+        let loop_func = func_with_annotations(
+            "loop_fn",
+            vec![param("n", HirType::Primitive(PrimitiveType::I32))],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::While {
+                    condition: binop(BinOp::Gt, ident("n"), int_lit(0)),
+                    body: block(vec![stmt(HirStmtKind::Return {
+                        value: ident("n"),
+                    })]),
+                }),
+                stmt(HirStmtKind::Return {
+                    value: int_lit(0),
+                }),
+            ]),
+            vec![pure_ann()],
+        );
+
+        let m = module(Some("test"), vec![loop_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            !ir.contains("willreturn"),
+            "@pure function should NOT have willreturn: {ir}"
+        );
+    }
+
+    // T11: @const still gets willreturn
+    #[test]
+    fn test_willreturn_on_const() {
+        let square_func = func_with_annotations(
+            "square",
+            vec![param("n", HirType::Primitive(PrimitiveType::I32))],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: binop(BinOp::Mul, ident("n"), ident("n")),
+            })]),
+            vec![const_ann()],
+        );
+
+        let m = module(Some("test"), vec![square_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("willreturn"),
+            "@const function should have willreturn: {ir}"
+        );
+    }
+
+    // T12: Call-site ptr args get noalias (language rule)
+    #[test]
+    fn test_noalias_on_callsite_ptr_args() {
+        let write_func = func_with_annotations(
+            "write_arr",
+            vec![
+                param(
+                    "arr",
+                    HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                ),
+                param("n", HirType::Primitive(PrimitiveType::I32)),
+            ],
+            HirType::Unknown("void".to_string()),
+            block(vec![stmt(HirStmtKind::Return {
+                value: int_lit(0),
+            })]),
+            vec![],
+        );
+
+        let main_func = func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "data".to_string(),
+                    name_span: span(),
+                    ty: HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                    value: Some(call("heap_alloc", vec![int_lit(10), int_lit(4)])),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Expr {
+                    expr: call("write_arr", vec![ident("data"), int_lit(10)]),
+                }),
+                stmt(HirStmtKind::Return {
+                    value: int_lit(0),
+                }),
+            ]),
+        );
+
+        let m = module(Some("test"), vec![write_func, main_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // Check that the call site has noalias on the ptr argument.
+        assert!(
+            ir.contains("ptr noalias"),
+            "call-site ptr args should get noalias: {ir}"
+        );
+    }
+
+    // T-extra: @const gets all expected attributes
+    #[test]
+    fn test_const_attrs_complete() {
+        let square_func = func_with_annotations(
+            "square",
+            vec![param("n", HirType::Primitive(PrimitiveType::I32))],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![stmt(HirStmtKind::Return {
+                value: binop(BinOp::Mul, ident("n"), ident("n")),
+            })]),
+            vec![const_ann()],
+        );
+
+        let m = module(Some("test"), vec![square_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        assert!(
+            ir.contains("memory(none)"),
+            "@const should have memory(none): {ir}"
+        );
+        assert!(
+            ir.contains("nounwind"),
+            "@const should have nounwind: {ir}"
+        );
+        assert!(
+            ir.contains("willreturn"),
+            "@const should have willreturn: {ir}"
+        );
+        assert!(
+            ir.contains("nosync"),
+            "@const should have nosync: {ir}"
+        );
+        assert!(
+            ir.contains("speculatable"),
+            "@const should have speculatable: {ir}"
+        );
+    }
+
+    // T-alias: Aliasing warning detection
+    #[test]
+    fn test_aliasing_warning_on_same_ptr_arg() {
+        let swap_func = func_with_annotations(
+            "swap",
+            vec![
+                param(
+                    "a",
+                    HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                ),
+                param(
+                    "b",
+                    HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                ),
+            ],
+            HirType::Unknown("void".to_string()),
+            block(vec![stmt(HirStmtKind::Return {
+                value: int_lit(0),
+            })]),
+            vec![],
+        );
+
+        let main_func = func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "data".to_string(),
+                    name_span: span(),
+                    ty: HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                    value: Some(call("heap_alloc", vec![int_lit(10), int_lit(4)])),
+                    mutable: false,
+                }),
+                // swap(data, data) -- same pointer as both args, should trigger warning
+                stmt(HirStmtKind::Expr {
+                    expr: call("swap", vec![ident("data"), ident("data")]),
+                }),
+                stmt(HirStmtKind::Return {
+                    value: int_lit(0),
+                }),
+            ]),
+        );
+
+        let m = module(Some("test"), vec![swap_func, main_func]);
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // The warning should appear as an IR comment.
+        assert!(
+            ir.contains("warning: pointer argument 'data' passed as both param 0 and param 1 to 'swap'"),
+            "should emit aliasing warning for swap(data, data): {ir}"
+        );
     }
 }
