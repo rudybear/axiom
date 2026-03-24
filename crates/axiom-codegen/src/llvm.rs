@@ -154,6 +154,9 @@ struct CodegenContext {
     /// Whether threading/job-system builtins are used (thread_create, jobs_init, etc.).
     /// When true, threading extern declarations are emitted and the runtime is linked.
     needs_threading: bool,
+    /// Whether renderer builtins are used (renderer_create, shader_load, etc.).
+    /// When true, renderer extern declarations are emitted and the runtime is linked.
+    needs_renderer: bool,
     /// Registry of struct types (name → StructInfo).
     struct_registry: HashMap<String, StructInfo>,
     /// Collected errors.
@@ -214,6 +217,7 @@ impl CodegenContext {
             needs_runtime: false,
             needs_coroutines: false,
             needs_threading: false,
+            needs_renderer: false,
             struct_registry: HashMap::new(),
             errors: Vec::new(),
             block_terminated: false,
@@ -574,6 +578,56 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         let _ = writeln!(ctx.output, "declare i32 @axiom_num_cores()");
     }
 
+    // Emit renderer / Vulkan FFI extern declarations (also part of axiom_rt.c).
+    if ctx.needs_renderer {
+        // Renderer lifecycle
+        let _ = writeln!(
+            ctx.output,
+            "declare ptr @axiom_renderer_create(i32, i32, ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare void @axiom_renderer_destroy(ptr)"
+        );
+        // Frame operations
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @axiom_renderer_begin_frame(ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare void @axiom_renderer_end_frame(ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @axiom_renderer_should_close(ptr)"
+        );
+        // Drawing
+        let _ = writeln!(
+            ctx.output,
+            "declare void @axiom_renderer_draw_triangles(ptr, ptr, ptr, i32)"
+        );
+        // Time
+        let _ = writeln!(
+            ctx.output,
+            "declare double @axiom_renderer_get_time(ptr)"
+        );
+        // Shader loading (SPIR-V from Lux)
+        let _ = writeln!(
+            ctx.output,
+            "declare ptr @axiom_shader_load(ptr, ptr, i32)"
+        );
+        // Pipeline
+        let _ = writeln!(
+            ctx.output,
+            "declare ptr @axiom_pipeline_create(ptr, ptr, ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare void @axiom_renderer_bind_pipeline(ptr, ptr)"
+        );
+    }
+
     // Emit attribute groups.
     if !ctx.attribute_groups.is_empty() {
         ctx.emit_blank();
@@ -627,6 +681,16 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_job_wait")
         || ir.contains("@axiom_jobs_shutdown")
         || ir.contains("@axiom_num_cores")
+        || ir.contains("@axiom_renderer_create")
+        || ir.contains("@axiom_renderer_destroy")
+        || ir.contains("@axiom_renderer_begin_frame")
+        || ir.contains("@axiom_renderer_end_frame")
+        || ir.contains("@axiom_renderer_should_close")
+        || ir.contains("@axiom_renderer_draw_triangles")
+        || ir.contains("@axiom_renderer_get_time")
+        || ir.contains("@axiom_shader_load")
+        || ir.contains("@axiom_pipeline_create")
+        || ir.contains("@axiom_renderer_bind_pipeline")
 }
 
 /// Register a struct type in the codegen context.
@@ -2441,6 +2505,17 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "job_wait" => return emit_builtin_job_wait(ctx, args),
             "jobs_shutdown" => return emit_builtin_jobs_shutdown(ctx, args),
             "num_cores" => return emit_builtin_num_cores(ctx, args),
+            // Renderer / Vulkan FFI builtins (axiom_rt.c -- stub/Vulkan)
+            "renderer_create" => return emit_builtin_renderer_create(ctx, args),
+            "renderer_destroy" => return emit_builtin_renderer_destroy(ctx, args),
+            "renderer_begin_frame" => return emit_builtin_renderer_begin_frame(ctx, args),
+            "renderer_end_frame" => return emit_builtin_renderer_end_frame(ctx, args),
+            "renderer_should_close" => return emit_builtin_renderer_should_close(ctx, args),
+            "renderer_draw_triangles" => return emit_builtin_renderer_draw_triangles(ctx, args),
+            "renderer_get_time" => return emit_builtin_renderer_get_time(ctx, args),
+            "shader_load" => return emit_builtin_shader_load(ctx, args),
+            "pipeline_create" => return emit_builtin_pipeline_create(ctx, args),
+            "renderer_bind_pipeline" => return emit_builtin_renderer_bind_pipeline(ctx, args),
             _ => {}
         }
 
@@ -4384,6 +4459,304 @@ fn emit_builtin_num_cores(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVal
     LlvmValue {
         reg: result_reg,
         ty: "i32".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Renderer / Vulkan FFI builtins (axiom_rt.c -- stub/Vulkan)
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `renderer_create(width: i32, height: i32, title: ptr) -> ptr`.
+///
+/// Calls `axiom_renderer_create(w, h, title)` which creates a renderer context.
+fn emit_builtin_renderer_create(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "renderer_create() requires exactly 3 arguments (width, height, title)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let width_val = emit_expr(ctx, &args[0], Some("i32"));
+    let height_val = emit_expr(ctx, &args[1], Some("i32"));
+    let title_val = emit_expr(ctx, &args[2], Some("ptr"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call ptr @axiom_renderer_create(i32 {}, i32 {}, ptr {})",
+        width_val.reg, height_val.reg, title_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `renderer_destroy(r: ptr)`.
+///
+/// Calls `axiom_renderer_destroy(r)` which frees the renderer context.
+fn emit_builtin_renderer_destroy(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "renderer_destroy() requires exactly 1 argument (renderer)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    ctx.emit(&format!(
+        "call void @axiom_renderer_destroy(ptr {})",
+        renderer_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `renderer_begin_frame(r: ptr) -> i32`.
+///
+/// Calls `axiom_renderer_begin_frame(r)`.  Returns 1 on success, 0 if the
+/// window has been closed or the swapchain is unavailable.
+fn emit_builtin_renderer_begin_frame(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "renderer_begin_frame() requires exactly 1 argument (renderer)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_renderer_begin_frame(ptr {})",
+        renderer_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `renderer_end_frame(r: ptr)`.
+///
+/// Calls `axiom_renderer_end_frame(r)` which presents the frame and increments
+/// the frame counter.
+fn emit_builtin_renderer_end_frame(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "renderer_end_frame() requires exactly 1 argument (renderer)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    ctx.emit(&format!(
+        "call void @axiom_renderer_end_frame(ptr {})",
+        renderer_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `renderer_should_close(r: ptr) -> i32`.
+///
+/// Calls `axiom_renderer_should_close(r)`.  Returns 1 if the window should
+/// close (user pressed close, or auto-close threshold reached in stub mode).
+fn emit_builtin_renderer_should_close(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "renderer_should_close() requires exactly 1 argument (renderer)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_renderer_should_close(ptr {})",
+        renderer_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `renderer_draw_triangles(r: ptr, positions: ptr, colors: ptr, count: i32)`.
+///
+/// Calls `axiom_renderer_draw_triangles(r, pos, col, n)`.  In the stub, this
+/// logs the vertex count.  With Vulkan, it records draw commands.
+fn emit_builtin_renderer_draw_triangles(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 4 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "renderer_draw_triangles() requires exactly 4 arguments (renderer, positions, colors, vertex_count)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let positions_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let colors_val = emit_expr(ctx, &args[2], Some("ptr"));
+    let count_val = emit_expr(ctx, &args[3], Some("i32"));
+    ctx.emit(&format!(
+        "call void @axiom_renderer_draw_triangles(ptr {}, ptr {}, ptr {}, i32 {})",
+        renderer_val.reg, positions_val.reg, colors_val.reg, count_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `renderer_get_time(r: ptr) -> f64`.
+///
+/// Calls `axiom_renderer_get_time(r)` which returns elapsed time in seconds
+/// since the renderer was created.
+fn emit_builtin_renderer_get_time(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "renderer_get_time() requires exactly 1 argument (renderer)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call double @axiom_renderer_get_time(ptr {})",
+        renderer_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `shader_load(r: ptr, path: ptr, stage: i32) -> ptr`.
+///
+/// Calls `axiom_shader_load(r, path, stage)` which loads a SPIR-V shader
+/// module compiled by Lux.  Stage 0 = vertex, 1 = fragment.
+fn emit_builtin_shader_load(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "shader_load() requires exactly 3 arguments (renderer, path, stage)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let path_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let stage_val = emit_expr(ctx, &args[2], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call ptr @axiom_shader_load(ptr {}, ptr {}, i32 {})",
+        renderer_val.reg, path_val.reg, stage_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `pipeline_create(r: ptr, vert: ptr, frag: ptr) -> ptr`.
+///
+/// Calls `axiom_pipeline_create(r, vert_shader, frag_shader)` which creates a
+/// graphics pipeline from vertex and fragment shader modules.
+fn emit_builtin_pipeline_create(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "pipeline_create() requires exactly 3 arguments (renderer, vert_shader, frag_shader)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let vert_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let frag_val = emit_expr(ctx, &args[2], Some("ptr"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call ptr @axiom_pipeline_create(ptr {}, ptr {}, ptr {})",
+        renderer_val.reg, vert_val.reg, frag_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `renderer_bind_pipeline(r: ptr, pipeline: ptr)`.
+///
+/// Calls `axiom_renderer_bind_pipeline(r, p)` which binds a graphics pipeline
+/// for subsequent draw calls.
+fn emit_builtin_renderer_bind_pipeline(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "renderer_bind_pipeline() requires exactly 2 arguments (renderer, pipeline)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let renderer_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let pipeline_val = emit_expr(ctx, &args[1], Some("ptr"));
+    ctx.emit(&format!(
+        "call void @axiom_renderer_bind_pipeline(ptr {}, ptr {})",
+        renderer_val.reg, pipeline_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
     }
 }
 
