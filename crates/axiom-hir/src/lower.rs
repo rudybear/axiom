@@ -609,6 +609,12 @@ impl LoweringContext {
             ast::TypeExpr::Ptr(element) => HirType::Ptr {
                 element: Box::new(self.lower_type(element, span)),
             },
+            ast::TypeExpr::ReadonlyPtr(element) => HirType::ReadonlyPtr {
+                element: Box::new(self.lower_type(element, span)),
+            },
+            ast::TypeExpr::WriteonlyPtr(element) => HirType::WriteonlyPtr {
+                element: Box::new(self.lower_type(element, span)),
+            },
             ast::TypeExpr::Tuple(elements) => HirType::Tuple {
                 elements: elements.iter().map(|e| self.lower_type(e, span)).collect(),
             },

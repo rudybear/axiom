@@ -1424,6 +1424,30 @@ impl<'src> Parser<'src> {
                 }
             }
 
+            // Readonly pointer type: readonly_ptr[T]
+            TokenKind::ReadonlyPtr => {
+                self.advance();
+                if self.eat(&TokenKind::LBracket) {
+                    let elem = self.parse_type_expr();
+                    self.expect(&TokenKind::RBracket, "']'");
+                    TypeExpr::ReadonlyPtr(Box::new(elem))
+                } else {
+                    TypeExpr::Named("readonly_ptr".to_string())
+                }
+            }
+
+            // Writeonly pointer type: writeonly_ptr[T]
+            TokenKind::WriteonlyPtr => {
+                self.advance();
+                if self.eat(&TokenKind::LBracket) {
+                    let elem = self.parse_type_expr();
+                    self.expect(&TokenKind::RBracket, "']'");
+                    TypeExpr::WriteonlyPtr(Box::new(elem))
+                } else {
+                    TypeExpr::Named("writeonly_ptr".to_string())
+                }
+            }
+
             // Function type: fn(T1, T2) -> R
             TokenKind::Fn => {
                 self.advance();

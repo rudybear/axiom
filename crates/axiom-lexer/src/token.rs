@@ -201,6 +201,8 @@ pub enum TokenKind {
     Array,
     Slice,
     Ptr,
+    ReadonlyPtr,
+    WriteonlyPtr,
 
     // ── Conversion keywords ─────────────────────────────
     Widen,
@@ -294,6 +296,8 @@ impl TokenKind {
             "array" => Some(TokenKind::Array),
             "slice" => Some(TokenKind::Slice),
             "ptr" => Some(TokenKind::Ptr),
+            "readonly_ptr" => Some(TokenKind::ReadonlyPtr),
+            "writeonly_ptr" => Some(TokenKind::WriteonlyPtr),
             "widen" => Some(TokenKind::Widen),
             "narrow" => Some(TokenKind::Narrow),
             "truncate" => Some(TokenKind::Truncate),

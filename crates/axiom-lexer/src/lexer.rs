@@ -1364,12 +1364,13 @@ mod tests {
 
     #[test]
     fn test_all_type_keywords() {
-        let kinds = lex("i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f16 bf16 f32 f64 bool tensor array slice ptr");
+        let kinds = lex("i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f16 bf16 f32 f64 bool tensor array slice ptr readonly_ptr writeonly_ptr");
         assert_eq!(kinds, vec![
             TokenKind::I8, TokenKind::I16, TokenKind::I32, TokenKind::I64, TokenKind::I128,
             TokenKind::U8, TokenKind::U16, TokenKind::U32, TokenKind::U64, TokenKind::U128,
             TokenKind::F16, TokenKind::Bf16, TokenKind::F32, TokenKind::F64,
             TokenKind::Bool, TokenKind::Tensor, TokenKind::Array, TokenKind::Slice, TokenKind::Ptr,
+            TokenKind::ReadonlyPtr, TokenKind::WriteonlyPtr,
             TokenKind::Eof,
         ]);
     }
