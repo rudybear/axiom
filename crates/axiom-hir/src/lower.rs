@@ -550,7 +550,12 @@ impl LoweringContext {
     fn lower_type(&mut self, ty: &ast::TypeExpr, span: Span) -> HirType {
         match ty {
             ast::TypeExpr::Named(name) => {
-                if let Some(prim) = resolve_primitive_type(name) {
+                if name == "void" {
+                    // The parser emits `Named("void")` for functions with no
+                    // return type.  This is not a real user-facing type — just
+                    // pass it through so the codegen can emit `ret void`.
+                    HirType::Unknown("void".to_string())
+                } else if let Some(prim) = resolve_primitive_type(name) {
                     HirType::Primitive(prim)
                 } else if self.known_types.contains(name) {
                     HirType::UserDefined(name.clone())

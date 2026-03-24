@@ -1,0 +1,154 @@
+@module ecs_test;
+@intent("ECS test: 1000 entities, 100 ticks — quick determinism check");
+
+// Smaller ECS test for CI: 1000 entities, 100 ticks.
+// Must produce a deterministic checksum.
+
+// ---------------------------------------------------------------------------
+// System: Physics (Euler integration)
+// ---------------------------------------------------------------------------
+
+@pure
+fn system_physics(x: ptr[f64], y: ptr[f64], vx: ptr[f64], vy: ptr[f64],
+                  alive: ptr[i32], start: i32, end: i32, dt: f64) {
+    for i: i32 in range(start, end) {
+        if ptr_read_i32(alive, i) == 1 {
+            ptr_write_f64(x, i, ptr_read_f64(x, i) + ptr_read_f64(vx, i) * dt);
+            ptr_write_f64(y, i, ptr_read_f64(y, i) + ptr_read_f64(vy, i) * dt);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System: Bounce (wall collision)
+// ---------------------------------------------------------------------------
+
+@pure
+fn system_bounce(x: ptr[f64], y: ptr[f64], vx: ptr[f64], vy: ptr[f64],
+                 alive: ptr[i32], start: i32, end: i32) {
+    for i: i32 in range(start, end) {
+        if ptr_read_i32(alive, i) == 1 {
+            let px: f64 = ptr_read_f64(x, i);
+            let py: f64 = ptr_read_f64(y, i);
+
+            if px < 0.0 {
+                ptr_write_f64(x, i, 0.0 - px);
+                ptr_write_f64(vx, i, 0.0 - ptr_read_f64(vx, i));
+            }
+            if px > 1000.0 {
+                ptr_write_f64(x, i, 2000.0 - px);
+                ptr_write_f64(vx, i, 0.0 - ptr_read_f64(vx, i));
+            }
+
+            if py < 0.0 {
+                ptr_write_f64(y, i, 0.0 - py);
+                ptr_write_f64(vy, i, 0.0 - ptr_read_f64(vy, i));
+            }
+            if py > 1000.0 {
+                ptr_write_f64(y, i, 2000.0 - py);
+                ptr_write_f64(vy, i, 0.0 - ptr_read_f64(vy, i));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spawn / Despawn
+// ---------------------------------------------------------------------------
+
+@pure
+fn entity_spawn(x: ptr[f64], y: ptr[f64], vx: ptr[f64], vy: ptr[f64],
+                alive: ptr[i32], id: i32,
+                px: f64, py: f64, dvx: f64, dvy: f64) {
+    ptr_write_f64(x, id, px);
+    ptr_write_f64(y, id, py);
+    ptr_write_f64(vx, id, dvx);
+    ptr_write_f64(vy, id, dvy);
+    ptr_write_i32(alive, id, 1);
+}
+
+@pure
+fn entity_despawn(alive: ptr[i32], id: i32) {
+    ptr_write_i32(alive, id, 0);
+}
+
+// ---------------------------------------------------------------------------
+// LCG PRNG
+// ---------------------------------------------------------------------------
+
+fn lcg_next_f64(seed_ptr: ptr[i64], max: f64) -> f64 {
+    let s: i64 = ptr_read_i64(seed_ptr, 0);
+    s = s * 6364136223846793005 + 1442695040888963407;
+    ptr_write_i64(seed_ptr, 0, s);
+    let bits: i64 = lshr(s, 16);
+    let masked: i64 = band(bits, 2147483647);
+    let fval: f64 = to_f64_i64(masked);
+    return fval * max / 2147483647.0;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    let n: i32 = 1000;
+    let dt: f64 = 0.016;
+    let ticks: i32 = 100;
+    let world_size: f64 = 1000.0;
+
+    // Arena: 512 KB is plenty for 1000 entities
+    let arena: ptr[i32] = arena_create(524288);
+
+    let x:     ptr[f64] = arena_alloc(arena, n, 8);
+    let y:     ptr[f64] = arena_alloc(arena, n, 8);
+    let vx:    ptr[f64] = arena_alloc(arena, n, 8);
+    let vy:    ptr[f64] = arena_alloc(arena, n, 8);
+    let alive: ptr[i32] = arena_alloc(arena, n, 4);
+
+    let seed_ptr: ptr[i64] = arena_alloc(arena, 1, 8);
+    ptr_write_i64(seed_ptr, 0, 123456789);
+
+    // Initialize entities
+    for i: i32 in range(0, n) {
+        let px: f64 = lcg_next_f64(seed_ptr, world_size);
+        let py: f64 = lcg_next_f64(seed_ptr, world_size);
+        let dvx: f64 = lcg_next_f64(seed_ptr, 200.0) - 100.0;
+        let dvy: f64 = lcg_next_f64(seed_ptr, 200.0) - 100.0;
+        entity_spawn(x, y, vx, vy, alive, i, px, py, dvx, dvy);
+    }
+
+    // Game loop
+    for tick: i32 in range(0, ticks) {
+        system_physics(x, y, vx, vy, alive, 0, n, dt);
+        system_bounce(x, y, vx, vy, alive, 0, n);
+
+        // Despawn/respawn every 25 ticks
+        if tick % 25 == 0 {
+            for i: i32 in range(0, 10) {
+                entity_despawn(alive, i + (tick / 25) * 10);
+            }
+            for i: i32 in range(0, 10) {
+                let id: i32 = i + (tick / 25) * 10;
+                if id < n {
+                    let px: f64 = lcg_next_f64(seed_ptr, world_size);
+                    let py: f64 = lcg_next_f64(seed_ptr, world_size);
+                    let dvx: f64 = lcg_next_f64(seed_ptr, 100.0) - 50.0;
+                    let dvy: f64 = lcg_next_f64(seed_ptr, 100.0) - 50.0;
+                    entity_spawn(x, y, vx, vy, alive, id, px, py, dvx, dvy);
+                }
+            }
+        }
+    }
+
+    // Checksum
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        if ptr_read_i32(alive, i) == 1 {
+            checksum = checksum + ptr_read_f64(x, i) + ptr_read_f64(y, i);
+        }
+    }
+    print_f64(checksum);
+
+    arena_destroy(arena);
+    return 0;
+}

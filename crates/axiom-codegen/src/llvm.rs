@@ -760,6 +760,17 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     // Emit function body.
     emit_block(ctx, &func.body);
 
+    // If the function is void and the block didn't end with a terminator,
+    // add an implicit `ret void`.
+    if !ctx.block_terminated {
+        if ret_type == "void" {
+            ctx.emit("ret void");
+        } else {
+            // Non-void function without return — emit unreachable as safety net.
+            ctx.emit("unreachable");
+        }
+    }
+
     ctx.emit_raw("}");
 
     // Reset per-function optimization state.
@@ -2505,7 +2516,7 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
 
         let cc = if func_info.uses_fastcc { "fastcc " } else { "" };
         if func_info.return_type == "void" {
-            ctx.emit(&format!("{cc}call void @{name}({args_str})"));
+            ctx.emit(&format!("call {cc}void @{name}({args_str})"));
             LlvmValue {
                 reg: "0".to_string(),
                 ty: "void".to_string(),
@@ -4528,6 +4539,7 @@ fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError> {
             ty: "fn".to_string(),
             context: "function types not yet supported".to_string(),
         }),
+        HirType::Unknown(name) if name == "void" => Ok("void".to_string()),
         HirType::Unknown(name) => Err(CodegenError::UnsupportedType {
             ty: name.clone(),
             context: "unknown type".to_string(),

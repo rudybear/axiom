@@ -1,0 +1,256 @@
+@module ecs_demo;
+@intent("ECS game demo: 10K entities, SOA layout, parallel physics, arena allocation");
+
+// =============================================================================
+// Entity-Component-System (ECS) Framework Demo
+// =============================================================================
+//
+// This demonstrates a data-oriented ECS design pattern in AXIOM:
+//
+//   - SOA (Struct of Arrays) layout for cache-friendly iteration
+//   - Arena allocation for zero per-frame heap traffic
+//   - Pure system functions (stateless, parallelizable)
+//   - 10,000 entities with Position + Velocity + Alive components
+//   - Physics system: Euler integration of positions
+//   - Bounce system: wall collision with velocity reflection
+//   - Spawn/despawn: activate/deactivate entities mid-simulation
+//   - Game loop: 1000 ticks at 60 fps timestep
+//
+// Component layout (SOA):
+//   x[N]     : f64  -- position X
+//   y[N]     : f64  -- position Y
+//   vx[N]    : f64  -- velocity X
+//   vy[N]    : f64  -- velocity Y
+//   alive[N] : i32  -- 1 = active, 0 = despawned
+//
+// All arrays are contiguous in a single 4 MB arena.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// System: Physics (Euler integration)
+// ---------------------------------------------------------------------------
+// Integrates position += velocity * dt for a range [start, end).
+// Marked @pure: no side-effects outside the arrays it writes.
+
+@pure
+fn system_physics(x: ptr[f64], y: ptr[f64], vx: ptr[f64], vy: ptr[f64],
+                  alive: ptr[i32], start: i32, end: i32, dt: f64) {
+    for i: i32 in range(start, end) {
+        if ptr_read_i32(alive, i) == 1 {
+            ptr_write_f64(x, i, ptr_read_f64(x, i) + ptr_read_f64(vx, i) * dt);
+            ptr_write_f64(y, i, ptr_read_f64(y, i) + ptr_read_f64(vy, i) * dt);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System: Bounce (wall collision)
+// ---------------------------------------------------------------------------
+// Reflects velocity when an entity exits the [0, 1000] bounding box.
+
+@pure
+fn system_bounce(x: ptr[f64], y: ptr[f64], vx: ptr[f64], vy: ptr[f64],
+                 alive: ptr[i32], start: i32, end: i32) {
+    for i: i32 in range(start, end) {
+        if ptr_read_i32(alive, i) == 1 {
+            let px: f64 = ptr_read_f64(x, i);
+            let py: f64 = ptr_read_f64(y, i);
+
+            if px < 0.0 {
+                ptr_write_f64(x, i, 0.0 - px);
+                ptr_write_f64(vx, i, 0.0 - ptr_read_f64(vx, i));
+            }
+            if px > 1000.0 {
+                ptr_write_f64(x, i, 2000.0 - px);
+                ptr_write_f64(vx, i, 0.0 - ptr_read_f64(vx, i));
+            }
+
+            if py < 0.0 {
+                ptr_write_f64(y, i, 0.0 - py);
+                ptr_write_f64(vy, i, 0.0 - ptr_read_f64(vy, i));
+            }
+            if py > 1000.0 {
+                ptr_write_f64(y, i, 2000.0 - py);
+                ptr_write_f64(vy, i, 0.0 - ptr_read_f64(vy, i));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// System: Spawn
+// ---------------------------------------------------------------------------
+// Activates the entity at index `id` with the given position and velocity.
+
+@pure
+fn entity_spawn(x: ptr[f64], y: ptr[f64], vx: ptr[f64], vy: ptr[f64],
+                alive: ptr[i32], id: i32,
+                px: f64, py: f64, dvx: f64, dvy: f64) {
+    ptr_write_f64(x, id, px);
+    ptr_write_f64(y, id, py);
+    ptr_write_f64(vx, id, dvx);
+    ptr_write_f64(vy, id, dvy);
+    ptr_write_i32(alive, id, 1);
+}
+
+// ---------------------------------------------------------------------------
+// System: Despawn
+// ---------------------------------------------------------------------------
+// Marks entity `id` as dead (alive = 0).
+
+@pure
+fn entity_despawn(alive: ptr[i32], id: i32) {
+    ptr_write_i32(alive, id, 0);
+}
+
+// ---------------------------------------------------------------------------
+// LCG pseudo-random number generator
+// ---------------------------------------------------------------------------
+// Returns a pseudo-random f64 in [0, max) given a seed stored as i64.
+// Updates the seed in-place via ptr_write_i64.
+
+fn lcg_next_f64(seed_ptr: ptr[i64], max: f64) -> f64 {
+    let s: i64 = ptr_read_i64(seed_ptr, 0);
+    // LCG: seed = seed * 6364136223846793005 + 1442695040888963407
+    s = s * 6364136223846793005 + 1442695040888963407;
+    ptr_write_i64(seed_ptr, 0, s);
+    // Take bits [16..48] for a 32-bit value, map to [0, max).
+    let bits: i64 = lshr(s, 16);
+    let masked: i64 = band(bits, 2147483647);  // 0x7FFFFFFF
+    let fval: f64 = to_f64_i64(masked);
+    return fval * max / 2147483647.0;
+}
+
+// ---------------------------------------------------------------------------
+// Parallel physics helper
+// ---------------------------------------------------------------------------
+// This wrapper has the (ptr, i32, i32) signature required by job_dispatch.
+// It reads the SOA base pointers from a packed parameter block.
+// NOTE: AXIOM's job_dispatch passes a single data pointer; since we cannot
+// yet read/write pointer values through memory, we call system_physics
+// directly and partition work manually to show where parallelism applies.
+
+fn physics_chunk(x: ptr[f64], y: ptr[f64], vx: ptr[f64], vy: ptr[f64],
+                 alive: ptr[i32], n: i32, dt: f64, num_chunks: i32) {
+    let chunk_size: i32 = n / num_chunks;
+    for c: i32 in range(0, num_chunks) {
+        let cstart: i32 = c * chunk_size;
+        let cend: i32 = cstart + chunk_size;
+        if c == num_chunks - 1 {
+            cend = n;
+        }
+        // Each chunk is independent and could be dispatched to a thread.
+        system_physics(x, y, vx, vy, alive, cstart, cend, dt);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main: game loop
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    let n: i32 = 10000;
+    let dt: f64 = 0.016;
+    let ticks: i32 = 1000;
+    let world_size: f64 = 1000.0;
+    let num_chunks: i32 = 4;
+
+    print("ECS Demo: 10000 entities, 1000 ticks");
+
+    // -----------------------------------------------------------------------
+    // Arena allocation (single 4 MB block, zero per-frame mallocs)
+    // -----------------------------------------------------------------------
+    let arena: ptr[i32] = arena_create(4194304);
+
+    // SOA component arrays — all contiguous in the arena
+    let x:     ptr[f64] = arena_alloc(arena, n, 8);
+    let y:     ptr[f64] = arena_alloc(arena, n, 8);
+    let vx:    ptr[f64] = arena_alloc(arena, n, 8);
+    let vy:    ptr[f64] = arena_alloc(arena, n, 8);
+    let alive: ptr[i32] = arena_alloc(arena, n, 4);
+
+    // RNG seed (stored in a 1-element i64 array so lcg_next_f64 can mutate it)
+    let seed_ptr: ptr[i64] = arena_alloc(arena, 1, 8);
+    ptr_write_i64(seed_ptr, 0, 123456789);
+
+    // -----------------------------------------------------------------------
+    // Initialize 10,000 entities with pseudo-random positions & velocities
+    // -----------------------------------------------------------------------
+    for i: i32 in range(0, n) {
+        let px: f64 = lcg_next_f64(seed_ptr, world_size);
+        let py: f64 = lcg_next_f64(seed_ptr, world_size);
+        let dvx: f64 = lcg_next_f64(seed_ptr, 200.0) - 100.0;
+        let dvy: f64 = lcg_next_f64(seed_ptr, 200.0) - 100.0;
+        entity_spawn(x, y, vx, vy, alive, i, px, py, dvx, dvy);
+    }
+
+    // Count initial alive
+    let alive_count: i32 = 0;
+    for i: i32 in range(0, n) {
+        if ptr_read_i32(alive, i) == 1 {
+            alive_count = alive_count + 1;
+        }
+    }
+    print("Initial alive entities:");
+    print_i32(alive_count);
+
+    // -----------------------------------------------------------------------
+    // Game loop: 1000 ticks
+    // -----------------------------------------------------------------------
+    for tick: i32 in range(0, ticks) {
+
+        // --- Physics system (chunked for parallelism) ---
+        physics_chunk(x, y, vx, vy, alive, n, dt, num_chunks);
+
+        // --- Bounce system ---
+        system_bounce(x, y, vx, vy, alive, 0, n);
+
+        // --- Spawn/despawn every 100 ticks ---
+        if tick % 100 == 0 {
+            // Despawn entities [0..50)
+            for i: i32 in range(0, 50) {
+                entity_despawn(alive, i + (tick / 100) * 50);
+            }
+            // Respawn them at new random positions
+            for i: i32 in range(0, 50) {
+                let id: i32 = i + (tick / 100) * 50;
+                if id < n {
+                    let px: f64 = lcg_next_f64(seed_ptr, world_size);
+                    let py: f64 = lcg_next_f64(seed_ptr, world_size);
+                    let dvx: f64 = lcg_next_f64(seed_ptr, 100.0) - 50.0;
+                    let dvy: f64 = lcg_next_f64(seed_ptr, 100.0) - 50.0;
+                    entity_spawn(x, y, vx, vy, alive, id, px, py, dvx, dvy);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Final statistics
+    // -----------------------------------------------------------------------
+    alive_count = 0;
+    for i: i32 in range(0, n) {
+        if ptr_read_i32(alive, i) == 1 {
+            alive_count = alive_count + 1;
+        }
+    }
+    print("Final alive entities:");
+    print_i32(alive_count);
+
+    // Checksum: sum of all positions (for determinism verification)
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        if ptr_read_i32(alive, i) == 1 {
+            checksum = checksum + ptr_read_f64(x, i) + ptr_read_f64(y, i);
+        }
+    }
+    print("Position checksum:");
+    print_f64(checksum);
+
+    // -----------------------------------------------------------------------
+    // Cleanup
+    // -----------------------------------------------------------------------
+    arena_destroy(arena);
+    print("ECS demo complete.");
+    return 0;
+}
