@@ -1794,3 +1794,47 @@ void axiom_string_print(long long s) {
     fwrite(axiom_string_table[idx], 1, (size_t)len, stdout);
     fputc('\n', stdout);
 }
+
+/* ── CPUID Feature Detection ─────────────────────────────────────── */
+/*
+ * Returns a bitmask of available CPU features:
+ *   Bit 0: SSE4.2
+ *   Bit 1: AVX
+ *   Bit 2: AVX2
+ *   Bit 3: AVX-512F
+ */
+
+#if defined(_WIN32)
+#include <intrin.h>
+int axiom_cpu_features(void) {
+    int info[4];
+    int features = 0;
+    __cpuid(info, 1);
+    if (info[2] & (1 << 20)) features |= 1;  /* SSE4.2 */
+    if (info[2] & (1 << 28)) features |= 2;  /* AVX */
+    __cpuidex(info, 7, 0);
+    if (info[1] & (1 << 5))  features |= 4;  /* AVX2 */
+    if (info[1] & (1 << 16)) features |= 8;  /* AVX-512F */
+    return features;
+}
+#elif defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
+int axiom_cpu_features(void) {
+    unsigned int eax, ebx, ecx, edx;
+    int features = 0;
+    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx)) {
+        if (ecx & (1 << 20)) features |= 1;  /* SSE4.2 */
+        if (ecx & (1 << 28)) features |= 2;  /* AVX */
+    }
+    if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
+        if (ebx & (1 << 5))  features |= 4;  /* AVX2 */
+        if (ebx & (1 << 16)) features |= 8;  /* AVX-512F */
+    }
+    return features;
+}
+#else
+/* Non-x86 platforms: no SIMD features detected */
+int axiom_cpu_features(void) {
+    return 0;
+}
+#endif
