@@ -116,6 +116,10 @@ struct CodegenContext {
     needs_fabs_f64: bool,
     /// Whether the `@llvm.memset.p0.i64` intrinsic is needed.
     needs_memset: bool,
+    /// Whether the `@llvm.fshl.i32` intrinsic is needed (rotate left).
+    needs_fshl_i32: bool,
+    /// Whether the `@llvm.fshr.i32` intrinsic is needed (rotate right).
+    needs_fshr_i32: bool,
     /// Collected errors.
     errors: Vec<CodegenError>,
     /// Whether the current basic block has been terminated (ret or br).
@@ -164,6 +168,8 @@ impl CodegenContext {
             needs_abs_i32: false,
             needs_fabs_f64: false,
             needs_memset: false,
+            needs_fshl_i32: false,
+            needs_fshr_i32: false,
             errors: Vec::new(),
             block_terminated: false,
             current_return_type: String::new(),
@@ -399,6 +405,18 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         let _ = writeln!(
             ctx.output,
             "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"
+        );
+    }
+    if ctx.needs_fshl_i32 {
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @llvm.fshl.i32(i32, i32, i32)"
+        );
+    }
+    if ctx.needs_fshr_i32 {
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @llvm.fshr.i32(i32, i32, i32)"
         );
     }
 
@@ -1728,6 +1746,15 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "pow" => return emit_builtin_pow(ctx, args),
             "to_f64" => return emit_builtin_to_f64(ctx, args),
             "to_f64_i64" => return emit_builtin_to_f64_i64(ctx, args),
+            "band" => return emit_builtin_band(ctx, args),
+            "bor" => return emit_builtin_bor(ctx, args),
+            "bxor" => return emit_builtin_bxor(ctx, args),
+            "shl" => return emit_builtin_shl(ctx, args),
+            "shr" => return emit_builtin_shr(ctx, args),
+            "lshr" => return emit_builtin_lshr(ctx, args),
+            "bnot" => return emit_builtin_bnot(ctx, args),
+            "rotl" => return emit_builtin_rotl(ctx, args),
+            "rotr" => return emit_builtin_rotr(ctx, args),
             _ => {}
         }
 
@@ -2294,6 +2321,233 @@ fn emit_builtin_to_f64_i64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVa
     LlvmValue {
         reg: result_reg,
         ty: "double".to_string(),
+    }
+}
+
+// ── Bitwise builtins ────────────────────────────────────────────────
+
+/// Emit built-in `band(a, b)` -- bitwise AND.
+fn emit_builtin_band(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "band() requires exactly 2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], None);
+    let b = emit_expr(ctx, &args[1], Some(&a.ty));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{result_reg} = and {} {}, {}", a.ty, a.reg, b.reg));
+    LlvmValue {
+        reg: result_reg,
+        ty: a.ty,
+    }
+}
+
+/// Emit built-in `bor(a, b)` -- bitwise OR.
+fn emit_builtin_bor(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "bor() requires exactly 2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], None);
+    let b = emit_expr(ctx, &args[1], Some(&a.ty));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{result_reg} = or {} {}, {}", a.ty, a.reg, b.reg));
+    LlvmValue {
+        reg: result_reg,
+        ty: a.ty,
+    }
+}
+
+/// Emit built-in `bxor(a, b)` -- bitwise XOR.
+fn emit_builtin_bxor(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "bxor() requires exactly 2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], None);
+    let b = emit_expr(ctx, &args[1], Some(&a.ty));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{result_reg} = xor {} {}, {}", a.ty, a.reg, b.reg));
+    LlvmValue {
+        reg: result_reg,
+        ty: a.ty,
+    }
+}
+
+/// Emit built-in `shl(a, n)` -- shift left.
+fn emit_builtin_shl(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "shl() requires exactly 2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], None);
+    let n = emit_expr(ctx, &args[1], Some(&a.ty));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{result_reg} = shl {} {}, {}", a.ty, a.reg, n.reg));
+    LlvmValue {
+        reg: result_reg,
+        ty: a.ty,
+    }
+}
+
+/// Emit built-in `shr(a, n)` -- arithmetic shift right (sign-preserving).
+fn emit_builtin_shr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "shr() requires exactly 2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], None);
+    let n = emit_expr(ctx, &args[1], Some(&a.ty));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = ashr {} {}, {}",
+        a.ty, a.reg, n.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: a.ty,
+    }
+}
+
+/// Emit built-in `lshr(a, n)` -- logical shift right (zero-fill).
+fn emit_builtin_lshr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "lshr() requires exactly 2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], None);
+    let n = emit_expr(ctx, &args[1], Some(&a.ty));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = lshr {} {}, {}",
+        a.ty, a.reg, n.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: a.ty,
+    }
+}
+
+/// Emit built-in `bnot(a)` -- bitwise NOT (xor with -1).
+fn emit_builtin_bnot(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "bnot() requires exactly 1 argument".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], None);
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = xor {} {}, -1",
+        a.ty, a.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: a.ty,
+    }
+}
+
+/// Emit built-in `rotl(a, n)` -- rotate left using `@llvm.fshl.i32`.
+fn emit_builtin_rotl(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_fshl_i32 = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "rotl() requires exactly 2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], Some("i32"));
+    let n = emit_expr(ctx, &args[1], Some("i32"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @llvm.fshl.i32(i32 {}, i32 {}, i32 {})",
+        a.reg, a.reg, n.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `rotr(a, n)` -- rotate right using `@llvm.fshr.i32`.
+fn emit_builtin_rotr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_fshr_i32 = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "rotr() requires exactly 2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], Some("i32"));
+    let n = emit_expr(ctx, &args[1], Some("i32"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @llvm.fshr.i32(i32 {}, i32 {}, i32 {})",
+        a.reg, a.reg, n.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
     }
 }
 
@@ -5258,6 +5512,176 @@ fn main() -> i32 {
         assert!(
             ir.contains("add nsw i32"),
             "loop increment should have nsw: {ir}"
+        );
+    }
+
+    // --- Test: bitwise builtins ---
+
+    #[test]
+    fn test_bitwise_builtins() {
+        // Test band, bor, bxor, shl, shr, lshr, bnot
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // band(0xFF, 0x0F) = 15
+                    stmt(HirStmtKind::Let {
+                        name: "b_and".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("band", vec![int_lit(0xFF), int_lit(0x0F)]),
+                        mutable: false,
+                    }),
+                    // bor(0xF0, 0x0F) = 255
+                    stmt(HirStmtKind::Let {
+                        name: "b_or".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("bor", vec![int_lit(0xF0), int_lit(0x0F)]),
+                        mutable: false,
+                    }),
+                    // bxor(0xFF, 0x0F) = 240
+                    stmt(HirStmtKind::Let {
+                        name: "b_xor".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("bxor", vec![int_lit(0xFF), int_lit(0x0F)]),
+                        mutable: false,
+                    }),
+                    // shl(1, 8) = 256
+                    stmt(HirStmtKind::Let {
+                        name: "shifted_l".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("shl", vec![int_lit(1), int_lit(8)]),
+                        mutable: false,
+                    }),
+                    // shr(256, 4) = 16
+                    stmt(HirStmtKind::Let {
+                        name: "shifted_r".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("shr", vec![int_lit(256), int_lit(4)]),
+                        mutable: false,
+                    }),
+                    // lshr(256, 4) = 16
+                    stmt(HirStmtKind::Let {
+                        name: "shifted_lr".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("lshr", vec![int_lit(256), int_lit(4)]),
+                        mutable: false,
+                    }),
+                    // bnot(0) = -1
+                    stmt(HirStmtKind::Let {
+                        name: "b_not".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("bnot", vec![int_lit(0)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // band: LLVM `and`
+        assert!(
+            ir.contains("= and i64"),
+            "band should emit LLVM `and`: {ir}"
+        );
+        // bor: LLVM `or`
+        assert!(
+            ir.contains("= or i64"),
+            "bor should emit LLVM `or`: {ir}"
+        );
+        // bxor: LLVM `xor` (for values, not bnot)
+        assert!(
+            ir.contains("= xor i64") && ir.contains("255, 15"),
+            "bxor should emit LLVM `xor`: {ir}"
+        );
+        // shl: LLVM `shl`
+        assert!(
+            ir.contains("= shl i64"),
+            "shl should emit LLVM `shl`: {ir}"
+        );
+        // shr: LLVM `ashr`
+        assert!(
+            ir.contains("= ashr i64"),
+            "shr should emit LLVM `ashr`: {ir}"
+        );
+        // lshr: LLVM `lshr`
+        assert!(
+            ir.contains("= lshr i64"),
+            "lshr should emit LLVM `lshr`: {ir}"
+        );
+        // bnot: LLVM `xor %val, -1`
+        assert!(
+            ir.contains("xor i64 0, -1"),
+            "bnot should emit LLVM `xor %val, -1`: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_bitwise_rotate_builtins() {
+        // Test rotl and rotr which use LLVM funnel shift intrinsics.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // rotl(0x80000001, 1) = 3
+                    stmt(HirStmtKind::Let {
+                        name: "rot_l".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("rotl", vec![int_lit(0x80000001_u32 as i128), int_lit(1)]),
+                        mutable: false,
+                    }),
+                    // rotr(3, 1) = 0x80000001
+                    stmt(HirStmtKind::Let {
+                        name: "rot_r".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: call("rotr", vec![int_lit(3), int_lit(1)]),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+
+        // rotl: @llvm.fshl.i32
+        assert!(
+            ir.contains("call i32 @llvm.fshl.i32(i32"),
+            "rotl should call llvm.fshl.i32: {ir}"
+        );
+        assert!(
+            ir.contains("declare i32 @llvm.fshl.i32(i32, i32, i32)"),
+            "should declare llvm.fshl.i32: {ir}"
+        );
+
+        // rotr: @llvm.fshr.i32
+        assert!(
+            ir.contains("call i32 @llvm.fshr.i32(i32"),
+            "rotr should call llvm.fshr.i32: {ir}"
+        );
+        assert!(
+            ir.contains("declare i32 @llvm.fshr.i32(i32, i32, i32)"),
+            "should declare llvm.fshr.i32: {ir}"
         );
     }
 }

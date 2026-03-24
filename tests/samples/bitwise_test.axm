@@ -1,0 +1,58 @@
+@module bitwise_test;
+@intent("Test all bitwise builtins: band, bor, bxor, shl, shr, lshr, bnot, rotl, rotr");
+
+fn main() -> i32 {
+    // Test band (bitwise AND).
+    let a1: i32 = band(255, 15);
+    print("band(0xFF, 0x0F):");
+    print_i32(a1);
+
+    // Test bor (bitwise OR).
+    let a2: i32 = bor(240, 15);
+    print("bor(0xF0, 0x0F):");
+    print_i32(a2);
+
+    // Test bxor (bitwise XOR).
+    let a3: i32 = bxor(255, 15);
+    print("bxor(0xFF, 0x0F):");
+    print_i32(a3);
+
+    // Test shl (shift left).
+    let s1: i32 = shl(1, 8);
+    print("shl(1, 8):");
+    print_i32(s1);
+
+    // Test shr (arithmetic shift right).
+    let s2: i32 = shr(256, 4);
+    print("shr(256, 4):");
+    print_i32(s2);
+
+    // Test lshr (logical shift right).
+    let s3: i32 = lshr(256, 4);
+    print("lshr(256, 4):");
+    print_i32(s3);
+
+    // Test bnot (bitwise NOT).
+    let n1: i32 = bnot(0);
+    print("bnot(0):");
+    print_i32(n1);
+
+    // Test rotl (rotate left).
+    let r1: i32 = rotl(1, 1);
+    print("rotl(1, 1):");
+    print_i32(r1);
+
+    // Test rotr (rotate right).
+    let r2: i32 = rotr(1, 1);
+    print("rotr(1, 1):");
+    print_i32(r2);
+
+    // Combined: extract bits 4..7 using shift + mask.
+    let val: i32 = 0xABCD;
+    let nibble: i32 = band(shr(val, 4), 15);
+    print("nibble extraction:");
+    print_i32(nibble);
+
+    print("All bitwise builtin tests complete.");
+    return 0;
+}
