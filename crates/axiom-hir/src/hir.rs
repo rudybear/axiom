@@ -411,6 +411,14 @@ pub enum HirType {
     Ptr {
         element: Box<HirType>,
     },
+    /// Readonly pointer type — can only be read from, not written to.
+    ReadonlyPtr {
+        element: Box<HirType>,
+    },
+    /// Writeonly pointer type — can only be written to, not read from.
+    WriteonlyPtr {
+        element: Box<HirType>,
+    },
     /// Tuple type.
     Tuple {
         elements: Vec<HirType>,

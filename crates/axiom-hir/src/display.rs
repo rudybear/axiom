@@ -338,6 +338,8 @@ impl fmt::Display for HirType {
             }
             Self::Slice { element } => write!(f, "slice[{element}]"),
             Self::Ptr { element } => write!(f, "ptr[{element}]"),
+            Self::ReadonlyPtr { element } => write!(f, "readonly_ptr[{element}]"),
+            Self::WriteonlyPtr { element } => write!(f, "writeonly_ptr[{element}]"),
             Self::Tuple { elements } => {
                 write!(f, "(")?;
                 for (i, elem) in elements.iter().enumerate() {

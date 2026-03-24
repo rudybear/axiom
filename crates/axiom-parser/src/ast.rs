@@ -70,6 +70,8 @@ pub enum TypeExpr {
     Array(Box<TypeExpr>, Box<Expr>),         // array[f32, 1024]
     Slice(Box<TypeExpr>),                    // slice[f32]
     Ptr(Box<TypeExpr>),                      // ptr[f32]
+    ReadonlyPtr(Box<TypeExpr>),              // readonly_ptr[f32]
+    WriteonlyPtr(Box<TypeExpr>),             // writeonly_ptr[f32]
     Tuple(Vec<TypeExpr>),                    // (i32, f64)
     Fn(Vec<TypeExpr>, Box<TypeExpr>),        // fn(i32) -> i64
 }

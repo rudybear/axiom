@@ -553,6 +553,112 @@ int axiom_num_cores(void) {
     return (int)si.dwNumberOfProcessors;
 }
 
+/* ── Job handles & dependency graph ────────────────────────────────── */
+
+#define AXIOM_MAX_JOB_HANDLES 256
+
+typedef struct {
+    volatile LONG complete;     /* 0 = pending, 1 = done */
+    int           dependency;   /* -1 = none, else handle index to wait for */
+    volatile LONG pending;      /* number of sub-jobs still running */
+} AxiomJobHandle;
+
+static AxiomJobHandle axiom_job_handles[AXIOM_MAX_JOB_HANDLES];
+static volatile LONG  axiom_next_job_handle = 0;
+
+static int axiom_alloc_handle(int dep) {
+    LONG idx = InterlockedIncrement(&axiom_next_job_handle) - 1;
+    idx = idx % AXIOM_MAX_JOB_HANDLES;
+    axiom_job_handles[idx].complete = 0;
+    axiom_job_handles[idx].dependency = dep;
+    axiom_job_handles[idx].pending = 0;
+    return (int)idx;
+}
+
+/* Wrapper that decrements the handle's pending counter and marks complete. */
+typedef struct {
+    AxiomJobFunc func;
+    void        *data;
+    int          start;
+    int          end;
+    int          handle;
+} AxiomHandleJob;
+
+static AxiomHandleJob axiom_handle_jobs[AXIOM_JOB_QUEUE_SIZE];
+static volatile LONG  axiom_next_handle_job = 0;
+
+static void axiom_handle_job_wrapper(void *arg, int start, int end) {
+    AxiomHandleJob *hj = (AxiomHandleJob *)arg;
+    hj->func(hj->data, start, end);
+    if (InterlockedDecrement(&axiom_job_handles[hj->handle].pending) == 0) {
+        InterlockedExchange(&axiom_job_handles[hj->handle].complete, 1);
+        WakeAllConditionVariable(&axiom_job_done_cv);
+    }
+}
+
+int axiom_job_dispatch_handle(AxiomJobFunc func, void *data, int total_items) {
+    int handle = axiom_alloc_handle(-1);
+    int chunk, start, end;
+    if (total_items <= 0 || axiom_num_workers <= 0) {
+        InterlockedExchange(&axiom_job_handles[handle].complete, 1);
+        return handle;
+    }
+    chunk = (total_items + axiom_num_workers - 1) / axiom_num_workers;
+
+    EnterCriticalSection(&axiom_job_queue_cs);
+    for (start = 0; start < total_items; start += chunk) {
+        LONG slot;
+        end = start + chunk;
+        if (end > total_items) end = total_items;
+
+        InterlockedIncrement(&axiom_job_handles[handle].pending);
+
+        slot = InterlockedIncrement(&axiom_next_handle_job) - 1;
+        slot = slot % AXIOM_JOB_QUEUE_SIZE;
+        axiom_handle_jobs[slot].func   = func;
+        axiom_handle_jobs[slot].data   = data;
+        axiom_handle_jobs[slot].start  = start;
+        axiom_handle_jobs[slot].end    = end;
+        axiom_handle_jobs[slot].handle = handle;
+
+        axiom_job_queue[axiom_job_tail % AXIOM_JOB_QUEUE_SIZE].func  = axiom_handle_job_wrapper;
+        axiom_job_queue[axiom_job_tail % AXIOM_JOB_QUEUE_SIZE].data  = &axiom_handle_jobs[slot];
+        axiom_job_queue[axiom_job_tail % AXIOM_JOB_QUEUE_SIZE].start = start;
+        axiom_job_queue[axiom_job_tail % AXIOM_JOB_QUEUE_SIZE].end   = end;
+        axiom_job_tail++;
+        InterlockedIncrement((volatile LONG *)&axiom_jobs_pending);
+    }
+    LeaveCriticalSection(&axiom_job_queue_cs);
+    WakeAllConditionVariable(&axiom_job_queue_cv);
+    return handle;
+}
+
+int axiom_job_dispatch_after(AxiomJobFunc func, void *data, int total_items, int dep) {
+    int handle;
+    /* Wait for the dependency to complete first. */
+    if (dep >= 0 && dep < AXIOM_MAX_JOB_HANDLES) {
+        while (!axiom_job_handles[dep].complete) {
+            EnterCriticalSection(&axiom_job_queue_cs);
+            if (!axiom_job_handles[dep].complete) {
+                SleepConditionVariableCS(&axiom_job_done_cv, &axiom_job_queue_cs, INFINITE);
+            }
+            LeaveCriticalSection(&axiom_job_queue_cs);
+        }
+    }
+    handle = axiom_job_dispatch_handle(func, data, total_items);
+    axiom_job_handles[handle].dependency = dep;
+    return handle;
+}
+
+void axiom_job_wait_handle(int handle) {
+    if (handle < 0 || handle >= AXIOM_MAX_JOB_HANDLES) return;
+    EnterCriticalSection(&axiom_job_queue_cs);
+    while (!axiom_job_handles[handle].complete) {
+        SleepConditionVariableCS(&axiom_job_done_cv, &axiom_job_queue_cs, INFINITE);
+    }
+    LeaveCriticalSection(&axiom_job_queue_cs);
+}
+
 #else /* POSIX ----------------------------------------------------------- */
 
 #include <pthread.h>
@@ -767,6 +873,111 @@ void axiom_jobs_shutdown(void) {
 int axiom_num_cores(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int)n : 1;
+}
+
+/* ── Job handles & dependency graph (POSIX) ────────────────────────── */
+
+#define AXIOM_MAX_JOB_HANDLES 256
+
+typedef struct {
+    volatile int complete;      /* 0 = pending, 1 = done */
+    int          dependency;    /* -1 = none, else handle index to wait for */
+    volatile int pending;       /* number of sub-jobs still running */
+} AxiomJobHandle;
+
+static AxiomJobHandle axiom_job_handles[AXIOM_MAX_JOB_HANDLES];
+static volatile int   axiom_next_job_handle = 0;
+
+static int axiom_alloc_handle(int dep) {
+    int idx = __atomic_fetch_add(&axiom_next_job_handle, 1, __ATOMIC_SEQ_CST);
+    idx = idx % AXIOM_MAX_JOB_HANDLES;
+    axiom_job_handles[idx].complete = 0;
+    axiom_job_handles[idx].dependency = dep;
+    axiom_job_handles[idx].pending = 0;
+    return idx;
+}
+
+typedef struct {
+    AxiomJobFunc func;
+    void        *data;
+    int          start;
+    int          end;
+    int          handle;
+} AxiomHandleJob;
+
+static AxiomHandleJob axiom_handle_jobs[AXIOM_JOB_QUEUE_SIZE];
+static volatile int   axiom_next_handle_job = 0;
+
+static void axiom_handle_job_wrapper(void *arg, int start, int end) {
+    AxiomHandleJob *hj = (AxiomHandleJob *)arg;
+    hj->func(hj->data, start, end);
+    if (__atomic_sub_fetch(&axiom_job_handles[hj->handle].pending, 1, __ATOMIC_SEQ_CST) == 0) {
+        __atomic_store_n(&axiom_job_handles[hj->handle].complete, 1, __ATOMIC_SEQ_CST);
+        pthread_cond_broadcast(&axiom_job_done_cv);
+    }
+}
+
+int axiom_job_dispatch_handle(AxiomJobFunc func, void *data, int total_items) {
+    int handle = axiom_alloc_handle(-1);
+    int chunk, start, end;
+    if (total_items <= 0 || axiom_num_workers <= 0) {
+        __atomic_store_n(&axiom_job_handles[handle].complete, 1, __ATOMIC_SEQ_CST);
+        return handle;
+    }
+    chunk = (total_items + axiom_num_workers - 1) / axiom_num_workers;
+
+    pthread_mutex_lock(&axiom_job_queue_mtx);
+    for (start = 0; start < total_items; start += chunk) {
+        int slot;
+        end = start + chunk;
+        if (end > total_items) end = total_items;
+
+        __atomic_add_fetch(&axiom_job_handles[handle].pending, 1, __ATOMIC_SEQ_CST);
+
+        slot = __atomic_fetch_add(&axiom_next_handle_job, 1, __ATOMIC_SEQ_CST);
+        slot = slot % AXIOM_JOB_QUEUE_SIZE;
+        axiom_handle_jobs[slot].func   = func;
+        axiom_handle_jobs[slot].data   = data;
+        axiom_handle_jobs[slot].start  = start;
+        axiom_handle_jobs[slot].end    = end;
+        axiom_handle_jobs[slot].handle = handle;
+
+        axiom_job_queue[axiom_job_tail % AXIOM_JOB_QUEUE_SIZE].func  = axiom_handle_job_wrapper;
+        axiom_job_queue[axiom_job_tail % AXIOM_JOB_QUEUE_SIZE].data  = &axiom_handle_jobs[slot];
+        axiom_job_queue[axiom_job_tail % AXIOM_JOB_QUEUE_SIZE].start = start;
+        axiom_job_queue[axiom_job_tail % AXIOM_JOB_QUEUE_SIZE].end   = end;
+        axiom_job_tail++;
+        __atomic_add_fetch(&axiom_jobs_pending, 1, __ATOMIC_SEQ_CST);
+    }
+    pthread_mutex_unlock(&axiom_job_queue_mtx);
+    pthread_cond_broadcast(&axiom_job_queue_cv);
+    return handle;
+}
+
+int axiom_job_dispatch_after(AxiomJobFunc func, void *data, int total_items, int dep) {
+    int handle;
+    /* Wait for the dependency to complete first. */
+    if (dep >= 0 && dep < AXIOM_MAX_JOB_HANDLES) {
+        while (!__atomic_load_n(&axiom_job_handles[dep].complete, __ATOMIC_SEQ_CST)) {
+            pthread_mutex_lock(&axiom_job_queue_mtx);
+            if (!__atomic_load_n(&axiom_job_handles[dep].complete, __ATOMIC_SEQ_CST)) {
+                pthread_cond_wait(&axiom_job_done_cv, &axiom_job_queue_mtx);
+            }
+            pthread_mutex_unlock(&axiom_job_queue_mtx);
+        }
+    }
+    handle = axiom_job_dispatch_handle(func, data, total_items);
+    axiom_job_handles[handle].dependency = dep;
+    return handle;
+}
+
+void axiom_job_wait_handle(int handle) {
+    if (handle < 0 || handle >= AXIOM_MAX_JOB_HANDLES) return;
+    pthread_mutex_lock(&axiom_job_queue_mtx);
+    while (!__atomic_load_n(&axiom_job_handles[handle].complete, __ATOMIC_SEQ_CST)) {
+        pthread_cond_wait(&axiom_job_done_cv, &axiom_job_queue_mtx);
+    }
+    pthread_mutex_unlock(&axiom_job_queue_mtx);
 }
 
 #endif /* _WIN32 / POSIX -- threading */
