@@ -1507,7 +1507,10 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// Parse a let binding: `let [mut] name: Type = expr;`.
+    /// Parse a let binding: `let [mut] name: Type [= expr];`.
+    ///
+    /// The initializer is optional. `let a: Vec3;` declares `a` with a
+    /// zero-initialized value (no explicit `= expr`).
     fn parse_let_stmt(&mut self) -> Spanned<Stmt> {
         let start_span = self.current_span();
         self.advance(); // consume `let`
@@ -1523,8 +1526,13 @@ impl<'src> Parser<'src> {
 
         self.expect(&TokenKind::Colon, "':'");
         let ty = self.parse_type_expr();
-        self.expect(&TokenKind::Assign, "'='");
-        let value = self.parse_expr();
+
+        // Initializer is optional: `let x: i32 = 42;` or `let v: Vec3;`
+        let value = if self.eat(&TokenKind::Assign) {
+            Some(self.parse_expr())
+        } else {
+            None
+        };
         self.expect_semicolon();
 
         let end_span = self.prev_span();
@@ -2544,7 +2552,7 @@ fn foo() -> i32 {
             } => {
                 assert_eq!(name.node, "x");
                 assert!(matches!(ty, TypeExpr::Named(ref n) if n == "i32"));
-                assert!(matches!(value, Expr::IntLiteral(42)));
+                assert!(matches!(value, Some(Expr::IntLiteral(42))));
                 assert!(!mutable);
             }
             _ => panic!("expected let statement"),
@@ -3055,6 +3063,7 @@ fn main() -> i32 {
                     "expected array type, got {:?}",
                     ty
                 );
+                let value = value.expect("expected initializer");
                 assert!(
                     matches!(&value, Expr::ArrayZeros { element_type, size }
                         if matches!(element_type, TypeExpr::Named(ref n) if n == "i32")

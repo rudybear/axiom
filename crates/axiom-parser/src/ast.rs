@@ -95,7 +95,7 @@ pub enum Stmt {
     Let {
         name: Spanned<String>,
         ty: TypeExpr,
-        value: Expr,
+        value: Option<Expr>,
         mutable: bool,
     },
     Assign {

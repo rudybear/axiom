@@ -406,7 +406,7 @@ impl LoweringContext {
                 name: name.node.clone(),
                 name_span: name.span,
                 ty: self.lower_type(ty, name.span),
-                value: self.lower_expr(value, span),
+                value: value.as_ref().map(|v| self.lower_expr(v, span)),
                 mutable: *mutable,
             },
             ast::Stmt::Assign { target, value } => HirStmtKind::Assign {
@@ -1174,7 +1174,7 @@ struct Point {
                                             Span::new(20, 21),
                                         ),
                                         ty: ast::TypeExpr::Named("i32".to_string()),
-                                        value: ast::Expr::IntLiteral(42),
+                                        value: Some(ast::Expr::IntLiteral(42)),
                                         mutable: false,
                                     },
                                     Span::new(20, 30),
@@ -1187,7 +1187,7 @@ struct Point {
                                             Span::new(30, 31),
                                         ),
                                         ty: ast::TypeExpr::Named("f64".to_string()),
-                                        value: ast::Expr::FloatLiteral(3.14),
+                                        value: Some(ast::Expr::FloatLiteral(3.14)),
                                         mutable: true,
                                     },
                                     Span::new(30, 40),
@@ -1388,7 +1388,9 @@ struct Point {
 
             for stmt in stmts {
                 let found = match &stmt.kind {
-                    HirStmtKind::Let { value, .. } => check_expr(value, kind_check),
+                    HirStmtKind::Let { value, .. } => {
+                        value.as_ref().is_some_and(|v| check_expr(v, kind_check))
+                    }
                     HirStmtKind::Assign { target, value } => {
                         check_expr(target, kind_check) || check_expr(value, kind_check)
                     }
