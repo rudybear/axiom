@@ -190,16 +190,17 @@ fn write_stmt(f: &mut fmt::Formatter<'_>, stmt: &HirStmt, indent: usize) -> fmt:
             mutable,
             ..
         } => {
-            if *mutable {
+            let mut_kw = if *mutable { "mut " } else { "" };
+            if let Some(val) = value {
                 writeln!(
                     f,
-                    "{prefix}let mut {name}: {ty} = {value};  // [node:{}]",
+                    "{prefix}let {mut_kw}{name}: {ty} = {val};  // [node:{}]",
                     stmt.id
                 )?;
             } else {
                 writeln!(
                     f,
-                    "{prefix}let {name}: {ty} = {value};  // [node:{}]",
+                    "{prefix}let {mut_kw}{name}: {ty};  // [node:{}]",
                     stmt.id
                 )?;
             }

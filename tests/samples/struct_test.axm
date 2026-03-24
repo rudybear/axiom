@@ -1,0 +1,37 @@
+@module struct_test;
+
+struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+@pure
+fn vec3_dot(a: Vec3, b: Vec3) -> f64 {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+@pure
+fn vec3_length_sq(v: Vec3) -> f64 {
+    return vec3_dot(v, v);
+}
+
+fn main() -> i32 {
+    let a: Vec3;
+    a.x = 3.0;
+    a.y = 4.0;
+    a.z = 0.0;
+
+    let len_sq: f64 = vec3_length_sq(a);
+    print_f64(len_sq);
+
+    let b: Vec3;
+    b.x = 1.0;
+    b.y = 0.0;
+    b.z = 0.0;
+
+    let dot: f64 = vec3_dot(a, b);
+    print_f64(dot);
+
+    return 0;
+}

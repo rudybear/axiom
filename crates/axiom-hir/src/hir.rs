@@ -237,7 +237,7 @@ pub struct HirStmt {
 /// Statement variants.
 #[derive(Debug, Clone)]
 pub enum HirStmtKind {
-    /// `let [mut] name: Type = value;`
+    /// `let [mut] name: Type [= value];`
     Let {
         /// Variable name.
         name: String,
@@ -245,8 +245,8 @@ pub enum HirStmtKind {
         name_span: Span,
         /// Variable type.
         ty: HirType,
-        /// Initializer expression.
-        value: HirExpr,
+        /// Initializer expression (None for declarations like `let v: Vec3;`).
+        value: Option<HirExpr>,
         /// Whether the binding is mutable.
         mutable: bool,
     },

@@ -17,8 +17,8 @@ use std::fmt::Write as _;
 
 use axiom_hir::{
     BinOp, HirAnnotation, HirAnnotationKind, HirBlock, HirExpr, HirExprKind,
-    HirExternFunction, HirFunction, HirModule, HirParam, HirStmt, HirStmtKind, HirType,
-    PrimitiveType, UnaryOp,
+    HirExternFunction, HirFunction, HirModule, HirParam, HirStmt, HirStmtKind, HirStruct,
+    HirType, PrimitiveType, UnaryOp,
 };
 
 use crate::error::CodegenError;
@@ -74,6 +74,17 @@ struct FuncInfo {
     uses_fastcc: bool,
     /// Optimization annotation flags.
     annotations: FuncAnnotations,
+}
+
+/// Codegen metadata for a user-defined struct type.
+#[derive(Debug, Clone)]
+struct StructInfo {
+    /// LLVM named type (e.g., `%struct.Vec3`).
+    llvm_name: String,
+    /// Field names and their LLVM types, in declaration order.
+    fields: Vec<(String, String)>,
+    /// Total size in bytes (sum of field sizes, no padding for now).
+    total_size: u64,
 }
 
 /// Result of emitting an expression -- an SSA register name or immediate.
@@ -134,6 +145,8 @@ struct CodegenContext {
     /// Whether arena builtins are used (arena_create/arena_alloc/etc.).
     /// When true, `@malloc` and `@free` declarations are also emitted.
     needs_arena: bool,
+    /// Registry of struct types (name → StructInfo).
+    struct_registry: HashMap<String, StructInfo>,
     /// Collected errors.
     errors: Vec<CodegenError>,
     /// Whether the current basic block has been terminated (ret or br).
@@ -189,6 +202,7 @@ impl CodegenContext {
             needs_realloc: false,
             needs_free: false,
             needs_arena: false,
+            struct_registry: HashMap::new(),
             errors: Vec::new(),
             block_terminated: false,
             current_return_type: String::new(),
@@ -260,6 +274,11 @@ impl CodegenContext {
 /// Returns the complete `.ll` file content on success, or a list of errors.
 pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     let mut ctx = CodegenContext::new();
+
+    // Register all struct types in the struct registry.
+    for s in &module.structs {
+        register_struct(&mut ctx, s);
+    }
 
     // Register all function signatures.
     for func in &module.functions {
@@ -352,6 +371,23 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     let target_triple = get_target_triple();
     let _ = writeln!(ctx.output, "target triple = \"{target_triple}\"");
     ctx.emit_blank();
+
+    // Emit struct type definitions (`%struct.Name = type { ... }`).
+    if !ctx.struct_registry.is_empty() {
+        // Collect struct defs sorted by name for deterministic output.
+        let mut struct_defs: Vec<_> = ctx.struct_registry.values().collect();
+        struct_defs.sort_by(|a, b| a.llvm_name.cmp(&b.llvm_name));
+        for info in &struct_defs {
+            let field_types: Vec<&str> = info.fields.iter().map(|(_, t)| t.as_str()).collect();
+            let _ = writeln!(
+                ctx.output,
+                "{} = type {{ {} }}",
+                info.llvm_name,
+                field_types.join(", ")
+            );
+        }
+        ctx.emit_blank();
+    }
 
     // Emit string literal globals.
     for (i, s) in ctx.string_literals.iter().enumerate() {
@@ -501,6 +537,35 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     Ok(ctx.output)
 }
 
+/// Register a struct type in the codegen context.
+///
+/// Builds the [`StructInfo`] from the HIR struct definition, computing field
+/// types and total byte size for `memset` zero-initialization.
+fn register_struct(ctx: &mut CodegenContext, s: &HirStruct) {
+    let llvm_name = format!("%struct.{}", s.name);
+    let mut fields = Vec::new();
+    let mut total_size: u64 = 0;
+    for field in &s.fields {
+        match hir_type_to_llvm(&field.ty) {
+            Ok(llvm_ty) => {
+                total_size += llvm_type_size(&llvm_ty);
+                fields.push((field.name.clone(), llvm_ty));
+            }
+            Err(e) => {
+                ctx.errors.push(e);
+            }
+        }
+    }
+    ctx.struct_registry.insert(
+        s.name.clone(),
+        StructInfo {
+            llvm_name,
+            fields,
+            total_size,
+        },
+    );
+}
+
 /// Extract optimization annotation flags from a function's annotations.
 fn extract_func_annotations(
     annotations: &[axiom_hir::HirAnnotation],
@@ -518,11 +583,14 @@ fn extract_func_annotations(
             _ => {}
         }
     }
-    // Check if any parameter is a pointer/array type (meaning the function reads arg memory).
+    // Check if any parameter is a pointer/array/struct type (meaning the function reads arg memory).
     annots.reads_arg_memory = params.iter().any(|p| {
         matches!(
             p.ty,
-            HirType::Array { .. } | HirType::Ptr { .. } | HirType::Slice { .. }
+            HirType::Array { .. }
+                | HirType::Ptr { .. }
+                | HirType::Slice { .. }
+                | HirType::UserDefined(_)
         )
     });
     annots
@@ -725,6 +793,23 @@ fn emit_param_allocas(ctx: &mut CodegenContext, params: &[HirParam]) {
                     }),
                 },
             );
+        } else if let HirType::UserDefined(ref struct_name) = param.ty {
+            // Struct parameters are passed by pointer. Store the pointer in
+            // an alloca so that field access GEPs can load from it.
+            let llvm_type = format!("%struct.{struct_name}");
+            ctx.emit(&format!("{alloca_name} = alloca ptr"));
+            ctx.emit(&format!(
+                "store ptr %{}, ptr {alloca_name}",
+                param.name
+            ));
+            ctx.variables.insert(
+                param.name.clone(),
+                VarInfo {
+                    alloca_name,
+                    llvm_type,
+                    array_info: None,
+                },
+            );
         } else {
             let llvm_type = match hir_type_to_llvm(&param.ty) {
                 Ok(t) => t,
@@ -766,7 +851,7 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
             ty,
             value,
             ..
-        } => emit_let(ctx, name, ty, value, &stmt.annotations),
+        } => emit_let(ctx, name, ty, value.as_ref(), &stmt.annotations),
         HirStmtKind::Assign { target, value } => emit_assign(ctx, target, value),
         HirStmtKind::Return { value } => emit_return(ctx, value),
         HirStmtKind::If {
@@ -812,11 +897,14 @@ fn is_heap_alloc_call(expr: &HirExpr) -> bool {
 /// When the let binding has `@lifetime(scope)` and the value is a `heap_alloc` call,
 /// the allocation is promoted from `malloc` to `alloca` (stack allocation), which
 /// eliminates the need for `free` and enables further LLVM optimizations.
+///
+/// When `value` is `None` (e.g., `let v: Vec3;`), the variable is zero-initialized
+/// via `memset`. This is the standard initialization for struct-typed locals.
 fn emit_let(
     ctx: &mut CodegenContext,
     name: &str,
     ty: &HirType,
-    value: &HirExpr,
+    value: Option<&HirExpr>,
     annotations: &[HirAnnotation],
 ) {
     // Special handling for array types: alloca [N x T] + memset.
@@ -838,7 +926,7 @@ fn emit_let(
         ctx.emit(&format!("{alloca_name} = alloca {array_llvm}, align 16"));
 
         // Check if the initializer is ArrayZeros — emit memset.
-        if matches!(value.kind, HirExprKind::ArrayZeros { .. }) {
+        if value.is_some_and(|v| matches!(v.kind, HirExprKind::ArrayZeros { .. })) {
             let elem_size = llvm_type_size(&elem_llvm);
             let total_bytes = elem_size * (*size as u64);
             ctx.needs_memset = true;
@@ -869,55 +957,103 @@ fn emit_let(
     // because `@lifetime(scope)` guarantees the pointer's lifetime matches the current
     // scope, so it cannot escape. The corresponding `heap_free` becomes a no-op
     // (the stack frame cleanup handles deallocation).
-    if has_lifetime_scope(annotations) && is_heap_alloc_call(value) {
-        if let HirExprKind::Call { args, .. } = &value.kind {
-            if args.len() == 2 {
-                let llvm_type = match hir_type_to_llvm(ty) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        ctx.errors.push(e);
-                        return;
-                    }
-                };
+    if let Some(value) = value {
+        if has_lifetime_scope(annotations) && is_heap_alloc_call(value) {
+            if let HirExprKind::Call { args, .. } = &value.kind {
+                if args.len() == 2 {
+                    let llvm_type = match hir_type_to_llvm(ty) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            ctx.errors.push(e);
+                            return;
+                        }
+                    };
 
-                // Evaluate count and elem_size arguments.
-                let count = emit_expr(ctx, &args[0], Some("i32"));
-                let elem_size = emit_expr(ctx, &args[1], Some("i32"));
+                    // Evaluate count and elem_size arguments.
+                    let count = emit_expr(ctx, &args[0], Some("i32"));
+                    let elem_size = emit_expr(ctx, &args[1], Some("i32"));
 
-                // Widen to i64 for the multiplication.
-                let count64 = ctx.fresh_reg();
-                ctx.emit(&format!("{count64} = sext i32 {} to i64", count.reg));
-                let elem64 = ctx.fresh_reg();
-                ctx.emit(&format!("{elem64} = sext i32 {} to i64", elem_size.reg));
-                let total = ctx.fresh_reg();
-                ctx.emit(&format!("{total} = mul i64 {count64}, {elem64}"));
+                    // Widen to i64 for the multiplication.
+                    let count64 = ctx.fresh_reg();
+                    ctx.emit(&format!("{count64} = sext i32 {} to i64", count.reg));
+                    let elem64 = ctx.fresh_reg();
+                    ctx.emit(&format!("{elem64} = sext i32 {} to i64", elem_size.reg));
+                    let total = ctx.fresh_reg();
+                    ctx.emit(&format!("{total} = mul i64 {count64}, {elem64}"));
 
-                // Emit alloca instead of malloc — stack allocation.
-                let buf_reg = ctx.fresh_reg();
-                ctx.emit(&format!(
-                    "{buf_reg} = alloca i8, i64 {total}, align 16"
-                ));
+                    // Emit alloca instead of malloc — stack allocation.
+                    let buf_reg = ctx.fresh_reg();
+                    ctx.emit(&format!(
+                        "{buf_reg} = alloca i8, i64 {total}, align 16"
+                    ));
 
-                // Store the pointer into the variable's alloca slot.
-                let uid = ctx.next_reg;
-                ctx.next_reg += 1;
-                let alloca_name = format!("%{name}.{uid}");
-                ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
-                ctx.emit(&format!(
-                    "store {llvm_type} {buf_reg}, ptr {alloca_name}"
-                ));
+                    // Store the pointer into the variable's alloca slot.
+                    let uid = ctx.next_reg;
+                    ctx.next_reg += 1;
+                    let alloca_name = format!("%{name}.{uid}");
+                    ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
+                    ctx.emit(&format!(
+                        "store {llvm_type} {buf_reg}, ptr {alloca_name}"
+                    ));
 
-                ctx.variables.insert(
-                    name.to_string(),
-                    VarInfo {
-                        alloca_name,
-                        llvm_type,
-                        array_info: None,
-                    },
-                );
-                return;
+                    ctx.variables.insert(
+                        name.to_string(),
+                        VarInfo {
+                            alloca_name,
+                            llvm_type,
+                            array_info: None,
+                        },
+                    );
+                    return;
+                }
             }
         }
+    }
+
+    // Special handling for struct types: alloca + memset zero-initialization.
+    if let HirType::UserDefined(ref struct_name) = ty {
+        let struct_info = match ctx.struct_registry.get(struct_name) {
+            Some(info) => info.clone(),
+            None => {
+                ctx.errors.push(CodegenError::UnsupportedType {
+                    ty: struct_name.clone(),
+                    context: "let binding (unknown struct)".to_string(),
+                });
+                return;
+            }
+        };
+        let llvm_type = struct_info.llvm_name.clone();
+        let uid = ctx.next_reg;
+        ctx.next_reg += 1;
+        let alloca_name = format!("%{name}.{uid}");
+        ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
+
+        // Zero-initialize the struct via memset.
+        ctx.needs_memset = true;
+        ctx.emit(&format!(
+            "call void @llvm.memset.p0.i64(ptr {alloca_name}, i8 0, i64 {}, i1 false)",
+            struct_info.total_size
+        ));
+
+        ctx.variables.insert(
+            name.to_string(),
+            VarInfo {
+                alloca_name,
+                llvm_type,
+                array_info: None,
+            },
+        );
+
+        // If there is an explicit initializer, emit the store (though struct
+        // literals are not yet supported, this handles future expansion).
+        if let Some(value) = value {
+            let val = emit_expr(ctx, value, Some(&struct_info.llvm_name));
+            // For now we ignore the value for struct types since we don't have
+            // struct literal expressions yet. The struct is already zero-initialized.
+            let _ = val;
+        }
+
+        return;
     }
 
     let llvm_type = match hir_type_to_llvm(ty) {
@@ -935,11 +1071,19 @@ fn emit_let(
     let alloca_name = format!("%{name}.{uid}");
     ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
 
-    let val = emit_expr(ctx, value, Some(&llvm_type));
-    ctx.emit(&format!(
-        "store {llvm_type} {}, ptr {alloca_name}",
-        val.reg
-    ));
+    if let Some(value) = value {
+        let val = emit_expr(ctx, value, Some(&llvm_type));
+        ctx.emit(&format!(
+            "store {llvm_type} {}, ptr {alloca_name}",
+            val.reg
+        ));
+    } else {
+        // No initializer — zero-initialize primitive types too.
+        // This handles `let x: i32;` → alloca + store 0.
+        ctx.emit(&format!(
+            "store {llvm_type} 0, ptr {alloca_name}"
+        ));
+    }
 
     ctx.variables.insert(
         name.to_string(),
@@ -1038,6 +1182,96 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
         } else {
             ctx.errors.push(CodegenError::UnsupportedExpression {
                 expr: "index assignment on non-ident base".to_string(),
+                context: "assignment".to_string(),
+            });
+        }
+    } else if let HirExprKind::FieldAccess {
+        expr: ref base_expr,
+        ref field,
+    } = target.kind
+    {
+        // Struct field assignment: v.x = val
+        if let HirExprKind::Ident { name } = &base_expr.kind {
+            let var_info = match ctx.variables.get(name.as_str()) {
+                Some(v) => v.clone(),
+                None => {
+                    ctx.errors.push(CodegenError::UndefinedVariable {
+                        name: name.clone(),
+                    });
+                    return;
+                }
+            };
+
+            // Determine the struct name from the LLVM type.
+            let struct_name = if var_info.llvm_type.starts_with("%struct.") {
+                var_info
+                    .llvm_type
+                    .strip_prefix("%struct.")
+                    .map(|s| s.to_string())
+            } else {
+                None
+            };
+
+            let struct_name = match struct_name {
+                Some(n) => n,
+                None => {
+                    ctx.errors.push(CodegenError::UnsupportedExpression {
+                        expr: format!(
+                            "field assignment on non-struct type `{}`",
+                            var_info.llvm_type
+                        ),
+                        context: "assignment".to_string(),
+                    });
+                    return;
+                }
+            };
+
+            let struct_info = match ctx.struct_registry.get(&struct_name) {
+                Some(info) => info.clone(),
+                None => {
+                    ctx.errors.push(CodegenError::UnsupportedType {
+                        ty: struct_name,
+                        context: "field assignment (unknown struct)".to_string(),
+                    });
+                    return;
+                }
+            };
+
+            // Find field index and type.
+            let field_idx = struct_info
+                .fields
+                .iter()
+                .position(|(fname, _)| fname == field.as_str());
+            let (field_index, field_type) = match field_idx {
+                Some(idx) => (idx, struct_info.fields[idx].1.clone()),
+                None => {
+                    ctx.errors.push(CodegenError::UnsupportedExpression {
+                        expr: format!("unknown field `{field}` on struct `{struct_name}`"),
+                        context: "field assignment".to_string(),
+                    });
+                    return;
+                }
+            };
+
+            // Get the base pointer to the struct.
+            let base_ptr = get_struct_base_ptr(ctx, &var_info);
+
+            // GEP to the field.
+            let gep_reg = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{gep_reg} = getelementptr inbounds {}, ptr {base_ptr}, i32 0, i32 {field_index}",
+                struct_info.llvm_name
+            ));
+
+            // Emit the value and store it.
+            let rhs_val = emit_expr(ctx, value, Some(&field_type));
+            ctx.emit(&format!(
+                "store {field_type} {}, ptr {gep_reg}",
+                rhs_val.reg
+            ));
+        } else {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: "field assignment on non-ident base".to_string(),
                 context: "assignment".to_string(),
             });
         }
@@ -1432,6 +1666,10 @@ fn emit_expr(ctx: &mut CodegenContext, expr: &HirExpr, expected_type: Option<&st
             expr: arr_expr,
             indices,
         } => emit_array_index_read(ctx, arr_expr, indices),
+        HirExprKind::FieldAccess {
+            expr: base_expr,
+            field,
+        } => emit_field_access(ctx, base_expr, field),
         HirExprKind::ArrayZeros {
             element_type,
             size,
@@ -1502,6 +1740,15 @@ fn emit_ident(ctx: &mut CodegenContext, name: &str) -> LlvmValue {
                 ty: "ptr".to_string(),
             };
         }
+    }
+
+    // For struct variables, return a pointer (structs are passed by pointer).
+    if var_info.llvm_type.starts_with("%struct.") {
+        let base_ptr = get_struct_base_ptr(ctx, &var_info);
+        return LlvmValue {
+            reg: base_ptr,
+            ty: "ptr".to_string(),
+        };
     }
 
     let reg = ctx.fresh_reg();
@@ -1594,6 +1841,148 @@ fn emit_array_index_read(
     ctx.errors.push(CodegenError::UnsupportedExpression {
         expr: "index expression on non-array".to_string(),
         context: "index read".to_string(),
+    });
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "i32".to_string(),
+    }
+}
+
+/// Get the base pointer for a struct variable (handles both locals and params).
+///
+/// For local struct variables, the alloca IS the struct (alloca %struct.Name),
+/// so the alloca_name is the pointer to the struct.
+/// For struct parameters, the alloca stores a pointer to the struct (alloca ptr),
+/// so we need to load the pointer first.
+fn get_struct_base_ptr(ctx: &mut CodegenContext, var_info: &VarInfo) -> String {
+    // If the alloca type is a struct type (%struct.X), the alloca IS the struct.
+    // If the alloca type is "ptr", we need to load the pointer.
+    if var_info.llvm_type.starts_with("%struct.") {
+        // Check if this is a local (alloca %struct.X) or parameter (alloca ptr).
+        // For parameters, the alloca_name holds `%name.addr` which stores a `ptr`.
+        // For locals, the alloca_name holds `%name.N` which is an `alloca %struct.X`.
+        // We distinguish by checking if `.addr` suffix is present.
+        if var_info.alloca_name.ends_with(".addr") {
+            // Parameter: alloca ptr → load ptr
+            let load_reg = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{load_reg} = load ptr, ptr {}",
+                var_info.alloca_name
+            ));
+            load_reg
+        } else {
+            // Local: alloca %struct.X → the alloca itself is the pointer.
+            var_info.alloca_name.clone()
+        }
+    } else {
+        // Generic ptr (shouldn't happen for well-typed code, but handle gracefully).
+        var_info.alloca_name.clone()
+    }
+}
+
+/// Emit a struct field access (read): `v.x` → GEP + load.
+///
+/// Resolves the struct type from the variable's LLVM type, looks up the field
+/// index and type in the struct registry, then emits a `getelementptr` + `load`.
+fn emit_field_access(
+    ctx: &mut CodegenContext,
+    base_expr: &HirExpr,
+    field: &str,
+) -> LlvmValue {
+    // The base expression should be an identifier referring to a struct variable.
+    if let HirExprKind::Ident { name } = &base_expr.kind {
+        let var_info = match ctx.variables.get(name.as_str()) {
+            Some(v) => v.clone(),
+            None => {
+                ctx.errors.push(CodegenError::UndefinedVariable {
+                    name: name.clone(),
+                });
+                return LlvmValue {
+                    reg: "0".to_string(),
+                    ty: "i32".to_string(),
+                };
+            }
+        };
+
+        // Determine the struct name from the LLVM type.
+        let struct_name = if var_info.llvm_type.starts_with("%struct.") {
+            var_info.llvm_type.strip_prefix("%struct.").map(|s| s.to_string())
+        } else {
+            None
+        };
+
+        let struct_name = match struct_name {
+            Some(n) => n,
+            None => {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: format!("field access on non-struct type `{}`", var_info.llvm_type),
+                    context: "field access".to_string(),
+                });
+                return LlvmValue {
+                    reg: "0".to_string(),
+                    ty: "i32".to_string(),
+                };
+            }
+        };
+
+        let struct_info = match ctx.struct_registry.get(&struct_name) {
+            Some(info) => info.clone(),
+            None => {
+                ctx.errors.push(CodegenError::UnsupportedType {
+                    ty: struct_name,
+                    context: "field access (unknown struct)".to_string(),
+                });
+                return LlvmValue {
+                    reg: "0".to_string(),
+                    ty: "i32".to_string(),
+                };
+            }
+        };
+
+        // Find field index and type.
+        let field_idx = struct_info
+            .fields
+            .iter()
+            .position(|(fname, _)| fname == field);
+        let (field_index, field_type) = match field_idx {
+            Some(idx) => (idx, struct_info.fields[idx].1.clone()),
+            None => {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: format!("unknown field `{field}` on struct `{struct_name}`"),
+                    context: "field access".to_string(),
+                });
+                return LlvmValue {
+                    reg: "0".to_string(),
+                    ty: "i32".to_string(),
+                };
+            }
+        };
+
+        // Get the base pointer to the struct.
+        let base_ptr = get_struct_base_ptr(ctx, &var_info);
+
+        // GEP to the field.
+        let gep_reg = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{gep_reg} = getelementptr inbounds {}, ptr {base_ptr}, i32 0, i32 {field_index}",
+            struct_info.llvm_name
+        ));
+
+        // Load the field value.
+        let load_reg = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{load_reg} = load {field_type}, ptr {gep_reg}"
+        ));
+
+        return LlvmValue {
+            reg: load_reg,
+            ty: field_type,
+        };
+    }
+
+    ctx.errors.push(CodegenError::UnsupportedExpression {
+        expr: "field access on non-ident expression".to_string(),
+        context: "field access".to_string(),
     });
     LlvmValue {
         reg: "0".to_string(),
@@ -3195,7 +3584,8 @@ fn llvm_type_size(ty: &str) -> u64 {
 ///
 /// Arrays are passed by pointer, so `array[T, N]` becomes `ptr`.
 fn hir_type_to_llvm_param(ty: &HirType) -> Result<String, CodegenError> {
-    if matches!(ty, HirType::Array { .. }) {
+    if matches!(ty, HirType::Array { .. } | HirType::UserDefined(_)) {
+        // Arrays and structs are passed by pointer (C ABI for aggregates).
         Ok("ptr".to_string())
     } else {
         hir_type_to_llvm(ty)
@@ -3206,10 +3596,7 @@ fn hir_type_to_llvm_param(ty: &HirType) -> Result<String, CodegenError> {
 fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError> {
     match ty {
         HirType::Primitive(p) => Ok(primitive_to_llvm(*p)),
-        HirType::UserDefined(name) => Err(CodegenError::UnsupportedType {
-            ty: name.clone(),
-            context: "user-defined types not yet supported".to_string(),
-        }),
+        HirType::UserDefined(name) => Ok(format!("%struct.{name}")),
         HirType::Tensor { .. } => Err(CodegenError::UnsupportedType {
             ty: "tensor".to_string(),
             context: "tensor types not yet supported".to_string(),
@@ -3638,6 +4025,58 @@ mod tests {
         }
     }
 
+    /// Helper: create a module with functions and struct definitions.
+    fn module_with_structs(
+        name: Option<&str>,
+        functions: Vec<HirFunction>,
+        structs: Vec<HirStruct>,
+    ) -> HirModule {
+        HirModule {
+            name: name.map(|s| s.to_string()),
+            annotations: vec![],
+            functions,
+            extern_functions: vec![],
+            structs,
+            type_aliases: vec![],
+            imports: vec![],
+        }
+    }
+
+    /// Helper: create an HirStruct.
+    fn hir_struct(name: &str, fields: Vec<axiom_hir::HirStructField>) -> HirStruct {
+        HirStruct {
+            id: nid(0),
+            name: name.to_string(),
+            name_span: span(),
+            annotations: vec![],
+            fields,
+            span: span(),
+        }
+    }
+
+    /// Helper: create an HirStructField.
+    fn struct_field(name: &str, ty: HirType) -> axiom_hir::HirStructField {
+        axiom_hir::HirStructField {
+            id: nid(0),
+            name: name.to_string(),
+            name_span: span(),
+            ty,
+            annotations: vec![],
+        }
+    }
+
+    /// Helper: create a field access expression.
+    fn field_access(base: HirExpr, field: &str) -> HirExpr {
+        HirExpr {
+            id: nid(0),
+            kind: HirExprKind::FieldAccess {
+                expr: Box::new(base),
+                field: field.to_string(),
+            },
+            span: span(),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Type mapping tests
     // -----------------------------------------------------------------------
@@ -3736,7 +4175,7 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(42),
+                        value: Some(int_lit(42)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -3765,7 +4204,7 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(0),
+                        value: Some(int_lit(0)),
                         mutable: true,
                     }),
                     stmt(HirStmtKind::Assign {
@@ -3862,7 +4301,7 @@ mod tests {
                         name: "sum".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(0),
+                        value: Some(int_lit(0)),
                         mutable: true,
                     }),
                     stmt(HirStmtKind::For {
@@ -3921,7 +4360,7 @@ mod tests {
                             name: "result".to_string(),
                             name_span: span(),
                             ty: HirType::Primitive(PrimitiveType::I64),
-                            value: call("fib", vec![int_lit(40)]),
+                            value: Some(call("fib", vec![int_lit(40)])),
                             mutable: false,
                         }),
                         stmt(HirStmtKind::Return {
@@ -3978,7 +4417,7 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I64),
-                        value: int_lit(42),
+                        value: Some(int_lit(42)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -4016,14 +4455,14 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(5),
+                        value: Some(int_lit(5)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "y".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I64),
-                        value: call("widen", vec![ident("x")]),
+                        value: Some(call("widen", vec![ident("x")])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -4055,14 +4494,14 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::Bool),
-                        value: bool_lit(true),
+                        value: Some(bool_lit(true)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "y".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::Bool),
-                        value: bool_lit(false),
+                        value: Some(bool_lit(false)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -4094,14 +4533,14 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(5),
+                        value: Some(int_lit(5)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "y".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: unaryop(UnaryOp::Neg, ident("x")),
+                        value: Some(unaryop(UnaryOp::Neg, ident("x"))),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -4128,14 +4567,14 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::Bool),
-                        value: bool_lit(true),
+                        value: Some(bool_lit(true)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "y".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::Bool),
-                        value: unaryop(UnaryOp::Not, ident("x")),
+                        value: Some(unaryop(UnaryOp::Not, ident("x"))),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -4166,21 +4605,21 @@ mod tests {
                         name: "a".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: float_lit(1.5),
+                        value: Some(float_lit(1.5)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "b".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: float_lit(2.5),
+                        value: Some(float_lit(2.5)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "c".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: binop(BinOp::Add, ident("a"), ident("b")),
+                        value: Some(binop(BinOp::Add, ident("a"), ident("b"))),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -4214,7 +4653,7 @@ mod tests {
                             element: Box::new(HirType::Primitive(PrimitiveType::F32)),
                             dims: vec![],
                         },
-                        value: int_lit(0),
+                        value: Some(int_lit(0)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -4358,7 +4797,7 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(0),
+                        value: Some(int_lit(0)),
                         mutable: true,
                     }),
                     stmt(HirStmtKind::While {
@@ -4395,21 +4834,21 @@ mod tests {
                         name: "a".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(1),
+                        value: Some(int_lit(1)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "b".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(2),
+                        value: Some(int_lit(2)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "c".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(3),
+                        value: Some(int_lit(3)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
@@ -4417,11 +4856,11 @@ mod tests {
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
                         // a + (b * c)  -- parser already handles precedence in AST
-                        value: binop(
+                        value: Some(binop(
                             BinOp::Add,
                             ident("a"),
                             binop(BinOp::Mul, ident("b"), ident("c")),
-                        ),
+                        )),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -4479,14 +4918,14 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(-5),
+                        value: Some(int_lit(-5)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "a".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("abs", vec![ident("x")]),
+                        value: Some(call("abs", vec![ident("x")])),
                         mutable: false,
                     }),
                     // abs_f64(x: f64) -> f64
@@ -4494,14 +4933,14 @@ mod tests {
                         name: "fx".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: float_lit(-3.14),
+                        value: Some(float_lit(-3.14)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "fa".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: call("abs_f64", vec![ident("fx")]),
+                        value: Some(call("abs_f64", vec![ident("fx")])),
                         mutable: false,
                     }),
                     // min(a: i32, b: i32) -> i32
@@ -4509,7 +4948,7 @@ mod tests {
                         name: "mn".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("min", vec![int_lit(3), int_lit(7)]),
+                        value: Some(call("min", vec![int_lit(3), int_lit(7)])),
                         mutable: false,
                     }),
                     // max(a: i32, b: i32) -> i32
@@ -4517,7 +4956,7 @@ mod tests {
                         name: "mx".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("max", vec![int_lit(3), int_lit(7)]),
+                        value: Some(call("max", vec![int_lit(3), int_lit(7)])),
                         mutable: false,
                     }),
                     // min_f64(a: f64, b: f64) -> f64
@@ -4525,7 +4964,7 @@ mod tests {
                         name: "fmn".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: call("min_f64", vec![float_lit(1.5), float_lit(2.5)]),
+                        value: Some(call("min_f64", vec![float_lit(1.5), float_lit(2.5)])),
                         mutable: false,
                     }),
                     // max_f64(a: f64, b: f64) -> f64
@@ -4533,7 +4972,7 @@ mod tests {
                         name: "fmx".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: call("max_f64", vec![float_lit(1.5), float_lit(2.5)]),
+                        value: Some(call("max_f64", vec![float_lit(1.5), float_lit(2.5)])),
                         mutable: false,
                     }),
                     // sqrt(x: f64) -> f64
@@ -4541,7 +4980,7 @@ mod tests {
                         name: "sq".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: call("sqrt", vec![float_lit(4.0)]),
+                        value: Some(call("sqrt", vec![float_lit(4.0)])),
                         mutable: false,
                     }),
                     // pow(base: f64, exp: f64) -> f64
@@ -4549,7 +4988,7 @@ mod tests {
                         name: "pw".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: call("pow", vec![float_lit(2.0), float_lit(3.0)]),
+                        value: Some(call("pow", vec![float_lit(2.0), float_lit(3.0)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -4645,14 +5084,14 @@ mod tests {
                         name: "wide".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I64),
-                        value: int_lit(42),
+                        value: Some(int_lit(42)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "narrow_val".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("narrow", vec![ident("wide")]),
+                        value: Some(call("narrow", vec![ident("wide")])),
                         mutable: false,
                     }),
                     // truncate(x: f64) -> i32
@@ -4660,14 +5099,14 @@ mod tests {
                         name: "fval".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: float_lit(3.14),
+                        value: Some(float_lit(3.14)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "trunc_val".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("truncate", vec![ident("fval")]),
+                        value: Some(call("truncate", vec![ident("fval")])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -4715,7 +5154,7 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(42),
+                        value: Some(int_lit(42)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -4726,7 +5165,7 @@ mod tests {
                         name: "y".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: float_lit(3.14),
+                        value: Some(float_lit(3.14)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -4813,7 +5252,7 @@ mod tests {
                     name: "t".to_string(),
                     name_span: span(),
                     ty: HirType::Primitive(PrimitiveType::I64),
-                    value: call("clock", vec![]),
+                    value: Some(call("clock", vec![])),
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
@@ -4980,14 +5419,14 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(42),
+                        value: Some(int_lit(42)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "y".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: call("to_f64", vec![ident("x")]),
+                        value: Some(call("to_f64", vec![ident("x")])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -5021,14 +5460,14 @@ mod tests {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I64),
-                        value: int_lit(100),
+                        value: Some(int_lit(100)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "y".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: call("to_f64_i64", vec![ident("x")]),
+                        value: Some(call("to_f64_i64", vec![ident("x")])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -5203,14 +5642,14 @@ mod tests {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                             size: 10,
                         },
-                        value: HirExpr {
+                        value: Some(HirExpr {
                             id: nid(0),
                             kind: HirExprKind::ArrayZeros {
                                 element_type: HirType::Primitive(PrimitiveType::I32),
                                 size: 10,
                             },
                             span: span(),
-                        },
+                        }),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -5251,28 +5690,28 @@ mod tests {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                             size: 10,
                         },
-                        value: HirExpr {
+                        value: Some(HirExpr {
                             id: nid(0),
                             kind: HirExprKind::ArrayZeros {
                                 element_type: HirType::Primitive(PrimitiveType::I32),
                                 size: 10,
                             },
                             span: span(),
-                        },
+                        }),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: HirExpr {
+                        value: Some(HirExpr {
                             id: nid(0),
                             kind: HirExprKind::Index {
                                 expr: Box::new(ident("arr")),
                                 indices: vec![int_lit(5)],
                             },
                             span: span(),
-                        },
+                        }),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -5310,14 +5749,14 @@ mod tests {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                             size: 10,
                         },
-                        value: HirExpr {
+                        value: Some(HirExpr {
                             id: nid(0),
                             kind: HirExprKind::ArrayZeros {
                                 element_type: HirType::Primitive(PrimitiveType::I32),
                                 size: 10,
                             },
                             span: span(),
-                        },
+                        }),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Assign {
@@ -5578,21 +6017,21 @@ fn main() -> i32 {
                         name: "sum".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: binop(BinOp::Add, ident("a"), ident("b")),
+                        value: Some(binop(BinOp::Add, ident("a"), ident("b"))),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "diff".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: binop(BinOp::Sub, ident("a"), ident("b")),
+                        value: Some(binop(BinOp::Sub, ident("a"), ident("b"))),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "prod".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: binop(BinOp::Mul, ident("a"), ident("b")),
+                        value: Some(binop(BinOp::Mul, ident("a"), ident("b"))),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -5634,7 +6073,7 @@ fn main() -> i32 {
                         name: "x".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: binop(BinOp::AddWrap, ident("a"), ident("b")),
+                        value: Some(binop(BinOp::AddWrap, ident("a"), ident("b"))),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -5679,14 +6118,14 @@ fn main() -> i32 {
                     name: "sum".to_string(),
                     name_span: span(),
                     ty: HirType::Primitive(PrimitiveType::F64),
-                    value: binop(BinOp::Add, ident("a"), ident("b")),
+                    value: Some(binop(BinOp::Add, ident("a"), ident("b"))),
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Let {
                     name: "prod".to_string(),
                     name_span: span(),
                     ty: HirType::Primitive(PrimitiveType::F64),
-                    value: binop(BinOp::Mul, ident("a"), ident("b")),
+                    value: Some(binop(BinOp::Mul, ident("a"), ident("b"))),
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
@@ -5723,21 +6162,21 @@ fn main() -> i32 {
                         name: "a".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: float_lit(1.5),
+                        value: Some(float_lit(1.5)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "b".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: float_lit(2.5),
+                        value: Some(float_lit(2.5)),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
                         name: "c".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: binop(BinOp::Add, ident("a"), ident("b")),
+                        value: Some(binop(BinOp::Add, ident("a"), ident("b"))),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -5924,7 +6363,7 @@ fn main() -> i32 {
                     name: "sum".to_string(),
                     name_span: span(),
                     ty: HirType::Primitive(PrimitiveType::I32),
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                     mutable: true,
                 }),
                 stmt(HirStmtKind::For {
@@ -5972,7 +6411,7 @@ fn main() -> i32 {
                         name: "sum".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: int_lit(0),
+                        value: Some(int_lit(0)),
                         mutable: true,
                     }),
                     stmt(HirStmtKind::For {
@@ -6082,21 +6521,21 @@ fn main() -> i32 {
                         element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         size: 10,
                     },
-                    value: HirExpr {
+                    value: Some(HirExpr {
                         id: nid(0),
                         kind: HirExprKind::ArrayZeros {
                             element_type: HirType::Primitive(PrimitiveType::I32),
                             size: 10,
                         },
                         span: span(),
-                    },
+                    }),
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Let {
                     name: "result".to_string(),
                     name_span: span(),
                     ty: HirType::Primitive(PrimitiveType::I32),
-                    value: call("sum_arr", vec![ident("arr"), int_lit(10)]),
+                    value: Some(call("sum_arr", vec![ident("arr"), int_lit(10)])),
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
@@ -6166,7 +6605,7 @@ fn main() -> i32 {
                         name: "b_and".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("band", vec![int_lit(0xFF), int_lit(0x0F)]),
+                        value: Some(call("band", vec![int_lit(0xFF), int_lit(0x0F)])),
                         mutable: false,
                     }),
                     // bor(0xF0, 0x0F) = 255
@@ -6174,7 +6613,7 @@ fn main() -> i32 {
                         name: "b_or".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("bor", vec![int_lit(0xF0), int_lit(0x0F)]),
+                        value: Some(call("bor", vec![int_lit(0xF0), int_lit(0x0F)])),
                         mutable: false,
                     }),
                     // bxor(0xFF, 0x0F) = 240
@@ -6182,7 +6621,7 @@ fn main() -> i32 {
                         name: "b_xor".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("bxor", vec![int_lit(0xFF), int_lit(0x0F)]),
+                        value: Some(call("bxor", vec![int_lit(0xFF), int_lit(0x0F)])),
                         mutable: false,
                     }),
                     // shl(1, 8) = 256
@@ -6190,7 +6629,7 @@ fn main() -> i32 {
                         name: "shifted_l".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("shl", vec![int_lit(1), int_lit(8)]),
+                        value: Some(call("shl", vec![int_lit(1), int_lit(8)])),
                         mutable: false,
                     }),
                     // shr(256, 4) = 16
@@ -6198,7 +6637,7 @@ fn main() -> i32 {
                         name: "shifted_r".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("shr", vec![int_lit(256), int_lit(4)]),
+                        value: Some(call("shr", vec![int_lit(256), int_lit(4)])),
                         mutable: false,
                     }),
                     // lshr(256, 4) = 16
@@ -6206,7 +6645,7 @@ fn main() -> i32 {
                         name: "shifted_lr".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("lshr", vec![int_lit(256), int_lit(4)]),
+                        value: Some(call("lshr", vec![int_lit(256), int_lit(4)])),
                         mutable: false,
                     }),
                     // bnot(0) = -1
@@ -6214,7 +6653,7 @@ fn main() -> i32 {
                         name: "b_not".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("bnot", vec![int_lit(0)]),
+                        value: Some(call("bnot", vec![int_lit(0)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -6278,7 +6717,7 @@ fn main() -> i32 {
                         name: "rot_l".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("rotl", vec![int_lit(0x80000001_u32 as i128), int_lit(1)]),
+                        value: Some(call("rotl", vec![int_lit(0x80000001_u32 as i128), int_lit(1)])),
                         mutable: false,
                     }),
                     // rotr(3, 1) = 0x80000001
@@ -6286,7 +6725,7 @@ fn main() -> i32 {
                         name: "rot_r".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("rotr", vec![int_lit(3), int_lit(1)]),
+                        value: Some(call("rotr", vec![int_lit(3), int_lit(1)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -6339,7 +6778,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("heap_alloc", vec![int_lit(100), int_lit(4)]),
+                        value: Some(call("heap_alloc", vec![int_lit(100), int_lit(4)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -6375,7 +6814,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("heap_alloc_zeroed", vec![int_lit(50), int_lit(4)]),
+                        value: Some(call("heap_alloc_zeroed", vec![int_lit(50), int_lit(4)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -6411,7 +6850,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                        value: Some(call("heap_alloc", vec![int_lit(10), int_lit(4)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -6450,7 +6889,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                        value: Some(call("heap_alloc", vec![int_lit(10), int_lit(4)])),
                         mutable: true,
                     }),
                     stmt(HirStmtKind::Assign {
@@ -6497,7 +6936,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                        value: Some(call("heap_alloc", vec![int_lit(10), int_lit(4)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -6510,7 +6949,7 @@ fn main() -> i32 {
                         name: "val".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("ptr_read_i32", vec![ident("p"), int_lit(0)]),
+                        value: Some(call("ptr_read_i32", vec![ident("p"), int_lit(0)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -6555,7 +6994,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::F64)),
                         },
-                        value: call("heap_alloc", vec![int_lit(10), int_lit(8)]),
+                        value: Some(call("heap_alloc", vec![int_lit(10), int_lit(8)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -6568,7 +7007,7 @@ fn main() -> i32 {
                         name: "val".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::F64),
-                        value: call("ptr_read_f64", vec![ident("p"), int_lit(0)]),
+                        value: Some(call("ptr_read_f64", vec![ident("p"), int_lit(0)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -6611,7 +7050,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I64)),
                         },
-                        value: call("heap_alloc", vec![int_lit(10), int_lit(8)]),
+                        value: Some(call("heap_alloc", vec![int_lit(10), int_lit(8)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -6624,7 +7063,7 @@ fn main() -> i32 {
                         name: "val".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I64),
-                        value: call("ptr_read_i64", vec![ident("p"), int_lit(0)]),
+                        value: Some(call("ptr_read_i64", vec![ident("p"), int_lit(0)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -6669,7 +7108,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                        value: Some(call("heap_alloc", vec![int_lit(10), int_lit(4)])),
                         mutable: false,
                     }),
                     // for i in range(0,10) { ptr_write_i32(data, i, i*i); }
@@ -6694,7 +7133,7 @@ fn main() -> i32 {
                         name: "sum".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I64),
-                        value: int_lit(0),
+                        value: Some(int_lit(0)),
                         mutable: true,
                     }),
                     // for i in range(0,10) { sum = sum + widen(ptr_read_i32(data, i)); }
@@ -6814,7 +7253,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                        value: Some(call("heap_alloc", vec![int_lit(10), int_lit(4)])),
                         mutable: true,
                     }),
                     stmt(HirStmtKind::Let {
@@ -6823,7 +7262,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("heap_alloc_zeroed", vec![int_lit(10), int_lit(4)]),
+                        value: Some(call("heap_alloc_zeroed", vec![int_lit(10), int_lit(4)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Assign {
@@ -6915,7 +7354,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("heap_alloc", vec![ident("n"), int_lit(4)]),
+                        value: Some(call("heap_alloc", vec![ident("n"), int_lit(4)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -6983,7 +7422,7 @@ fn main() -> i32 {
                             ty: HirType::Ptr {
                                 element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                             },
-                            value: call("heap_alloc", vec![int_lit(10), int_lit(4)]),
+                            value: Some(call("heap_alloc", vec![int_lit(10), int_lit(4)])),
                             mutable: false,
                         },
                         vec![lifetime_scope_ann],
@@ -7036,7 +7475,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("arena_create", vec![int_lit(1048576)]),
+                        value: Some(call("arena_create", vec![int_lit(1048576)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -7090,7 +7529,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("arena_create", vec![int_lit(4096)]),
+                        value: Some(call("arena_create", vec![int_lit(4096)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Let {
@@ -7099,10 +7538,10 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call(
+                        value: Some(call(
                             "arena_alloc",
                             vec![ident("arena"), int_lit(100), int_lit(4)],
-                        ),
+                        )),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
@@ -7157,7 +7596,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("arena_create", vec![int_lit(4096)]),
+                        value: Some(call("arena_create", vec![int_lit(4096)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -7196,7 +7635,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("arena_create", vec![int_lit(4096)]),
+                        value: Some(call("arena_create", vec![int_lit(4096)])),
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Expr {
@@ -7240,7 +7679,7 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call("arena_create", vec![int_lit(4096)]),
+                        value: Some(call("arena_create", vec![int_lit(4096)])),
                         mutable: false,
                     }),
                     // let data: ptr[i32] = arena_alloc(arena, 10, 4);
@@ -7250,10 +7689,10 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call(
+                        value: Some(call(
                             "arena_alloc",
                             vec![ident("arena"), int_lit(10), int_lit(4)],
-                        ),
+                        )),
                         mutable: false,
                     }),
                     // ptr_write_i32(data, 0, 42);
@@ -7268,7 +7707,7 @@ fn main() -> i32 {
                         name: "val".to_string(),
                         name_span: span(),
                         ty: HirType::Primitive(PrimitiveType::I32),
-                        value: call("ptr_read_i32", vec![ident("data"), int_lit(0)]),
+                        value: Some(call("ptr_read_i32", vec![ident("data"), int_lit(0)])),
                         mutable: false,
                     }),
                     // arena_reset(arena);
@@ -7282,10 +7721,10 @@ fn main() -> i32 {
                         ty: HirType::Ptr {
                             element: Box::new(HirType::Primitive(PrimitiveType::I32)),
                         },
-                        value: call(
+                        value: Some(call(
                             "arena_alloc",
                             vec![ident("arena"), int_lit(5), int_lit(4)],
-                        ),
+                        )),
                         mutable: false,
                     }),
                     // arena_destroy(arena);
@@ -7338,6 +7777,318 @@ fn main() -> i32 {
         assert!(
             ir.contains("declare void @free(ptr allocptr) #"),
             "should declare free: {ir}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Struct codegen tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_struct_type_definition() {
+        let vec3 = hir_struct(
+            "Vec3",
+            vec![
+                struct_field("x", HirType::Primitive(PrimitiveType::F64)),
+                struct_field("y", HirType::Primitive(PrimitiveType::F64)),
+                struct_field("z", HirType::Primitive(PrimitiveType::F64)),
+            ],
+        );
+        let m = module_with_structs(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![stmt(HirStmtKind::Return {
+                    value: int_lit(0),
+                })]),
+            )],
+            vec![vec3],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("%struct.Vec3 = type { double, double, double }"),
+            "should emit struct type definition: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_struct_field_access() {
+        let point = hir_struct(
+            "Point",
+            vec![
+                struct_field("x", HirType::Primitive(PrimitiveType::F64)),
+                struct_field("y", HirType::Primitive(PrimitiveType::F64)),
+            ],
+        );
+        let m = module_with_structs(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // let p: Point;
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::UserDefined("Point".to_string()),
+                        value: None,
+                        mutable: false,
+                    }),
+                    // p.x = 1.0;
+                    stmt(HirStmtKind::Assign {
+                        target: field_access(ident("p"), "x"),
+                        value: float_lit(1.0),
+                    }),
+                    // p.y = 2.0;
+                    stmt(HirStmtKind::Assign {
+                        target: field_access(ident("p"), "y"),
+                        value: float_lit(2.0),
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+            vec![point],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Struct type should be emitted.
+        assert!(
+            ir.contains("%struct.Point = type { double, double }"),
+            "should emit struct type: {ir}"
+        );
+        // Alloca for struct.
+        assert!(
+            ir.contains("alloca %struct.Point"),
+            "should alloca struct: {ir}"
+        );
+        // Memset zero-init.
+        assert!(
+            ir.contains("call void @llvm.memset.p0.i64(ptr %p.0, i8 0, i64 16, i1 false)"),
+            "should zero-init struct: {ir}"
+        );
+        // GEP for field x (index 0).
+        assert!(
+            ir.contains("getelementptr inbounds %struct.Point, ptr %p.0, i32 0, i32 0"),
+            "should GEP field x (index 0): {ir}"
+        );
+        // GEP for field y (index 1).
+        assert!(
+            ir.contains("getelementptr inbounds %struct.Point, ptr %p.0, i32 0, i32 1"),
+            "should GEP field y (index 1): {ir}"
+        );
+        // Store values.
+        assert!(
+            ir.contains("store double 1.0"),
+            "should store field x: {ir}"
+        );
+        assert!(
+            ir.contains("store double 2.0"),
+            "should store field y: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_struct_as_param() {
+        let vec2 = hir_struct(
+            "Vec2",
+            vec![
+                struct_field("x", HirType::Primitive(PrimitiveType::F64)),
+                struct_field("y", HirType::Primitive(PrimitiveType::F64)),
+            ],
+        );
+        let m = module_with_structs(
+            Some("test"),
+            vec![func(
+                "get_x",
+                vec![param("v", HirType::UserDefined("Vec2".to_string()))],
+                HirType::Primitive(PrimitiveType::F64),
+                block(vec![stmt(HirStmtKind::Return {
+                    value: field_access(ident("v"), "x"),
+                })]),
+            )],
+            vec![vec2],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Struct param should be ptr.
+        assert!(
+            ir.contains("@get_x(ptr noalias %v)"),
+            "should pass struct as ptr noalias: {ir}"
+        );
+        // Should alloca ptr for param.
+        assert!(
+            ir.contains("%v.addr = alloca ptr"),
+            "should alloca ptr for struct param: {ir}"
+        );
+        // Should store param ptr.
+        assert!(
+            ir.contains("store ptr %v, ptr %v.addr"),
+            "should store struct param ptr: {ir}"
+        );
+        // Should GEP for field access on param.
+        assert!(
+            ir.contains("getelementptr inbounds %struct.Vec2"),
+            "should GEP for field access: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_struct_program() {
+        // Full integration test using parse → lower → codegen pipeline.
+        let source = r#"
+@module struct_prog;
+
+struct Vec3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+@pure
+fn vec3_dot(a: Vec3, b: Vec3) -> f64 {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+fn main() -> i32 {
+    let a: Vec3;
+    a.x = 3.0;
+    a.y = 4.0;
+    a.z = 0.0;
+
+    let dot: f64 = vec3_dot(a, a);
+    print_f64(dot);
+    return 0;
+}
+"#;
+        let parse_result = axiom_parser::parse(source);
+        assert!(
+            parse_result.errors.is_empty(),
+            "parse errors: {:?}",
+            parse_result.errors
+        );
+        let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+        let ir = codegen(&hir).expect("codegen should succeed");
+
+        // Struct type definition.
+        assert!(
+            ir.contains("%struct.Vec3 = type { double, double, double }"),
+            "should define Vec3: {ir}"
+        );
+        // Struct alloca + memset.
+        assert!(
+            ir.contains("alloca %struct.Vec3"),
+            "should alloca Vec3: {ir}"
+        );
+        assert!(
+            ir.contains("call void @llvm.memset.p0.i64"),
+            "should zero-init: {ir}"
+        );
+        // Pure function with struct params gets memory(argmem: read).
+        assert!(
+            ir.contains("memory(argmem: read)"),
+            "should have argmem read for @pure with struct params: {ir}"
+        );
+        // Field stores.
+        assert!(ir.contains("store double 3.0"), "should store x: {ir}");
+        assert!(ir.contains("store double 4.0"), "should store y: {ir}");
+        // Dot product call.
+        assert!(
+            ir.contains("call fastcc double @vec3_dot"),
+            "should call vec3_dot: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_struct_field_read() {
+        let point = hir_struct(
+            "Point",
+            vec![
+                struct_field("x", HirType::Primitive(PrimitiveType::F64)),
+                struct_field("y", HirType::Primitive(PrimitiveType::F64)),
+            ],
+        );
+        let m = module_with_structs(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    // let p: Point;
+                    stmt(HirStmtKind::Let {
+                        name: "p".to_string(),
+                        name_span: span(),
+                        ty: HirType::UserDefined("Point".to_string()),
+                        value: None,
+                        mutable: false,
+                    }),
+                    // p.x = 5.0;
+                    stmt(HirStmtKind::Assign {
+                        target: field_access(ident("p"), "x"),
+                        value: float_lit(5.0),
+                    }),
+                    // let val: f64 = p.x;
+                    stmt(HirStmtKind::Let {
+                        name: "val".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::F64),
+                        value: Some(field_access(ident("p"), "x")),
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: int_lit(0),
+                    }),
+                ]),
+            )],
+            vec![point],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        // Should load field value for the let binding.
+        assert!(
+            ir.contains("load double, ptr"),
+            "should load field value: {ir}"
+        );
+    }
+
+    #[test]
+    fn test_let_without_initializer() {
+        // Test that `let x: i32;` (no initializer) works with zero-init.
+        let m = module(
+            Some("test"),
+            vec![func(
+                "main",
+                vec![],
+                HirType::Primitive(PrimitiveType::I32),
+                block(vec![
+                    stmt(HirStmtKind::Let {
+                        name: "x".to_string(),
+                        name_span: span(),
+                        ty: HirType::Primitive(PrimitiveType::I32),
+                        value: None,
+                        mutable: false,
+                    }),
+                    stmt(HirStmtKind::Return {
+                        value: ident("x"),
+                    }),
+                ]),
+            )],
+        );
+
+        let ir = codegen(&m).expect("codegen should succeed");
+        assert!(
+            ir.contains("alloca i32"),
+            "should alloca: {ir}"
+        );
+        assert!(
+            ir.contains("store i32 0, ptr"),
+            "should zero-init: {ir}"
         );
     }
 }

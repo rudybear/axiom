@@ -377,7 +377,11 @@ fn walk_block_for_holes(block: &HirBlock, holes: &mut Vec<OptHole>) {
 /// Walk a HIR statement for `?hole` expressions.
 fn walk_stmt_for_holes(kind: &HirStmtKind, holes: &mut Vec<OptHole>) {
     match kind {
-        HirStmtKind::Let { value, .. } => walk_expr_for_holes(value, holes),
+        HirStmtKind::Let { value, .. } => {
+            if let Some(value) = value {
+                walk_expr_for_holes(value, holes);
+            }
+        }
         HirStmtKind::Assign { target, value } => {
             walk_expr_for_holes(target, holes);
             walk_expr_for_holes(value, holes);
