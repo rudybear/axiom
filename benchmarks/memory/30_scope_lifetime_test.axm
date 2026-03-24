@@ -1,0 +1,129 @@
+@module scope_lifetime_test;
+@intent("Compare heap allocation patterns: explicit malloc vs arena for scoped data");
+
+// This benchmark shows how arena-based allocation excels when data has
+// a clear lifetime scope: allocate many objects, use them, discard all at once.
+
+fn process_batch(arena: ptr[i32], batch_id: i32, batch_size: i32) -> i64 {
+    // Allocate multiple arrays from arena for processing
+    let keys: ptr[i32] = arena_alloc(arena, batch_size, 4);
+    let vals: ptr[i32] = arena_alloc(arena, batch_size, 4);
+    let sorted_idx: ptr[i32] = arena_alloc(arena, batch_size, 4);
+    let temp: ptr[i32] = arena_alloc(arena, batch_size, 4);
+
+    let seed: i64 = widen(batch_id) * 1000 + 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Fill arrays
+    for i: i32 in range(0, batch_size) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(keys, i, narrow(seed % 1000000));
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(vals, i, narrow(seed % 1000));
+        ptr_write_i32(sorted_idx, i, i);
+    }
+
+    // Simple selection sort on keys (using sorted_idx)
+    for i: i32 in range(0, batch_size) {
+        let min_idx: i32 = i;
+        let min_key: i32 = ptr_read_i32(keys, ptr_read_i32(sorted_idx, i));
+        for j: i32 in range(i + 1, batch_size) {
+            let k: i32 = ptr_read_i32(keys, ptr_read_i32(sorted_idx, j));
+            if k < min_key {
+                min_key = k;
+                min_idx = j;
+            }
+        }
+        if min_idx != i {
+            let tmp: i32 = ptr_read_i32(sorted_idx, i);
+            ptr_write_i32(sorted_idx, i, ptr_read_i32(sorted_idx, min_idx));
+            ptr_write_i32(sorted_idx, min_idx, tmp);
+        }
+    }
+
+    // Compute weighted sum in sorted order
+    let result: i64 = 0;
+    for i: i32 in range(0, batch_size) {
+        let idx: i32 = ptr_read_i32(sorted_idx, i);
+        result = result + widen(ptr_read_i32(vals, idx)) * widen(i + 1);
+    }
+
+    return result;
+}
+
+fn process_batch_heap(batch_id: i32, batch_size: i32) -> i64 {
+    // Same as above but using heap_alloc/heap_free
+    let keys: ptr[i32] = heap_alloc(batch_size, 4);
+    let vals: ptr[i32] = heap_alloc(batch_size, 4);
+    let sorted_idx: ptr[i32] = heap_alloc(batch_size, 4);
+    let temp: ptr[i32] = heap_alloc(batch_size, 4);
+
+    let seed: i64 = widen(batch_id) * 1000 + 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    for i: i32 in range(0, batch_size) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(keys, i, narrow(seed % 1000000));
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(vals, i, narrow(seed % 1000));
+        ptr_write_i32(sorted_idx, i, i);
+    }
+
+    for i: i32 in range(0, batch_size) {
+        let min_idx: i32 = i;
+        let min_key: i32 = ptr_read_i32(keys, ptr_read_i32(sorted_idx, i));
+        for j: i32 in range(i + 1, batch_size) {
+            let k: i32 = ptr_read_i32(keys, ptr_read_i32(sorted_idx, j));
+            if k < min_key {
+                min_key = k;
+                min_idx = j;
+            }
+        }
+        if min_idx != i {
+            let tmp: i32 = ptr_read_i32(sorted_idx, i);
+            ptr_write_i32(sorted_idx, i, ptr_read_i32(sorted_idx, min_idx));
+            ptr_write_i32(sorted_idx, min_idx, tmp);
+        }
+    }
+
+    let result: i64 = 0;
+    for i: i32 in range(0, batch_size) {
+        let idx: i32 = ptr_read_i32(sorted_idx, i);
+        result = result + widen(ptr_read_i32(vals, idx)) * widen(i + 1);
+    }
+
+    heap_free(keys);
+    heap_free(vals);
+    heap_free(sorted_idx);
+    heap_free(temp);
+
+    return result;
+}
+
+fn main() -> i32 {
+    let num_batches: i32 = 200;
+    let batch_size: i32 = 500;
+    let checksum: i64 = 0;
+
+    // Phase 1: Arena-based scoped allocation
+    let arena: ptr[i32] = arena_create(4194304);  // 4MB
+    for b: i32 in range(0, num_batches) {
+        let result: i64 = process_batch(arena, b, batch_size);
+        checksum = checksum + result;
+        arena_reset(arena);  // Free all batch data at once!
+    }
+    arena_destroy(arena);
+
+    // Phase 2: Heap-based allocation (4 alloc + 4 free per batch)
+    for b: i32 in range(0, num_batches) {
+        let result: i64 = process_batch_heap(b, batch_size);
+        checksum = checksum + result;
+    }
+
+    print_i64(checksum);
+    return 0;
+}

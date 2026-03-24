@@ -1,0 +1,70 @@
+@module random_alloc_free;
+@intent("Allocate 10K blocks, free in pseudo-random order (stresses allocator fragmentation)");
+
+// Uses a pool-based approach with random-order operations on sub-blocks
+
+fn main() -> i32 {
+    let n: i32 = 10000;
+    let block_size: i32 = 64;  // 64 i32s per block
+    let checksum: i64 = 0;
+
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Multiple rounds
+    for round: i32 in range(0, 30) {
+        // Allocate a large pool
+        let pool: ptr[i32] = heap_alloc(n * block_size, 4);
+        // Track which blocks are "active"
+        let active: ptr[i32] = heap_alloc_zeroed(n, 4);
+
+        // Fill all blocks
+        for i: i32 in range(0, n) {
+            let base: i32 = i * block_size;
+            seed = (lcg_a * seed + lcg_c) % lcg_m;
+            ptr_write_i32(pool, base, narrow(seed % 1000000));
+            ptr_write_i32(pool, base + block_size - 1, narrow(seed % 999));
+            ptr_write_i32(active, i, 1);
+        }
+
+        // "Free" blocks in pseudo-random order by marking inactive
+        // and accumulating their checksums
+        let freed: i32 = 0;
+        while freed < n {
+            seed = (lcg_a * seed + lcg_c) % lcg_m;
+            let idx: i32 = narrow(seed % widen(n));
+            if ptr_read_i32(active, idx) == 1 {
+                let base: i32 = idx * block_size;
+                checksum = checksum + widen(ptr_read_i32(pool, base));
+                checksum = checksum + widen(ptr_read_i32(pool, base + block_size - 1));
+                ptr_write_i32(active, idx, 0);
+                freed = freed + 1;
+            }
+        }
+
+        heap_free(pool);
+        heap_free(active);
+    }
+
+    // Also test actual random-order individual allocs
+    for round: i32 in range(0, 100) {
+        // Allocate varying sizes in random pattern
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let sz: i32 = narrow(seed % 200) + 10;
+        let p: ptr[i32] = heap_alloc(sz, 4);
+        for j: i32 in range(0, sz) {
+            ptr_write_i32(p, j, j * round + narrow(seed % 100));
+        }
+        let s: i64 = 0;
+        for j: i32 in range(0, sz) {
+            s = s + widen(ptr_read_i32(p, j));
+        }
+        checksum = checksum + s;
+        heap_free(p);
+    }
+
+    print_i64(checksum);
+    return 0;
+}

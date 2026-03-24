@@ -1,0 +1,107 @@
+@module bst_insert_search_50k;
+@intent("Binary search tree: insert 50K keys, search 50K. Heap-allocated nodes");
+
+// Node layout: 3 i32 slots [key, left, right], -1 = null
+
+fn bst_insert(pool: ptr[i32], root: i32, new_node: i32) -> i32 {
+    let new_key: i32 = ptr_read_i32(pool, new_node * 3);
+    if root == -1 {
+        return new_node;
+    }
+    let cur: i32 = root;
+    let placed: i32 = 0;
+    while placed == 0 {
+        let cur_key: i32 = ptr_read_i32(pool, cur * 3);
+        if new_key < cur_key {
+            let left: i32 = ptr_read_i32(pool, cur * 3 + 1);
+            if left == -1 {
+                ptr_write_i32(pool, cur * 3 + 1, new_node);
+                placed = 1;
+            }
+            if left != -1 {
+                cur = left;
+            }
+        }
+        if new_key >= cur_key and placed == 0 {
+            let right: i32 = ptr_read_i32(pool, cur * 3 + 2);
+            if right == -1 {
+                ptr_write_i32(pool, cur * 3 + 2, new_node);
+                placed = 1;
+            }
+            if right != -1 {
+                cur = right;
+            }
+        }
+    }
+    return root;
+}
+
+fn bst_search(pool: ptr[i32], root: i32, key: i32) -> i32 {
+    let cur: i32 = root;
+    while cur != -1 {
+        let cur_key: i32 = ptr_read_i32(pool, cur * 3);
+        if key == cur_key {
+            return 1;
+        }
+        if key < cur_key {
+            cur = ptr_read_i32(pool, cur * 3 + 1);
+        }
+        if key > cur_key {
+            cur = ptr_read_i32(pool, cur * 3 + 2);
+        }
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    let n: i32 = 50000;
+    let pool: ptr[i32] = heap_alloc(n * 3, 4);
+    let root: i32 = -1;
+
+    let seed: i64 = 777;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    let keys: ptr[i32] = heap_alloc(n, 4);
+
+    // Insert 50K nodes
+    for i: i32 in range(0, n) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let key: i32 = narrow(seed % 10000000);
+        ptr_write_i32(keys, i, key);
+
+        let node: i32 = i;
+        let base: i32 = node * 3;
+        ptr_write_i32(pool, base, key);
+        ptr_write_i32(pool, base + 1, -1);
+        ptr_write_i32(pool, base + 2, -1);
+
+        root = bst_insert(pool, root, node);
+    }
+
+    // Search 50K keys
+    let found_count: i32 = 0;
+    let depth_sum: i64 = 0;
+    for i: i32 in range(0, n) {
+        let key: i32 = ptr_read_i32(keys, i);
+        let found: i32 = bst_search(pool, root, key);
+        found_count = found_count + found;
+    }
+
+    // Also search for keys that probably don't exist
+    let miss_count: i32 = 0;
+    for i: i32 in range(0, n) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let key: i32 = narrow(seed % 10000000) + 10000000;
+        let found: i32 = bst_search(pool, root, key);
+        miss_count = miss_count + (1 - found);
+    }
+
+    heap_free(pool);
+    heap_free(keys);
+
+    let checksum: i64 = widen(found_count) * 1000 + widen(miss_count);
+    print_i64(checksum);
+    return 0;
+}

@@ -1,0 +1,38 @@
+@module dynamic_array_grow;
+@intent("Dynamic array: start capacity 16, double when full, insert 1M elements. Tests realloc");
+
+fn main() -> i32 {
+    let n: i32 = 1000000;
+    let capacity: i32 = 16;
+    let size: i32 = 0;
+    let data: ptr[i32] = heap_alloc(capacity, 4);
+
+    // LCG
+    let seed: i64 = 12345;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Insert 1M elements, doubling capacity when full
+    for i: i32 in range(0, n) {
+        if size >= capacity {
+            capacity = capacity * 2;
+            data = heap_realloc(data, capacity, 4);
+        }
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(data, size, narrow(seed % 1000000));
+        size = size + 1;
+    }
+
+    // Sum all elements
+    let sum: i64 = 0;
+    for i: i32 in range(0, size) {
+        sum = sum + widen(ptr_read_i32(data, i));
+    }
+
+    heap_free(data);
+
+    let checksum: i64 = sum + widen(size) + widen(capacity);
+    print_i64(checksum);
+    return 0;
+}

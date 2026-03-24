@@ -1,0 +1,91 @@
+@module hashmap_chaining_50k;
+@intent("Hash map with separate chaining (linked list per bucket). 50K inserts + 50K lookups. Heap-allocated");
+
+// Bucket array: i32 array of head indices, -1 = empty
+// Node pool: 3 i32 slots per node [key, value, next_in_chain]
+
+@pure
+fn hash_key(key: i32, mask: i32) -> i32 {
+    // Multiplicative hash (Knuth)
+    let h: i64 = widen(key) * 2654435761;
+    let h32: i32 = narrow(h % 4294967296);
+    if h32 < 0 {
+        return (0 - h32) % (mask + 1);
+    }
+    return h32 % (mask + 1);
+}
+
+fn main() -> i32 {
+    let num_buckets: i32 = 65536;
+    let mask: i32 = 65535;
+    let max_nodes: i32 = 50000;
+
+    // Allocate bucket array
+    let buckets: ptr[i32] = heap_alloc_zeroed(num_buckets, 4);
+    // Initialize buckets to -1
+    for i: i32 in range(0, num_buckets) {
+        ptr_write_i32(buckets, i, -1);
+    }
+
+    // Node pool: 3 slots per node [key, value, next]
+    let pool: ptr[i32] = heap_alloc(max_nodes * 3, 4);
+    let pool_next: i32 = 0;
+
+    // LCG
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Store keys for later lookup
+    let keys: ptr[i32] = heap_alloc(max_nodes, 4);
+
+    // INSERT 50K
+    for i: i32 in range(0, max_nodes) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let key: i32 = narrow(seed % 10000000);
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let val: i32 = narrow(seed % 1000000);
+        ptr_write_i32(keys, i, key);
+
+        let h: i32 = hash_key(key, mask);
+
+        // Allocate node from pool
+        let node: i32 = pool_next;
+        pool_next = pool_next + 1;
+        let base: i32 = node * 3;
+        ptr_write_i32(pool, base, key);
+        ptr_write_i32(pool, base + 1, val);
+        ptr_write_i32(pool, base + 2, ptr_read_i32(buckets, h));
+        ptr_write_i32(buckets, h, node);
+    }
+
+    // LOOKUP 50K
+    let found_count: i32 = 0;
+    let val_sum: i64 = 0;
+    for i: i32 in range(0, max_nodes) {
+        let key: i32 = ptr_read_i32(keys, i);
+        let h: i32 = hash_key(key, mask);
+        let cur: i32 = ptr_read_i32(buckets, h);
+        let found: i32 = 0;
+        while cur != -1 and found == 0 {
+            let base: i32 = cur * 3;
+            if ptr_read_i32(pool, base) == key {
+                val_sum = val_sum + widen(ptr_read_i32(pool, base + 1));
+                found_count = found_count + 1;
+                found = 1;
+            }
+            if found == 0 {
+                cur = ptr_read_i32(pool, base + 2);
+            }
+        }
+    }
+
+    heap_free(buckets);
+    heap_free(pool);
+    heap_free(keys);
+
+    let checksum: i64 = val_sum + widen(found_count) * 1000;
+    print_i64(checksum);
+    return 0;
+}

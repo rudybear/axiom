@@ -1,0 +1,61 @@
+@module string_search_naive;
+@intent("Naive string search in a large text (heap-allocated byte array)");
+
+fn main() -> i32 {
+    let text_len: i32 = 500000;
+    let pat_len: i32 = 8;
+
+    let text: ptr[i32] = heap_alloc(text_len, 4);
+    let pattern: ptr[i32] = heap_alloc(pat_len, 4);
+
+    // Fill text with pseudo-random characters
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    for i: i32 in range(0, text_len) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(text, i, narrow(seed % 4) + 97);  // 'a' to 'd' for more matches
+    }
+
+    // Plant a known pattern periodically
+    ptr_write_i32(pattern, 0, 97);   // a
+    ptr_write_i32(pattern, 1, 98);   // b
+    ptr_write_i32(pattern, 2, 99);   // c
+    ptr_write_i32(pattern, 3, 97);   // a
+    ptr_write_i32(pattern, 4, 98);   // b
+    ptr_write_i32(pattern, 5, 99);   // c
+    ptr_write_i32(pattern, 6, 97);   // a
+    ptr_write_i32(pattern, 7, 98);   // b
+
+    // Naive string search: count all occurrences
+    let match_count: i32 = 0;
+    let match_pos_sum: i64 = 0;
+    let limit: i32 = text_len - pat_len + 1;
+
+    // Do multiple search passes
+    for pass: i32 in range(0, 10) {
+        for i: i32 in range(0, limit) {
+            let j: i32 = 0;
+            let match_flag: i32 = 1;
+            while j < pat_len and match_flag == 1 {
+                if ptr_read_i32(text, i + j) != ptr_read_i32(pattern, j) {
+                    match_flag = 0;
+                }
+                j = j + 1;
+            }
+            if match_flag == 1 {
+                match_count = match_count + 1;
+                match_pos_sum = match_pos_sum + widen(i);
+            }
+        }
+    }
+
+    heap_free(text);
+    heap_free(pattern);
+
+    let checksum: i64 = widen(match_count) * 1000 + match_pos_sum;
+    print_i64(checksum);
+    return 0;
+}

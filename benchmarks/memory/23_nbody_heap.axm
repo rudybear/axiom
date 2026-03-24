@@ -1,0 +1,131 @@
+@module nbody_heap;
+@intent("N-body with heap-allocated body arrays. 200 bodies, 500 steps");
+
+fn main() -> i32 {
+    let n: i32 = 200;
+    let steps: i32 = 500;
+    let dt: f64 = 0.01;
+    let softening: f64 = 0.01;
+
+    // Body arrays: x, y, z, vx, vy, vz, mass  (all f64)
+    let x: ptr[f64] = heap_alloc(n, 8);
+    let y: ptr[f64] = heap_alloc(n, 8);
+    let z: ptr[f64] = heap_alloc(n, 8);
+    let vx: ptr[f64] = heap_alloc(n, 8);
+    let vy: ptr[f64] = heap_alloc(n, 8);
+    let vz: ptr[f64] = heap_alloc(n, 8);
+    let mass: ptr[f64] = heap_alloc(n, 8);
+
+    // Initialize with pseudo-random positions
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    for i: i32 in range(0, n) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let fx: f64 = to_f64_i64(seed) / 2147483648.0 * 100.0 - 50.0;
+        ptr_write_f64(x, i, fx);
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let fy: f64 = to_f64_i64(seed) / 2147483648.0 * 100.0 - 50.0;
+        ptr_write_f64(y, i, fy);
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let fz: f64 = to_f64_i64(seed) / 2147483648.0 * 100.0 - 50.0;
+        ptr_write_f64(z, i, fz);
+        ptr_write_f64(vx, i, 0.0);
+        ptr_write_f64(vy, i, 0.0);
+        ptr_write_f64(vz, i, 0.0);
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let fm: f64 = to_f64_i64(seed) / 2147483648.0 * 10.0 + 1.0;
+        ptr_write_f64(mass, i, fm);
+    }
+
+    // Acceleration arrays
+    let ax: ptr[f64] = heap_alloc(n, 8);
+    let ay: ptr[f64] = heap_alloc(n, 8);
+    let az: ptr[f64] = heap_alloc(n, 8);
+
+    // Simulate
+    for step: i32 in range(0, steps) {
+        // Reset accelerations
+        for i: i32 in range(0, n) {
+            ptr_write_f64(ax, i, 0.0);
+            ptr_write_f64(ay, i, 0.0);
+            ptr_write_f64(az, i, 0.0);
+        }
+
+        // Compute forces (O(n^2))
+        for i: i32 in range(0, n) {
+            let xi: f64 = ptr_read_f64(x, i);
+            let yi: f64 = ptr_read_f64(y, i);
+            let zi: f64 = ptr_read_f64(z, i);
+            let axi: f64 = ptr_read_f64(ax, i);
+            let ayi: f64 = ptr_read_f64(ay, i);
+            let azi: f64 = ptr_read_f64(az, i);
+
+            for j: i32 in range(i + 1, n) {
+                let dx: f64 = ptr_read_f64(x, j) - xi;
+                let dy: f64 = ptr_read_f64(y, j) - yi;
+                let dz: f64 = ptr_read_f64(z, j) - zi;
+                let r2: f64 = dx * dx + dy * dy + dz * dz + softening;
+                let r: f64 = sqrt(r2);
+                let inv_r3: f64 = 1.0 / (r * r2);
+
+                let mj: f64 = ptr_read_f64(mass, j);
+                let mi: f64 = ptr_read_f64(mass, i);
+
+                axi = axi + dx * mj * inv_r3;
+                ayi = ayi + dy * mj * inv_r3;
+                azi = azi + dz * mj * inv_r3;
+
+                let axj: f64 = ptr_read_f64(ax, j) - dx * mi * inv_r3;
+                let ayj: f64 = ptr_read_f64(ay, j) - dy * mi * inv_r3;
+                let azj: f64 = ptr_read_f64(az, j) - dz * mi * inv_r3;
+                ptr_write_f64(ax, j, axj);
+                ptr_write_f64(ay, j, ayj);
+                ptr_write_f64(az, j, azj);
+            }
+            ptr_write_f64(ax, i, axi);
+            ptr_write_f64(ay, i, ayi);
+            ptr_write_f64(az, i, azi);
+        }
+
+        // Update velocities and positions
+        for i: i32 in range(0, n) {
+            let nvx: f64 = ptr_read_f64(vx, i) + ptr_read_f64(ax, i) * dt;
+            let nvy: f64 = ptr_read_f64(vy, i) + ptr_read_f64(ay, i) * dt;
+            let nvz: f64 = ptr_read_f64(vz, i) + ptr_read_f64(az, i) * dt;
+            ptr_write_f64(vx, i, nvx);
+            ptr_write_f64(vy, i, nvy);
+            ptr_write_f64(vz, i, nvz);
+            ptr_write_f64(x, i, ptr_read_f64(x, i) + nvx * dt);
+            ptr_write_f64(y, i, ptr_read_f64(y, i) + nvy * dt);
+            ptr_write_f64(z, i, ptr_read_f64(z, i) + nvz * dt);
+        }
+    }
+
+    // Compute total energy as checksum
+    let energy: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let v2: f64 = ptr_read_f64(vx, i) * ptr_read_f64(vx, i)
+                     + ptr_read_f64(vy, i) * ptr_read_f64(vy, i)
+                     + ptr_read_f64(vz, i) * ptr_read_f64(vz, i);
+        energy = energy + 0.5 * ptr_read_f64(mass, i) * v2;
+    }
+
+    heap_free(x);
+    heap_free(y);
+    heap_free(z);
+    heap_free(vx);
+    heap_free(vy);
+    heap_free(vz);
+    heap_free(mass);
+    heap_free(ax);
+    heap_free(ay);
+    heap_free(az);
+
+    // Print integer checksum from energy
+    let checksum: i32 = truncate(energy * 1000.0);
+    print_i32(checksum);
+    return 0;
+}

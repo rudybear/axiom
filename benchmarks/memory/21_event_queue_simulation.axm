@@ -1,0 +1,111 @@
+@module event_queue_simulation;
+@intent("Priority queue (heap-allocated array), 100K insert/extract-min operations");
+
+// Min-heap: array of (priority, data) pairs as i64 values
+
+fn heap_push(heap: ptr[i64], size: ptr[i32], priority: i64) -> i32 {
+    let n: i32 = ptr_read_i32(size, 0);
+    ptr_write_i64(heap, n, priority);
+    // Sift up
+    let i: i32 = n;
+    while i > 0 {
+        let parent: i32 = (i - 1) / 2;
+        if ptr_read_i64(heap, i) < ptr_read_i64(heap, parent) {
+            let tmp: i64 = ptr_read_i64(heap, i);
+            ptr_write_i64(heap, i, ptr_read_i64(heap, parent));
+            ptr_write_i64(heap, parent, tmp);
+            i = parent;
+        }
+        if ptr_read_i64(heap, i) >= ptr_read_i64(heap, parent) {
+            i = 0;  // break
+        }
+    }
+    ptr_write_i32(size, 0, n + 1);
+    return 0;
+}
+
+fn heap_pop(heap: ptr[i64], size: ptr[i32]) -> i64 {
+    let n: i32 = ptr_read_i32(size, 0);
+    if n == 0 {
+        return -1;
+    }
+    let result: i64 = ptr_read_i64(heap, 0);
+    let new_n: i32 = n - 1;
+    ptr_write_i64(heap, 0, ptr_read_i64(heap, new_n));
+    ptr_write_i32(size, 0, new_n);
+
+    // Sift down
+    let i: i32 = 0;
+    let done: i32 = 0;
+    while done == 0 {
+        let left: i32 = 2 * i + 1;
+        let right: i32 = 2 * i + 2;
+        let smallest: i32 = i;
+
+        if left < new_n {
+            if ptr_read_i64(heap, left) < ptr_read_i64(heap, smallest) {
+                smallest = left;
+            }
+        }
+        if right < new_n {
+            if ptr_read_i64(heap, right) < ptr_read_i64(heap, smallest) {
+                smallest = right;
+            }
+        }
+
+        if smallest != i {
+            let tmp: i64 = ptr_read_i64(heap, i);
+            ptr_write_i64(heap, i, ptr_read_i64(heap, smallest));
+            ptr_write_i64(heap, smallest, tmp);
+            i = smallest;
+        }
+        if smallest == i {
+            done = 1;
+        }
+    }
+
+    return result;
+}
+
+fn main() -> i32 {
+    let max_size: i32 = 200000;
+    let heap: ptr[i64] = heap_alloc(max_size, 8);
+    let size: ptr[i32] = heap_alloc(1, 4);
+    ptr_write_i32(size, 0, 0);
+
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    let checksum: i64 = 0;
+    let ops: i32 = 100000;
+
+    // Mix of inserts and extract-mins
+    for i: i32 in range(0, ops) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let priority: i64 = seed % 10000000;
+
+        // Insert
+        let dummy: i32 = heap_push(heap, size, priority);
+
+        // Every 3rd iteration, also extract min
+        if i % 3 == 0 {
+            let min_val: i64 = heap_pop(heap, size);
+            checksum = checksum + min_val;
+        }
+    }
+
+    // Drain remaining
+    let remaining: i32 = ptr_read_i32(size, 0);
+    for i: i32 in range(0, remaining) {
+        let val: i64 = heap_pop(heap, size);
+        checksum = checksum + val;
+    }
+
+    heap_free(heap);
+    heap_free(size);
+
+    print_i64(checksum);
+    return 0;
+}

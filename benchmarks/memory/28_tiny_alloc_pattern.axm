@@ -1,0 +1,38 @@
+@module tiny_alloc_pattern;
+@intent("Allocate 1M tiny blocks (1 i32 = 4 bytes each). Arena should dominate");
+
+fn main() -> i32 {
+    let n: i32 = 1000000;
+    let checksum: i64 = 0;
+
+    // Phase 1: Arena - allocate 1M tiny blocks
+    let arena: ptr[i32] = arena_create(5000000);  // ~5MB
+
+    for i: i32 in range(0, n) {
+        let p: ptr[i32] = arena_alloc(arena, 1, 4);
+        ptr_write_i32(p, 0, i * 3 + 7);
+        checksum = checksum + widen(ptr_read_i32(p, 0));
+    }
+
+    arena_reset(arena);
+
+    // Phase 2: Arena again
+    for i: i32 in range(0, n) {
+        let p: ptr[i32] = arena_alloc(arena, 1, 4);
+        ptr_write_i32(p, 0, i * 5 + 11);
+        checksum = checksum + widen(ptr_read_i32(p, 0));
+    }
+
+    arena_destroy(arena);
+
+    // Phase 3: Heap alloc/free cycle for comparison
+    for i: i32 in range(0, n) {
+        let p: ptr[i32] = heap_alloc(1, 4);
+        ptr_write_i32(p, 0, i * 7 + 13);
+        checksum = checksum + widen(ptr_read_i32(p, 0));
+        heap_free(p);
+    }
+
+    print_i64(checksum);
+    return 0;
+}

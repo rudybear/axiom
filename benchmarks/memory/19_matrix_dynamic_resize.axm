@@ -1,0 +1,60 @@
+@module matrix_dynamic_resize;
+@intent("Matrix that grows dynamically via realloc, fill and compute trace + sum");
+
+fn main() -> i32 {
+    // Start with 4x4 matrix, grow to 512x512
+    let n: i32 = 4;
+    let data: ptr[i32] = heap_alloc(n * n, 4);
+
+    // Fill initial matrix
+    for i: i32 in range(0, n) {
+        for j: i32 in range(0, n) {
+            ptr_write_i32(data, i * n + j, i + j + 1);
+        }
+    }
+
+    // Grow matrix by doubling dimensions until 512x512
+    while n < 512 {
+        let new_n: i32 = n * 2;
+        let new_data: ptr[i32] = heap_alloc(new_n * new_n, 4);
+
+        // Copy old data into top-left quadrant
+        for i: i32 in range(0, n) {
+            for j: i32 in range(0, n) {
+                ptr_write_i32(new_data, i * new_n + j, ptr_read_i32(data, i * n + j));
+            }
+        }
+
+        // Fill new regions
+        for i: i32 in range(0, n) {
+            for j: i32 in range(n, new_n) {
+                ptr_write_i32(new_data, i * new_n + j, (i + j + 1) % 100);
+            }
+        }
+        for i: i32 in range(n, new_n) {
+            for j: i32 in range(0, new_n) {
+                ptr_write_i32(new_data, i * new_n + j, (i + j + 1) % 100);
+            }
+        }
+
+        heap_free(data);
+        data = new_data;
+        n = new_n;
+    }
+
+    // Compute trace + total sum
+    let trace: i64 = 0;
+    let total: i64 = 0;
+    for i: i32 in range(0, n) {
+        trace = trace + widen(ptr_read_i32(data, i * n + i));
+        for j: i32 in range(0, n) {
+            total = total + widen(ptr_read_i32(data, i * n + j));
+        }
+    }
+
+    heap_free(data);
+
+    let checksum: i64 = trace * 1000 + total;
+    print_i64(checksum);
+    return 0;
+}

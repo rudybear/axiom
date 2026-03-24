@@ -1,0 +1,45 @@
+@module linked_list_arena_100k;
+@intent("Insert 100K nodes into singly-linked list (arena), traverse and sum");
+
+// Node layout: 2 i32 slots [value, next_index], -1 = null
+
+fn main() -> i32 {
+    let n: i32 = 100000;
+    // Create arena: 100K nodes * 2 slots * 4 bytes = 800KB, use 1MB
+    let arena: ptr[i32] = arena_create(1048576);
+    let pool: ptr[i32] = arena_alloc(arena, n * 2, 4);
+    let head: i32 = -1;
+
+    // LCG for values
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    // Insert 100K nodes at head (prepend)
+    for i: i32 in range(0, n) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        let val: i32 = narrow(seed % 1000000);
+        let base: i32 = i * 2;
+        ptr_write_i32(pool, base, val);
+        ptr_write_i32(pool, base + 1, head);
+        head = i;
+    }
+
+    // Traverse and sum
+    let sum: i64 = 0;
+    let count: i32 = 0;
+    let cur: i32 = head;
+    while cur != -1 {
+        let base: i32 = cur * 2;
+        sum = sum + widen(ptr_read_i32(pool, base));
+        cur = ptr_read_i32(pool, base + 1);
+        count = count + 1;
+    }
+
+    arena_destroy(arena);
+
+    let checksum: i64 = sum + widen(count);
+    print_i64(checksum);
+    return 0;
+}

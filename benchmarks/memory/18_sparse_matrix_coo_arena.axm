@@ -1,0 +1,99 @@
+@module sparse_matrix_coo_arena;
+@intent("COO sparse matrix: allocate triplets from arena, convert to CSR, multiply vector");
+
+fn main() -> i32 {
+    let n: i32 = 1000;       // matrix dimension
+    let nnz: i32 = 50000;    // non-zero entries
+
+    // Arena for all data: ~800KB
+    let arena: ptr[i32] = arena_create(2097152);
+
+    // COO triplets
+    let coo_row: ptr[i32] = arena_alloc(arena, nnz, 4);
+    let coo_col: ptr[i32] = arena_alloc(arena, nnz, 4);
+    let coo_val: ptr[i32] = arena_alloc(arena, nnz, 4);
+
+    // Generate random sparse matrix
+    let seed: i64 = 42;
+    let lcg_a: i64 = 1103515245;
+    let lcg_c: i64 = 12345;
+    let lcg_m: i64 = 2147483648;
+
+    for i: i32 in range(0, nnz) {
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(coo_row, i, narrow(seed % widen(n)));
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(coo_col, i, narrow(seed % widen(n)));
+        seed = (lcg_a * seed + lcg_c) % lcg_m;
+        ptr_write_i32(coo_val, i, narrow(seed % 100) + 1);
+    }
+
+    // Convert COO to CSR: count entries per row
+    let row_count: ptr[i32] = arena_alloc(arena, n, 4);
+    for i: i32 in range(0, n) {
+        ptr_write_i32(row_count, i, 0);
+    }
+    for i: i32 in range(0, nnz) {
+        let r: i32 = ptr_read_i32(coo_row, i);
+        ptr_write_i32(row_count, r, ptr_read_i32(row_count, r) + 1);
+    }
+
+    // CSR row_ptr
+    let row_ptr: ptr[i32] = arena_alloc(arena, n + 1, 4);
+    ptr_write_i32(row_ptr, 0, 0);
+    for i: i32 in range(0, n) {
+        let prev: i32 = ptr_read_i32(row_ptr, i);
+        ptr_write_i32(row_ptr, i + 1, prev + ptr_read_i32(row_count, i));
+    }
+
+    // CSR col_ind and values
+    let csr_col: ptr[i32] = arena_alloc(arena, nnz, 4);
+    let csr_val: ptr[i32] = arena_alloc(arena, nnz, 4);
+
+    // Fill CSR
+    let insert_pos: ptr[i32] = arena_alloc(arena, n, 4);
+    for i: i32 in range(0, n) {
+        ptr_write_i32(insert_pos, i, ptr_read_i32(row_ptr, i));
+    }
+    for i: i32 in range(0, nnz) {
+        let r: i32 = ptr_read_i32(coo_row, i);
+        let pos: i32 = ptr_read_i32(insert_pos, r);
+        ptr_write_i32(csr_col, pos, ptr_read_i32(coo_col, i));
+        ptr_write_i32(csr_val, pos, ptr_read_i32(coo_val, i));
+        ptr_write_i32(insert_pos, r, pos + 1);
+    }
+
+    // SpMV: y = A * x, repeated 20 times
+    let x: ptr[i32] = arena_alloc(arena, n, 4);
+    let y: ptr[i32] = arena_alloc(arena, n, 4);
+    for i: i32 in range(0, n) {
+        ptr_write_i32(x, i, i + 1);
+    }
+
+    let total_sum: i64 = 0;
+    for iter: i32 in range(0, 20) {
+        for i: i32 in range(0, n) {
+            let sum: i64 = 0;
+            let start: i32 = ptr_read_i32(row_ptr, i);
+            let end: i32 = ptr_read_i32(row_ptr, i + 1);
+            let j: i32 = start;
+            while j < end {
+                let col: i32 = ptr_read_i32(csr_col, j);
+                let val: i32 = ptr_read_i32(csr_val, j);
+                sum = sum + widen(val) * widen(ptr_read_i32(x, col));
+                j = j + 1;
+            }
+            ptr_write_i32(y, i, narrow(sum % 1000000007));
+        }
+        // Sum y for checksum
+        let ysum: i64 = 0;
+        for i: i32 in range(0, n) {
+            ysum = ysum + widen(ptr_read_i32(y, i));
+        }
+        total_sum = total_sum + ysum;
+    }
+
+    arena_destroy(arena);
+    print_i64(total_sum);
+    return 0;
+}
