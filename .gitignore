@@ -4,5 +4,14 @@
 *~
 .DS_Store
 
-# Pipeline ephemeral run data (prompts, raw outputs, per-run state)
+# Pipeline ephemeral run data
 .pipeline/runs/
+
+# Benchmark build artifacts
+benchmarks/build/
+benchmarks/__pycache__/
+benchmarks/results.json
+
+# OS/Editor
+Thumbs.db
+*.pyc

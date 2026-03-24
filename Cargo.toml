@@ -14,7 +14,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/anthropics/axiom"
+repository = "https://github.com/rudybear/axiom"
 description = "AXIOM — AI eXchange Intermediate Optimization Medium"
 
 [workspace.dependencies]
