@@ -102,7 +102,6 @@ pub fn load_gltf(
         let rgba_data = match img_data.format {
             gltf::image::Format::R8G8B8A8 => img_data.pixels.clone(),
             gltf::image::Format::R8G8B8 => {
-                // Convert RGB to RGBA
                 let mut rgba = Vec::with_capacity(img_data.pixels.len() / 3 * 4);
                 for chunk in img_data.pixels.chunks(3) {
                     rgba.push(chunk[0]);
@@ -112,12 +111,34 @@ pub fn load_gltf(
                 }
                 rgba
             }
+            gltf::image::Format::R16G16B16A16 => {
+                // Convert 16-bit RGBA to 8-bit RGBA
+                let mut rgba = Vec::with_capacity(img_data.pixels.len() / 2);
+                for chunk in img_data.pixels.chunks(2) {
+                    rgba.push(chunk[1]); // take high byte of 16-bit value
+                }
+                rgba
+            }
+            gltf::image::Format::R16G16B16 => {
+                let mut rgba = Vec::with_capacity(img_data.pixels.len() / 6 * 4);
+                for chunk in img_data.pixels.chunks(6) {
+                    rgba.push(chunk[1]); rgba.push(chunk[3]); rgba.push(chunk[5]); rgba.push(255);
+                }
+                rgba
+            }
+            gltf::image::Format::R8 => {
+                let mut rgba = Vec::with_capacity(img_data.pixels.len() * 4);
+                for &b in &img_data.pixels {
+                    rgba.push(b); rgba.push(b); rgba.push(b); rgba.push(255);
+                }
+                rgba
+            }
             _ => {
-                // For other formats, create a white pixel
                 println!("[AXIOM glTF]   Warning: unsupported image format {:?} for image {i}, using fallback", img_data.format);
                 vec![255, 255, 255, 255]
             }
         };
+        println!("[AXIOM glTF]   Image {i}: {}x{}, format={:?}, rgba_bytes={}", img_data.width, img_data.height, img_data.format, rgba_data.len());
 
         let width = if rgba_data.len() == 4 { 1 } else { img_data.width };
         let height = if rgba_data.len() == 4 { 1 } else { img_data.height };
@@ -132,7 +153,7 @@ pub fn load_gltf(
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });

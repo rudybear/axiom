@@ -104,7 +104,10 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample textures
     let base_color_sample = textureSample(base_color_tex, base_color_samp, in.uv);
-    let albedo = base_color_sample.rgb * material.base_color.rgb;
+    // sRGB to linear conversion (textures stored as Rgba8Unorm for compatibility)
+    let srgb = base_color_sample.rgb;
+    let linear_color = pow(srgb, vec3<f32>(2.2, 2.2, 2.2));
+    let albedo = linear_color * material.base_color.rgb;
     let alpha = base_color_sample.a * material.base_color.a;
 
     let mr_sample = textureSample(metallic_roughness_tex, metallic_roughness_samp, in.uv);
@@ -154,7 +157,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let emissive = vec3<f32>(material.emissive_x, material.emissive_y, material.emissive_z);
     color += emissive;
 
-    return vec4<f32>(color, alpha);
+    // Linear to sRGB for output
+    let srgb_out = pow(color, vec3<f32>(1.0/2.2, 1.0/2.2, 1.0/2.2));
+    return vec4<f32>(srgb_out, alpha);
 }
 "#;
 
