@@ -3,6 +3,8 @@
 // Core wgpu renderer. Manages a winit window, wgpu device/queue/surface, a
 // simple render pipeline for colored geometry, and per-frame draw commands.
 
+use std::collections::HashMap;
+use std::ffi::CString;
 use std::sync::Arc;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
@@ -11,6 +13,10 @@ use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
+
+use crate::camera::{CameraState, CameraUniform};
+use crate::gltf_load::GpuScene;
+use crate::pbr::PbrPipeline;
 
 // ---------------------------------------------------------------------------
 // Vertex layout shared by points and triangles
@@ -29,7 +35,7 @@ impl Vertex {
         1 => Float32x4,
     ];
 
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -70,6 +76,27 @@ pub struct Renderer {
     // Dimensions
     width: u32,
     height: u32,
+
+    // Lux shader pipeline support
+    // Keyed by a monotonically increasing ID; the C ABI returns the ID as a handle.
+    lux_pipelines: HashMap<u64, crate::lux_shaders::LuxPipeline>,
+    next_pipeline_id: u64,
+    /// Currently bound Lux pipeline ID. If `None`, use the built-in WGSL pipeline.
+    active_lux_pipeline: Option<u64>,
+
+    // PBR support
+    pbr_pipeline: Option<PbrPipeline>,
+    loaded_scene: Option<GpuScene>,
+    camera: CameraState,
+    depth_texture: Option<wgpu::Texture>,
+    depth_view: Option<wgpu::TextureView>,
+    gpu_name: String,
+    gpu_name_cstr: Option<CString>,
+
+    // Frame timing
+    frame_start: Option<Instant>,
+    last_frame_time: f64,
+    next_scene_id: u64,
 }
 
 // Inline WGSL shader source
@@ -171,7 +198,7 @@ impl Renderer {
         let window = app.window.ok_or("Failed to create window")?;
 
         // Initialize wgpu
-        let (device, queue, surface, surface_config, pipeline) =
+        let (device, queue, surface, surface_config, pipeline, gpu_name) =
             pollster::block_on(Self::init_wgpu(window.clone(), width, height))?;
 
         println!(
@@ -196,6 +223,20 @@ impl Renderer {
             start_time: Instant::now(),
             width,
             height,
+            lux_pipelines: HashMap::new(),
+            next_pipeline_id: 1,
+            active_lux_pipeline: None,
+            // PBR support (lazy init)
+            pbr_pipeline: None,
+            loaded_scene: None,
+            camera: CameraState::default(),
+            depth_texture: None,
+            depth_view: None,
+            gpu_name,
+            gpu_name_cstr: None,
+            frame_start: None,
+            last_frame_time: 0.0,
+            next_scene_id: 1,
         })
     }
 
@@ -210,6 +251,7 @@ impl Renderer {
             wgpu::Surface<'static>,
             wgpu::SurfaceConfiguration,
             wgpu::RenderPipeline,
+            String, // gpu_name
         ),
         String,
     > {
@@ -231,9 +273,10 @@ impl Renderer {
             .await
             .ok_or("No suitable GPU adapter found")?;
 
+        let gpu_name = adapter.get_info().name.clone();
         println!(
             "[AXIOM Renderer] GPU: {} ({:?})",
-            adapter.get_info().name,
+            gpu_name,
             adapter.get_info().backend
         );
 
@@ -322,7 +365,7 @@ impl Renderer {
             cache: None,
         });
 
-        Ok((device, queue, surface, surface_config, pipeline))
+        Ok((device, queue, surface, surface_config, pipeline, gpu_name))
     }
 
     /// Poll window events. Returns true if the window should close.
@@ -499,7 +542,16 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self.pipeline);
+            // Use the active Lux pipeline if one is bound, otherwise the built-in pipeline
+            let active_pipeline = match self.active_lux_pipeline {
+                Some(id) => self
+                    .lux_pipelines
+                    .get(&id)
+                    .map(|lp| &lp.pipeline)
+                    .unwrap_or(&self.pipeline),
+                None => &self.pipeline,
+            };
+            render_pass.set_pipeline(active_pipeline);
 
             // Draw triangles (from triangle commands)
             if let Some(buf) = &tri_buf {
@@ -627,6 +679,42 @@ impl Renderer {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Lux shader pipeline integration
+    // -----------------------------------------------------------------------
+
+    /// Access the wgpu device (needed by `lux_shaders` for pipeline creation).
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The surface texture format (needed for pipeline creation).
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.surface_config.format
+    }
+
+    /// Register a Lux pipeline and return its handle ID.
+    pub fn add_lux_pipeline(&mut self, lp: crate::lux_shaders::LuxPipeline) -> u64 {
+        let id = self.next_pipeline_id;
+        self.next_pipeline_id += 1;
+        println!("[AXIOM Renderer] Registered Lux pipeline id={id}: {}", lp.label);
+        self.lux_pipelines.insert(id, lp);
+        id
+    }
+
+    /// Bind a Lux pipeline by ID. Pass 0 to revert to the built-in pipeline.
+    pub fn bind_pipeline(&mut self, pipeline_id: u64) {
+        if pipeline_id == 0 {
+            self.active_lux_pipeline = None;
+            println!("[AXIOM Renderer] Bound built-in WGSL pipeline");
+        } else if self.lux_pipelines.contains_key(&pipeline_id) {
+            self.active_lux_pipeline = Some(pipeline_id);
+            println!("[AXIOM Renderer] Bound Lux pipeline id={pipeline_id}");
+        } else {
+            eprintln!("[AXIOM Renderer] Warning: unknown pipeline id={pipeline_id}, ignoring");
+        }
+    }
+
     pub fn should_close(&self) -> bool {
         self.should_close
     }
@@ -647,7 +735,210 @@ impl Renderer {
         );
         // Drop will handle cleanup via wgpu's Drop impls
     }
+
+    // -----------------------------------------------------------------------
+    // PBR / glTF methods
+    // -----------------------------------------------------------------------
+
+    /// Ensure the PBR pipeline is initialized.
+    fn ensure_pbr_pipeline(&mut self) {
+        if self.pbr_pipeline.is_none() {
+            let pbr = PbrPipeline::new(&self.device, &self.queue, self.surface_config.format);
+            self.pbr_pipeline = Some(pbr);
+        }
+    }
+
+    /// Ensure the depth texture matches the current surface dimensions.
+    fn ensure_depth_texture(&mut self) {
+        let need_create = match &self.depth_texture {
+            Some(tex) => {
+                let size = tex.size();
+                size.width != self.width || size.height != self.height
+            }
+            None => true,
+        };
+
+        if need_create && self.width > 0 && self.height > 0 {
+            let (tex, view) = crate::pbr::create_depth_texture(&self.device, self.width, self.height);
+            self.depth_texture = Some(tex);
+            self.depth_view = Some(view);
+        }
+    }
+
+    /// Load a glTF/GLB scene file and upload to GPU.
+    /// Returns a scene ID > 0 on success, 0 on failure.
+    pub fn load_gltf(&mut self, path: &str) -> u64 {
+        self.ensure_pbr_pipeline();
+
+        let pbr = self.pbr_pipeline.as_ref().unwrap();
+
+        match crate::gltf_load::load_gltf(
+            &self.device,
+            &self.queue,
+            path,
+            &pbr.material_bind_group_layout,
+            &pbr.default_sampler,
+            &pbr.fallback_white_view,
+            &pbr.fallback_normal_view,
+            &pbr.fallback_mr_view,
+        ) {
+            Ok(scene) => {
+                let id = self.next_scene_id;
+                self.next_scene_id += 1;
+                println!("[AXIOM Renderer] Loaded glTF scene id={id}: {path}");
+                self.loaded_scene = Some(scene);
+                id
+            }
+            Err(e) => {
+                eprintln!("[AXIOM Renderer] Failed to load glTF: {e}");
+                0
+            }
+        }
+    }
+
+    /// Update camera parameters.
+    pub fn set_camera(&mut self, eye: [f32; 3], target: [f32; 3], fov: f32) {
+        self.camera.eye = glam::Vec3::from(eye);
+        self.camera.target = glam::Vec3::from(target);
+        if fov > 0.0 {
+            self.camera.fov_y_deg = fov;
+        }
+    }
+
+    /// Render the loaded PBR scene with the current camera.
+    /// Must be called between begin_frame() and end_frame().
+    pub fn render_scene(&mut self) {
+        self.ensure_pbr_pipeline();
+        self.ensure_depth_texture();
+
+        let scene = match &self.loaded_scene {
+            Some(s) => s,
+            None => return, // Nothing to render
+        };
+
+        let depth_view = match &self.depth_view {
+            Some(v) => v,
+            None => return,
+        };
+
+        // Update camera uniform
+        let aspect = self.width as f32 / self.height.max(1) as f32;
+        let camera_uniform = CameraUniform::from_state(&self.camera, aspect);
+        let pbr = self.pbr_pipeline.as_ref().unwrap();
+        pbr.update_camera(&self.queue, &camera_uniform);
+
+        // Get surface texture
+        let output = match self.surface.get_current_texture() {
+            Ok(t) => t,
+            Err(wgpu::SurfaceError::Lost) => {
+                self.surface.configure(&self.device, &self.surface_config);
+                match self.surface.get_current_texture() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("[AXIOM Renderer] Surface error in render_scene: {e}");
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[AXIOM Renderer] Surface error in render_scene: {e}");
+                return;
+            }
+        };
+
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("PBR Frame Encoder"),
+            });
+
+        // PBR render pass with depth
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("PBR Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.1,
+                            g: 0.1,
+                            b: 0.1,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(&pbr.pipeline);
+            render_pass.set_bind_group(0, &pbr.camera_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, scene.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(scene.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+
+            for range in &scene.draw_ranges {
+                let mat_idx = range.material_index.min(scene.materials.len().saturating_sub(1));
+                render_pass.set_bind_group(1, &scene.materials[mat_idx].bind_group, &[]);
+                render_pass.draw_indexed(
+                    range.index_offset..range.index_offset + range.index_count,
+                    0,
+                    0..1,
+                );
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+    }
+
+    /// Begin frame with timing support.
+    pub fn begin_frame_timed(&mut self) -> bool {
+        self.frame_start = Some(Instant::now());
+        self.begin_frame()
+    }
+
+    /// End frame with timing support.
+    pub fn end_frame_timed(&mut self) {
+        if let Some(start) = self.frame_start.take() {
+            self.last_frame_time = start.elapsed().as_secs_f64();
+        }
+        self.frame_count += 1;
+    }
+
+    /// Get the last frame time in seconds.
+    pub fn last_frame_time(&self) -> f64 {
+        self.last_frame_time
+    }
+
+    /// Get GPU adapter name.
+    #[allow(dead_code)]
+    pub fn gpu_name(&self) -> &str {
+        &self.gpu_name
+    }
+
+    /// Get GPU name as a C string pointer. The pointer is valid until shutdown.
+    pub fn gpu_name_cstr(&mut self) -> *const std::ffi::c_char {
+        if self.gpu_name_cstr.is_none() {
+            self.gpu_name_cstr = Some(CString::new(self.gpu_name.clone()).unwrap_or_default());
+        }
+        self.gpu_name_cstr.as_ref().unwrap().as_ptr()
+    }
 }
+
 
 // ---------------------------------------------------------------------------
 // Thread-local storage for the winit EventLoop

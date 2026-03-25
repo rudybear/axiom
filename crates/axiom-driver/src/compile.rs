@@ -281,7 +281,7 @@ fn invoke_clang_core(
     // axiom_renderer.dll.lib and tell the C runtime to skip its stub renderer.
     let mut use_wgpu = false;
     if let Some(ref ir_text) = options.ir_text {
-        if ir_text.contains("@axiom_renderer_create") {
+        if ir_text.contains("@axiom_renderer_create") || ir_text.contains("@gpu_init") {
             if let Some(lib_path) = find_renderer_lib() {
                 cmd.arg(lib_path.to_str().unwrap_or("axiom_renderer.dll.lib"));
                 cmd.arg("-DAXIOM_USE_WGPU_RENDERER");

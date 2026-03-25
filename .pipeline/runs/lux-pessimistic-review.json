@@ -1,0 +1,121 @@
+{
+  "review": "pessimistic",
+  "plan": "lux-integration-plan.md",
+  "date": "2026-03-24",
+  "verdict": "REJECT",
+  "verdict_summary": "The plan replaces a working wgpu renderer with a lower-level ash renderer for no measurable user-facing gain. The REAL value of Lux is its shader compilation and reflection pipeline (.spv + .lux.json loading), not its raw Vulkan boilerplate. The plan then explicitly AVOIDS using that value by embedding static SPIR-V instead of loading Lux-compiled shaders. This is all cost and no benefit.",
+  "recommendation": "Keep wgpu for rendering. Add a Lux shader-loading layer on top: parse .lux.json reflection data and translate it to wgpu pipeline descriptors. This captures the actual value of Lux (shader toolchain integration) with 10% of the risk.",
+  "issues": [
+    {
+      "id": "P1",
+      "severity": "BLOCKER",
+      "title": "Modifying a submodule creates permanent maintenance burden",
+      "detail": "The plan modifies D:/ailang/lux/playground_rust/Cargo.toml and creates D:/ailang/lux/playground_rust/src/lib.rs. Lux is a git submodule pointing at https://github.com/rudybear/lux.git. Any local modifications make the submodule 'dirty' -- git status will always show 'modified: lux (modified content)'. Every time the submodule is updated (git submodule update --remote), the modifications will be LOST or cause merge conflicts. Every contributor who clones the repo must deal with the dirty submodule. CI pipelines that check for clean worktrees will fail.",
+      "evidence": "D:/ailang/.gitmodules shows: [submodule \"lux\"] path = lux, url = https://github.com/rudybear/lux.git. The submodule points at an external repo. The plan proposes adding [lib] section and lib.rs inside this external repo's directory tree.",
+      "mitigation_options": [
+        "Fork lux to a separate repo under your control, add [lib] in the fork, and point the submodule at the fork",
+        "Copy the 4 needed files (~2100 lines) into axiom-renderer/src/lux/ as a vendored snapshot, with a comment noting the source commit hash",
+        "Do not modify lux at all -- see recommendation to keep wgpu"
+      ]
+    },
+    {
+      "id": "P2",
+      "severity": "BLOCKER",
+      "title": "VulkanContext does NOT handle external window creation from a C call correctly",
+      "detail": "VulkanContext::new_with_window() takes &(impl HasDisplayHandle + HasWindowHandle) and internally hardcodes create_swapchain(800, 600) on line 892. The AXIOM C ABI passes width/height from axiom_renderer_create(). The plan says to call create_swapchain(width, height) after construction, but new_with_window already creates a swapchain at 800x600. This means: (1) a wasted swapchain creation, (2) an immediate swapchain recreation, (3) a device_wait_idle() during initialization. More importantly, the event loop ownership model is incompatible. The current axiom-renderer uses pump_events with a thread-local EventLoop. VulkanContext does not own or interact with the event loop at all -- but the plan's section 6.4 says 'Poll winit events (same pattern as current)'. This works only if VulkanContext truly has no opinion about event loop threading. Fortunately it does not, but the plan fails to acknowledge that the 800x600 hardcoded swapchain is a problem that requires patching vulkan_context.rs -- which circles back to P1 (modifying the submodule).",
+      "evidence": "vulkan_context.rs line 892: ctx.create_swapchain(800, 600)?; -- hardcoded dimensions in new_with_window()."
+    },
+    {
+      "id": "P3",
+      "severity": "HIGH",
+      "title": "Embedding SPIR-V defeats the entire purpose of Lux integration",
+      "detail": "The plan explicitly chooses 'Option A: Embed compiled SPIR-V as byte arrays' and writes trivial pass-through GLSL shaders (axiom_flat.vert/frag). This is functionally identical to what wgpu already does with its inline WGSL shader string -- just with more boilerplate. The whole point of integrating Lux is to USE Lux's shader compiler output: .spv files compiled from Lux source with .lux.json reflection sidecars. By embedding static SPIR-V, the plan gains nothing from Lux's shader ecosystem. The reflected_pipeline module is included in lux-core but the plan says 'available for future advanced use' -- i.e., not used.",
+      "evidence": "Plan section 5: 'Decision: Option A. Embed SPIR-V.' and 'This avoids runtime file I/O and .lux.json reflection files for the basic AXIOM pipeline. The reflected_pipeline module is still available for future advanced use.'"
+    },
+    {
+      "id": "P4",
+      "severity": "HIGH",
+      "title": "Lux submodule updates WILL break the API",
+      "detail": "The plan depends on 4 Lux modules (vulkan_context, spv_loader, reflected_pipeline, scene) with no version pinning beyond the submodule commit hash. Lux is under active development (latest commit: 'Port radix sort from GLSL to native Lux compute shaders'). When VulkanContext's struct fields change, method signatures change, or public types are reorganized, axiom-renderer will fail to compile. There is no compatibility contract. The risk analysis in the plan dismisses this: 'gpu-allocator version conflicts between lux_core and axiom-renderer: Both use the same path dep, so Cargo resolves to one version.' This is naive -- it assumes Lux will never update its dependency versions, which it absolutely will.",
+      "evidence": "git log in lux shows active development. The plan has no pinning strategy, no integration tests, and no CI check that axiom-renderer builds against the current lux commit."
+    },
+    {
+      "id": "P5",
+      "severity": "HIGH",
+      "title": "ash and gpu-allocator version conflicts are not hypothetical",
+      "detail": "axiom-renderer/Cargo.toml proposes ash = '0.38' and gpu-allocator = '0.28'. lux/playground_rust/Cargo.toml already has ash = '0.38' and gpu-allocator = '0.28'. Today they match. But lux is a submodule, not a workspace member. The root Cargo.toml workspace members list does NOT include lux/playground_rust. If axiom-renderer depends on lux_core via path = '../lux/playground_rust', Cargo will try to resolve lux-playground's dependencies within the workspace resolver. But lux-playground is NOT a workspace member. This means Cargo may resolve ash/gpu-allocator independently for the two crates, or it may refuse to build. The behavior depends on whether Cargo treats the path dependency as a workspace member or an external crate. This has NOT been tested.",
+      "evidence": "D:/ailang/Cargo.toml workspace members: [crates/axiom-lexer, ..., axiom-renderer]. lux/playground_rust is NOT listed. Adding it would pull in all of lux-playground's heavy dependencies (gltf, image, clap, serde_json, glam) into the workspace."
+    },
+    {
+      "id": "P6",
+      "severity": "MEDIUM",
+      "title": "cdylib linking against a path dependency referencing a submodule is fragile",
+      "detail": "axiom-renderer is a cdylib. It would depend on lux_core via path = '../lux/playground_rust'. The lux_core lib target does not exist yet (it must be created per P1). Even if it existed, cdylibs have strict requirements: all symbols must be resolvable at link time, and the cdylib cannot re-export Rust types across the FFI boundary. The plan proposes storing lux_core::vulkan_context::VulkanContext directly in the Renderer struct. If VulkanContext contains types from ash (vk::Device etc.), those types must be linked consistently. If Cargo resolves two different versions of ash (one for lux_core, one for axiom-renderer), the types will be incompatible and compilation will fail with cryptic 'expected vk::Device, found vk::Device' errors.",
+      "evidence": "Plan section 6.1: 'ctx: lux_core::vulkan_context::VulkanContext' as a direct struct field."
+    },
+    {
+      "id": "P7",
+      "severity": "MEDIUM",
+      "title": "Validation layer output will confuse AXIOM users",
+      "detail": "Lux's VulkanContext enables validation layers unconditionally in debug builds (cfg!(debug_assertions)). The debug callback writes to log::error! and log::warn! with '[Vulkan]' prefix. The plan adds env_logger as a dependency. If an AXIOM user runs a debug build of their program, they will see Vulkan validation warnings on stderr that they have no way to understand or suppress. The current wgpu renderer produces no such noise -- wgpu handles validation internally and only surfaces errors through its own error handling.",
+      "evidence": "vulkan_context.rs line 101: 'let enable_validation = cfg!(debug_assertions) || force_validation;' -- validation is automatic in debug builds. Lines 1196-1199: debug_callback logs via log::error!/log::warn!."
+    },
+    {
+      "id": "P8",
+      "severity": "HIGH",
+      "title": "Vulkan-only drops DX12 backend support for no reason",
+      "detail": "The current wgpu renderer supports both Vulkan and DX12 backends (line 217: 'backends: wgpu::Backends::VULKAN | wgpu::Backends::DX12'). The plan acknowledges this in section 14: 'the new renderer is Vulkan-only' and 'will no longer work on systems without Vulkan 1.2 drivers'. It dismisses this with 'On Windows 11 with modern GPUs this is not a concern'. But: (1) Some Windows systems have broken Vulkan drivers but working DX12. (2) Vulkan 1.2 is required -- older systems with Vulkan 1.1 will fail. (3) AMD and Intel iGPUs sometimes have flaky Vulkan 1.2 support on older driver versions. This is a gratuitous regression in compatibility for zero user-facing benefit.",
+      "evidence": "Plan section 14: 'This means the axiom-renderer will no longer work on systems without Vulkan 1.2 drivers'."
+    },
+    {
+      "id": "P9",
+      "severity": "LOW",
+      "title": "Per-frame vertex buffer strategy is premature optimization",
+      "detail": "The plan spends significant design effort on a persistent mapped vertex buffer with dynamic growth (section 6.5). The current wgpu renderer allocates buffers per-frame and it works fine for the use case (simple 2D colored geometry). Switching to a persistent buffer adds complexity (growth logic, capacity tracking, mapped pointer management) for a workload that is not GPU-bound. This is solving a performance problem that does not exist."
+    },
+    {
+      "id": "P10",
+      "severity": "MEDIUM",
+      "title": "3.5 hour estimate is wildly optimistic",
+      "detail": "The plan estimates 3.5 hours total (Phase 1: 30min, Phase 2: 15min, Phase 3: 2hr, Phase 4: 15min, Phase 5: 30min). Phase 3 alone requires: creating a VkRenderPass, VkPipeline, framebuffers, sync primitives, command buffer recording, swapchain acquire/present with suboptimal handling, and correct teardown ordering. In raw ash (not wgpu), this is easily 500+ lines of unsafe Vulkan code. A realistic estimate for someone experienced with ash is 8-12 hours including debugging. For someone not experienced, 20+ hours."
+    }
+  ],
+  "cost_benefit_analysis": {
+    "costs": [
+      "Modify or fork an external submodule (permanent maintenance burden)",
+      "Rewrite ~650 lines of working renderer code into ~800+ lines of unsafe Vulkan code",
+      "Lose DX12 backend compatibility",
+      "Introduce version-coupling risk between lux and axiom-renderer",
+      "Add validation layer noise to debug builds",
+      "Require Vulkan 1.2 minimum (was: any Vulkan or DX12)",
+      "Estimated 8-12 hours of real implementation time (plan says 3.5)",
+      "Ongoing maintenance: must track lux submodule API changes"
+    ],
+    "benefits": [
+      "Access to spv_loader::create_shader_module() -- but wgpu can also load SPIR-V via wgpu::ShaderSource::SpirV",
+      "Access to reflected_pipeline for .lux.json parsing -- but the plan does not use it",
+      "Lower-level Vulkan control -- but the renderer does not need it (simple 2D colored triangles)",
+      "Shared VulkanContext with Lux -- but AXIOM programs do not use Lux renderers"
+    ],
+    "net_assessment": "The costs dramatically outweigh the benefits. Every benefit listed is either unused by the plan or achievable without replacing wgpu."
+  },
+  "alternative_proposal": {
+    "name": "Lux Shader Loading on wgpu",
+    "description": "Keep the existing wgpu renderer unchanged. Add a new module (axiom-renderer/src/lux_shaders.rs) that can: (1) Load .spv files compiled by the Lux toolchain, (2) Parse .lux.json reflection metadata, (3) Translate reflection data into wgpu pipeline descriptors. This captures the real value of Lux (its shader compilation toolchain) without replacing the working renderer.",
+    "advantages": [
+      "No submodule modification needed -- only read .spv and .lux.json files",
+      "Keep DX12 + Vulkan backend support",
+      "Keep wgpu's automatic validation and error handling",
+      "reflected_pipeline.rs data structures can be vendored as a single 200-line Rust file (just the serde structs)",
+      "Incremental: can be added alongside existing WGSL shader without breaking anything",
+      "Estimated 2-3 hours of actual work"
+    ],
+    "files_to_create": [
+      "axiom-renderer/src/lux_shaders.rs -- .spv loading + .lux.json parsing + wgpu pipeline creation"
+    ],
+    "files_to_modify": [
+      "axiom-renderer/Cargo.toml -- add serde, serde_json dependencies",
+      "axiom-renderer/src/renderer.rs -- add optional lux shader path parameter to Renderer::new()"
+    ]
+  }
+}

@@ -161,6 +161,9 @@ struct CodegenContext {
     /// Whether renderer builtins are used (renderer_create, shader_load, etc.).
     /// When true, renderer extern declarations are emitted and the runtime is linked.
     needs_renderer: bool,
+    /// Whether GPU PBR/glTF builtins are used (gpu_init, gpu_load_gltf, etc.).
+    /// When true, gpu_* extern declarations are emitted and axiom-renderer is linked.
+    needs_gpu: bool,
     /// Whether Vec (dynamic array) builtins are used (vec_new, vec_push_*, etc.).
     /// When true, Vec extern declarations are emitted and the runtime is linked.
     needs_vec: bool,
@@ -242,6 +245,7 @@ impl CodegenContext {
             needs_coroutines: false,
             needs_threading: false,
             needs_renderer: false,
+            needs_gpu: false,
             needs_vec: false,
             needs_strings: false,
             struct_registry: HashMap::new(),
@@ -677,6 +681,50 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         );
     }
 
+    // Emit GPU PBR / glTF extern declarations (axiom-renderer gpu_* functions).
+    if ctx.needs_gpu {
+        let _ = writeln!(
+            ctx.output,
+            "declare ptr @gpu_init(i32, i32, ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare void @gpu_shutdown(ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_begin_frame(ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare void @gpu_end_frame(ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_should_close(ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_load_gltf(ptr, ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare void @gpu_set_camera(ptr, double, double, double, double, double, double, double)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare void @gpu_render(ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare double @gpu_get_frame_time(ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare ptr @gpu_get_gpu_name(ptr)"
+        );
+    }
+
     // Emit Vec (dynamic array) runtime extern declarations.
     if ctx.needs_vec {
         let _ = writeln!(ctx.output, "declare ptr @axiom_vec_new(i32)");
@@ -808,6 +856,17 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_shader_load")
         || ir.contains("@axiom_pipeline_create")
         || ir.contains("@axiom_renderer_bind_pipeline")
+        // GPU PBR / glTF builtins
+        || ir.contains("@gpu_init")
+        || ir.contains("@gpu_shutdown")
+        || ir.contains("@gpu_begin_frame")
+        || ir.contains("@gpu_end_frame")
+        || ir.contains("@gpu_should_close")
+        || ir.contains("@gpu_load_gltf")
+        || ir.contains("@gpu_set_camera")
+        || ir.contains("@gpu_render(")
+        || ir.contains("@gpu_get_frame_time")
+        || ir.contains("@gpu_get_gpu_name")
         // Vec builtins
         || ir.contains("@axiom_vec_new")
         || ir.contains("@axiom_vec_push_i32")
@@ -2830,6 +2889,17 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "shader_load" => return emit_builtin_shader_load(ctx, args),
             "pipeline_create" => return emit_builtin_pipeline_create(ctx, args),
             "renderer_bind_pipeline" => return emit_builtin_renderer_bind_pipeline(ctx, args),
+            // GPU PBR / glTF builtins (axiom-renderer gpu_* functions)
+            "gpu_init" => return emit_builtin_gpu_init(ctx, args),
+            "gpu_shutdown" => return emit_builtin_gpu_shutdown(ctx, args),
+            "gpu_begin_frame" => return emit_builtin_gpu_begin_frame(ctx, args),
+            "gpu_end_frame" => return emit_builtin_gpu_end_frame(ctx, args),
+            "gpu_should_close" => return emit_builtin_gpu_should_close(ctx, args),
+            "gpu_load_gltf" => return emit_builtin_gpu_load_gltf(ctx, args),
+            "gpu_set_camera" => return emit_builtin_gpu_set_camera(ctx, args),
+            "gpu_render" => return emit_builtin_gpu_render(ctx, args),
+            "gpu_get_frame_time" => return emit_builtin_gpu_get_frame_time(ctx, args),
+            "gpu_get_gpu_name" => return emit_builtin_gpu_get_gpu_name(ctx, args),
             // Option (sum type) builtins -- tagged union packed into i64
             "option_none" => return emit_builtin_option_none(ctx, args),
             "option_some" => return emit_builtin_option_some(ctx, args),
@@ -5320,6 +5390,272 @@ fn emit_builtin_renderer_bind_pipeline(ctx: &mut CodegenContext, args: &[HirExpr
     LlvmValue {
         reg: "0".to_string(),
         ty: "void".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU PBR / glTF builtins — axiom-renderer gpu_* C ABI functions
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `gpu_init(width: i32, height: i32, title: ptr) -> ptr`.
+fn emit_builtin_gpu_init(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_init() requires exactly 3 arguments (width, height, title)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let width_val = emit_expr(ctx, &args[0], Some("i32"));
+    let height_val = emit_expr(ctx, &args[1], Some("i32"));
+    let title_val = emit_expr(ctx, &args[2], Some("ptr"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call ptr @gpu_init(i32 {}, i32 {}, ptr {})",
+        width_val.reg, height_val.reg, title_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_shutdown(handle: ptr)`.
+fn emit_builtin_gpu_shutdown(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_shutdown() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    ctx.emit(&format!(
+        "call void @gpu_shutdown(ptr {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_begin_frame(handle: ptr) -> i32`.
+fn emit_builtin_gpu_begin_frame(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_begin_frame() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_begin_frame(ptr {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_end_frame(handle: ptr)`.
+fn emit_builtin_gpu_end_frame(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_end_frame() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    ctx.emit(&format!(
+        "call void @gpu_end_frame(ptr {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_should_close(handle: ptr) -> i32`.
+fn emit_builtin_gpu_should_close(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_should_close() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_should_close(ptr {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_load_gltf(handle: ptr, path: ptr) -> i32`.
+fn emit_builtin_gpu_load_gltf(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_load_gltf() requires exactly 2 arguments (handle, path)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let path_val = emit_expr(ctx, &args[1], Some("ptr"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_load_gltf(ptr {}, ptr {})",
+        handle_val.reg, path_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_set_camera(handle: ptr, ex, ey, ez, tx, ty, tz, fov: f64)`.
+fn emit_builtin_gpu_set_camera(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 8 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_set_camera() requires exactly 8 arguments (handle, ex, ey, ez, tx, ty, tz, fov)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let ex_val = emit_expr(ctx, &args[1], Some("double"));
+    let ey_val = emit_expr(ctx, &args[2], Some("double"));
+    let ez_val = emit_expr(ctx, &args[3], Some("double"));
+    let tx_val = emit_expr(ctx, &args[4], Some("double"));
+    let ty_val = emit_expr(ctx, &args[5], Some("double"));
+    let tz_val = emit_expr(ctx, &args[6], Some("double"));
+    let fov_val = emit_expr(ctx, &args[7], Some("double"));
+
+    ctx.emit(&format!(
+        "call void @gpu_set_camera(ptr {}, double {}, double {}, double {}, double {}, double {}, double {}, double {})",
+        handle_val.reg, ex_val.reg, ey_val.reg, ez_val.reg,
+        tx_val.reg, ty_val.reg, tz_val.reg, fov_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_render(handle: ptr)`.
+fn emit_builtin_gpu_render(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_render() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    ctx.emit(&format!(
+        "call void @gpu_render(ptr {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_get_frame_time(handle: ptr) -> f64`.
+fn emit_builtin_gpu_get_frame_time(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_get_frame_time() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call double @gpu_get_frame_time(ptr {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_get_gpu_name(handle: ptr) -> ptr`.
+fn emit_builtin_gpu_get_gpu_name(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_get_gpu_name() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call ptr @gpu_get_gpu_name(ptr {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "ptr".to_string(),
     }
 }
 

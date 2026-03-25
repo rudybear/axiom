@@ -13,6 +13,10 @@ use std::ffi::{c_char, c_double, c_float, c_int, c_uint, CStr};
 use std::sync::Mutex;
 
 mod renderer;
+pub mod lux_shaders;
+pub mod camera;
+pub mod gltf_load;
+pub mod pbr;
 
 // ---------------------------------------------------------------------------
 // Global renderer state
@@ -188,4 +192,253 @@ pub unsafe extern "C" fn axiom_renderer_get_time(
     _renderer: *mut std::ffi::c_void,
 ) -> c_double {
     with_renderer(0.0, |r| r.get_time())
+}
+
+// ---------------------------------------------------------------------------
+// Lux shader integration — C ABI exports
+// ---------------------------------------------------------------------------
+
+/// Load a Lux-compiled SPIR-V shader from disk.
+///
+/// - `path`: null-terminated path to a `.spv` file
+/// - `stage`: 0 = vertex, 1 = fragment
+///
+/// Returns an opaque handle to the loaded shader, or null on failure.
+/// The handle must eventually be freed with `axiom_shader_destroy`.
+#[no_mangle]
+pub unsafe extern "C" fn axiom_shader_load(
+    _renderer: *mut std::ffi::c_void,
+    path: *const c_char,
+    stage: c_int,
+) -> *mut std::ffi::c_void {
+    if path.is_null() {
+        eprintln!("[Lux Shader] Error: null path");
+        return std::ptr::null_mut();
+    }
+
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[Lux Shader] Error: invalid UTF-8 path: {e}");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let shader_stage = match lux_shaders::ShaderStage::from_int(stage) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[Lux Shader] Error: {e}");
+            return std::ptr::null_mut();
+        }
+    };
+
+    match lux_shaders::load_shader(path_str, shader_stage) {
+        Ok(shader) => Box::into_raw(Box::new(shader)) as *mut std::ffi::c_void,
+        Err(e) => {
+            eprintln!("[Lux Shader] Error loading {path_str}: {e}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Destroy a loaded shader handle.
+#[no_mangle]
+pub unsafe extern "C" fn axiom_shader_destroy(shader: *mut std::ffi::c_void) {
+    if !shader.is_null() {
+        drop(Box::from_raw(shader as *mut lux_shaders::LuxShader));
+    }
+}
+
+/// Create a render pipeline from a vertex shader and fragment shader.
+///
+/// Both `vert_shader` and `frag_shader` must be handles returned by
+/// `axiom_shader_load`. Returns an opaque pipeline handle (encoded as the
+/// pipeline's numeric ID), or null on failure.
+///
+/// The returned handle is valid for the lifetime of the renderer — it does
+/// not need to be manually freed.
+#[no_mangle]
+pub unsafe extern "C" fn axiom_pipeline_create(
+    _renderer: *mut std::ffi::c_void,
+    vert_shader: *mut std::ffi::c_void,
+    frag_shader: *mut std::ffi::c_void,
+) -> *mut std::ffi::c_void {
+    if vert_shader.is_null() || frag_shader.is_null() {
+        eprintln!("[Lux Shader] Error: null shader handle passed to pipeline_create");
+        return std::ptr::null_mut();
+    }
+
+    let vert = &*(vert_shader as *const lux_shaders::LuxShader);
+    let frag = &*(frag_shader as *const lux_shaders::LuxShader);
+
+    with_renderer(std::ptr::null_mut(), |r| {
+        let device = r.device();
+        let format = r.surface_format();
+
+        match lux_shaders::create_render_pipeline(device, format, vert, frag) {
+            Ok(lux_pipeline) => {
+                let id = r.add_lux_pipeline(lux_pipeline);
+                // Return the pipeline ID as a pointer-sized handle
+                id as usize as *mut std::ffi::c_void
+            }
+            Err(e) => {
+                eprintln!("[Lux Shader] Error creating pipeline: {e}");
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Bind a Lux pipeline for subsequent draw calls.
+///
+/// Pass the handle returned by `axiom_pipeline_create`.
+/// Pass null (0) to revert to the built-in pipeline.
+#[no_mangle]
+pub unsafe extern "C" fn axiom_renderer_bind_pipeline(
+    _renderer: *mut std::ffi::c_void,
+    pipeline: *mut std::ffi::c_void,
+) {
+    let id = pipeline as u64;
+    with_renderer((), |r| r.bind_pipeline(id));
+}
+
+// ---------------------------------------------------------------------------
+// GPU PBR / glTF API — 10 new C ABI functions
+// ---------------------------------------------------------------------------
+
+/// Create a GPU renderer context with a window. Returns a non-null opaque
+/// handle on success, null on failure.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_init(
+    w: c_int,
+    h: c_int,
+    title: *const c_char,
+) -> *mut std::ffi::c_void {
+    let title_str = if title.is_null() {
+        "AXIOM"
+    } else {
+        CStr::from_ptr(title).to_str().unwrap_or("AXIOM")
+    };
+
+    let width = if w > 0 { w as u32 } else { 800 };
+    let height = if h > 0 { h as u32 } else { 600 };
+
+    match renderer::Renderer::new(width, height, title_str) {
+        Ok(r) => {
+            match RENDERER.lock() {
+                Ok(mut guard) => {
+                    *guard = Some(r);
+                    1usize as *mut std::ffi::c_void
+                }
+                Err(e) => {
+                    eprintln!("[AXIOM GPU] Lock error: {e}");
+                    std::ptr::null_mut()
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[AXIOM GPU] Error creating renderer: {e}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Destroy the GPU renderer, free all resources, close the window.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_shutdown(_handle: *mut std::ffi::c_void) {
+    match RENDERER.lock() {
+        Ok(mut guard) => {
+            if let Some(mut r) = guard.take() {
+                r.destroy();
+            }
+        }
+        Err(e) => eprintln!("[AXIOM GPU] Lock error: {e}"),
+    }
+}
+
+/// Begin a new frame: poll window events, prepare for rendering.
+/// Returns 1 if rendering can proceed, 0 if the window was closed.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_begin_frame(_handle: *mut std::ffi::c_void) -> c_int {
+    with_renderer(0, |r| if r.begin_frame_timed() { 1 } else { 0 })
+}
+
+/// End the frame: present to screen and record frame timing.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_end_frame(_handle: *mut std::ffi::c_void) {
+    with_renderer((), |r| r.end_frame_timed());
+}
+
+/// Query whether the window close button was pressed.
+/// Returns 1 if yes, 0 if no.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_should_close(_handle: *mut std::ffi::c_void) -> c_int {
+    with_renderer(1, |r| if r.should_close() { 1 } else { 0 })
+}
+
+/// Load a glTF/GLB file and upload its meshes, materials, and textures to the GPU.
+/// Returns a scene ID > 0 on success, 0 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_load_gltf(
+    _handle: *mut std::ffi::c_void,
+    path: *const c_char,
+) -> c_int {
+    if path.is_null() {
+        eprintln!("[AXIOM GPU] Error: null path passed to gpu_load_gltf");
+        return 0;
+    }
+
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[AXIOM GPU] Error: invalid UTF-8 path: {e}");
+            return 0;
+        }
+    };
+
+    with_renderer(0, |r| r.load_gltf(path_str) as c_int)
+}
+
+/// Set the camera position, look-at target, and vertical FOV (degrees).
+/// Parameters are f64 from AXIOM (which uses f64 for all floats), cast to f32 internally.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_set_camera(
+    _handle: *mut std::ffi::c_void,
+    ex: c_double,
+    ey: c_double,
+    ez: c_double,
+    tx: c_double,
+    ty: c_double,
+    tz: c_double,
+    fov: c_double,
+) {
+    with_renderer((), |r| {
+        r.set_camera(
+            [ex as f32, ey as f32, ez as f32],
+            [tx as f32, ty as f32, tz as f32],
+            fov as f32,
+        );
+    });
+}
+
+/// Render the currently loaded scene with the current camera.
+/// Must be called between gpu_begin_frame() and gpu_end_frame().
+#[no_mangle]
+pub unsafe extern "C" fn gpu_render(_handle: *mut std::ffi::c_void) {
+    with_renderer((), |r| r.render_scene());
+}
+
+/// Returns the time (in seconds) of the last completed frame.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_get_frame_time(_handle: *mut std::ffi::c_void) -> c_double {
+    with_renderer(0.0, |r| r.last_frame_time())
+}
+
+/// Returns the GPU adapter name as a null-terminated C string.
+/// The pointer is valid until gpu_shutdown().
+#[no_mangle]
+pub unsafe extern "C" fn gpu_get_gpu_name(
+    _handle: *mut std::ffi::c_void,
+) -> *const c_char {
+    with_renderer(std::ptr::null(), |r| r.gpu_name_cstr())
 }
