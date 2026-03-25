@@ -31,6 +31,7 @@ fn md5_round(a: i32, b: i32, f_val: i32, k: i32, m: i32, shift: i32) -> i32 {
 }
 
 fn main() -> i32 {
+    @strategy { blocks: ?num_blocks };
     let blocks: i32 = 10000;
 
     // MD5 initial hash values (as signed i32; bitwise ops don't care about sign)

@@ -14,9 +14,9 @@ fn taylor_sin(arg: f64, pi: f64) -> f64 {
 }
 
 @pure
-fn assemble_elements(K_diag: array[f64, 2001], K_upper: array[f64, 2001], K_lower: array[f64, 2001],
-                     M_diag: array[f64, 2001], M_upper: array[f64, 2001], M_lower: array[f64, 2001],
-                     F: array[f64, 2001],
+fn assemble_elements(K_diag: ptr[f64], K_upper: ptr[f64], K_lower: ptr[f64],
+                     M_diag: ptr[f64], M_upper: ptr[f64], M_lower: ptr[f64],
+                     F: ptr[f64],
                      n_elem: i32, h: f64, pi: f64, domain_len: f64) -> f64 {
     let ke_diag: f64 = 1.0 / h;
     let ke_off: f64 = -1.0 / h;
@@ -28,16 +28,16 @@ fn assemble_elements(K_diag: array[f64, 2001], K_upper: array[f64, 2001], K_lowe
         let j: i32 = e + 1;
 
         // Assemble stiffness
-        K_diag[i] = K_diag[i] + ke_diag;
-        K_diag[j] = K_diag[j] + ke_diag;
-        K_upper[i] = K_upper[i] + ke_off;
-        K_lower[j] = K_lower[j] + ke_off;
+        ptr_write_f64(K_diag, i, ptr_read_f64(K_diag, i) + ke_diag);
+        ptr_write_f64(K_diag, j, ptr_read_f64(K_diag, j) + ke_diag);
+        ptr_write_f64(K_upper, i, ptr_read_f64(K_upper, i) + ke_off);
+        ptr_write_f64(K_lower, j, ptr_read_f64(K_lower, j) + ke_off);
 
         // Assemble mass (for reaction term)
-        M_diag[i] = M_diag[i] + me_diag;
-        M_diag[j] = M_diag[j] + me_diag;
-        M_upper[i] = M_upper[i] + me_off;
-        M_lower[j] = M_lower[j] + me_off;
+        ptr_write_f64(M_diag, i, ptr_read_f64(M_diag, i) + me_diag);
+        ptr_write_f64(M_diag, j, ptr_read_f64(M_diag, j) + me_diag);
+        ptr_write_f64(M_upper, i, ptr_read_f64(M_upper, i) + me_off);
+        ptr_write_f64(M_lower, j, ptr_read_f64(M_lower, j) + me_off);
 
         // Assemble load vector using 2-point Gauss quadrature
         let x_i: f64 = to_f64(i) * h;
@@ -51,60 +51,60 @@ fn assemble_elements(K_diag: array[f64, 2001], K_upper: array[f64, 2001], K_lowe
         let f_val: f64 = sin_val * (1.0 + pi * pi / 100.0);
 
         // Linear shape functions integrated: h/2 for each node
-        F[i] = F[i] + f_val * h / 2.0;
-        F[j] = F[j] + f_val * h / 2.0;
+        ptr_write_f64(F, i, ptr_read_f64(F, i) + f_val * h / 2.0);
+        ptr_write_f64(F, j, ptr_read_f64(F, j) + f_val * h / 2.0);
     }
     return 0.0;
 }
 
 @pure
-fn combine_and_apply_bc(A_diag: array[f64, 2001], A_upper: array[f64, 2001], A_lower: array[f64, 2001],
-                        K_diag: array[f64, 2001], K_upper: array[f64, 2001], K_lower: array[f64, 2001],
-                        M_diag: array[f64, 2001], M_upper: array[f64, 2001], M_lower: array[f64, 2001],
-                        F: array[f64, 2001], n_nodes: i32) -> f64 {
+fn combine_and_apply_bc(A_diag: ptr[f64], A_upper: ptr[f64], A_lower: ptr[f64],
+                        K_diag: ptr[f64], K_upper: ptr[f64], K_lower: ptr[f64],
+                        M_diag: ptr[f64], M_upper: ptr[f64], M_lower: ptr[f64],
+                        F: ptr[f64], n_nodes: i32) -> f64 {
     for i: i32 in range(0, n_nodes) {
-        A_diag[i] = K_diag[i] + M_diag[i];
-        A_upper[i] = K_upper[i] + M_upper[i];
-        A_lower[i] = K_lower[i] + M_lower[i];
+        ptr_write_f64(A_diag, i, ptr_read_f64(K_diag, i) + ptr_read_f64(M_diag, i));
+        ptr_write_f64(A_upper, i, ptr_read_f64(K_upper, i) + ptr_read_f64(M_upper, i));
+        ptr_write_f64(A_lower, i, ptr_read_f64(K_lower, i) + ptr_read_f64(M_lower, i));
     }
 
     // Apply Dirichlet BCs: u(0) = 0, u(n_nodes-1) = 0
-    A_diag[0] = 1.0;
-    A_upper[0] = 0.0;
-    F[0] = 0.0;
+    ptr_write_f64(A_diag, 0, 1.0);
+    ptr_write_f64(A_upper, 0, 0.0);
+    ptr_write_f64(F, 0, 0.0);
 
-    A_diag[n_nodes - 1] = 1.0;
-    A_lower[n_nodes - 1] = 0.0;
-    F[n_nodes - 1] = 0.0;
+    ptr_write_f64(A_diag, n_nodes - 1, 1.0);
+    ptr_write_f64(A_lower, n_nodes - 1, 0.0);
+    ptr_write_f64(F, n_nodes - 1, 0.0);
     return 0.0;
 }
 
 @pure
-fn thomas_solve(u: array[f64, 2001], c_prime: array[f64, 2001], d_prime: array[f64, 2001],
-                A_diag: array[f64, 2001], A_upper: array[f64, 2001], A_lower: array[f64, 2001],
-                F: array[f64, 2001], n_nodes: i32) -> f64 {
+fn thomas_solve(u: ptr[f64], c_prime: ptr[f64], d_prime: ptr[f64],
+                A_diag: ptr[f64], A_upper: ptr[f64], A_lower: ptr[f64],
+                F: ptr[f64], n_nodes: i32) -> f64 {
     // Forward elimination
-    c_prime[0] = A_upper[0] / A_diag[0];
-    d_prime[0] = F[0] / A_diag[0];
+    ptr_write_f64(c_prime, 0, ptr_read_f64(A_upper, 0) / ptr_read_f64(A_diag, 0));
+    ptr_write_f64(d_prime, 0, ptr_read_f64(F, 0) / ptr_read_f64(A_diag, 0));
 
     for i: i32 in range(1, n_nodes) {
-        let m: f64 = A_lower[i] / (A_diag[i] - A_lower[i] * c_prime[i - 1]);
-        c_prime[i] = A_upper[i] / (A_diag[i] - A_lower[i] * c_prime[i - 1]);
-        d_prime[i] = (F[i] - A_lower[i] * d_prime[i - 1]) / (A_diag[i] - A_lower[i] * c_prime[i - 1]);
+        let m: f64 = ptr_read_f64(A_lower, i) / (ptr_read_f64(A_diag, i) - ptr_read_f64(A_lower, i) * ptr_read_f64(c_prime, i - 1));
+        ptr_write_f64(c_prime, i, ptr_read_f64(A_upper, i) / (ptr_read_f64(A_diag, i) - ptr_read_f64(A_lower, i) * ptr_read_f64(c_prime, i - 1)));
+        ptr_write_f64(d_prime, i, (ptr_read_f64(F, i) - ptr_read_f64(A_lower, i) * ptr_read_f64(d_prime, i - 1)) / (ptr_read_f64(A_diag, i) - ptr_read_f64(A_lower, i) * ptr_read_f64(c_prime, i - 1)));
     }
 
     // Back substitution
-    u[n_nodes - 1] = d_prime[n_nodes - 1];
+    ptr_write_f64(u, n_nodes - 1, ptr_read_f64(d_prime, n_nodes - 1));
     let i: i32 = n_nodes - 2;
     while i >= 0 {
-        u[i] = d_prime[i] - c_prime[i] * u[i + 1];
+        ptr_write_f64(u, i, ptr_read_f64(d_prime, i) - ptr_read_f64(c_prime, i) * ptr_read_f64(u, i + 1));
         i = i - 1;
     }
     return 0.0;
 }
 
 @pure
-fn compute_error(u: array[f64, 2001], n_nodes: i32, h: f64, pi: f64, domain_len: f64) -> f64 {
+fn compute_error(u: ptr[f64], n_nodes: i32, h: f64, pi: f64, domain_len: f64) -> f64 {
     let error_l2: f64 = 0.0;
     let error_max: f64 = 0.0;
     for idx: i32 in range(0, n_nodes) {
@@ -112,7 +112,7 @@ fn compute_error(u: array[f64, 2001], n_nodes: i32, h: f64, pi: f64, domain_len:
         let arg: f64 = pi * x / domain_len;
         let u_exact: f64 = taylor_sin(arg, pi);
 
-        let err: f64 = u[idx] - u_exact;
+        let err: f64 = ptr_read_f64(u, idx) - u_exact;
         if err < 0.0 { err = 0.0 - err; }
         error_l2 = error_l2 + err * err * h;
         if err > error_max {
@@ -125,13 +125,13 @@ fn compute_error(u: array[f64, 2001], n_nodes: i32, h: f64, pi: f64, domain_len:
 }
 
 @pure
-fn compute_checksum_parts(u: array[f64, 2001], n_nodes: i32) -> f64 {
+fn compute_checksum_parts(u: ptr[f64], n_nodes: i32) -> f64 {
     let u_sum: f64 = 0.0;
     let u_max: f64 = 0.0;
     for idx: i32 in range(0, n_nodes) {
-        u_sum = u_sum + u[idx] * to_f64(idx + 1);
-        if u[idx] > u_max {
-            u_max = u[idx];
+        u_sum = u_sum + ptr_read_f64(u, idx) * to_f64(idx + 1);
+        if ptr_read_f64(u, idx) > u_max {
+            u_max = ptr_read_f64(u, idx);
         }
     }
     return u_sum + u_max * 10000.0;
@@ -147,20 +147,20 @@ fn main() -> i32 {
     // f(x) = sin(pi*x/10) * (1 + pi^2/100)
 
     // Stiffness matrix K stored as tridiagonal: diag, upper, lower
-    let K_diag: array[f64, 2001] = array_zeros[f64, 2001];
-    let K_upper: array[f64, 2001] = array_zeros[f64, 2001];
-    let K_lower: array[f64, 2001] = array_zeros[f64, 2001];
+    let K_diag: ptr[f64] = heap_alloc_zeroed(2001, 8);
+    let K_upper: ptr[f64] = heap_alloc_zeroed(2001, 8);
+    let K_lower: ptr[f64] = heap_alloc_zeroed(2001, 8);
 
     // Mass matrix (for reaction term) - also tridiagonal
-    let M_diag: array[f64, 2001] = array_zeros[f64, 2001];
-    let M_upper: array[f64, 2001] = array_zeros[f64, 2001];
-    let M_lower: array[f64, 2001] = array_zeros[f64, 2001];
+    let M_diag: ptr[f64] = heap_alloc_zeroed(2001, 8);
+    let M_upper: ptr[f64] = heap_alloc_zeroed(2001, 8);
+    let M_lower: ptr[f64] = heap_alloc_zeroed(2001, 8);
 
     // Load vector
-    let F: array[f64, 2001] = array_zeros[f64, 2001];
+    let F: ptr[f64] = heap_alloc_zeroed(2001, 8);
 
     // Solution vector
-    let u: array[f64, 2001] = array_zeros[f64, 2001];
+    let u: ptr[f64] = heap_alloc_zeroed(2001, 8);
 
     let pi: f64 = 3.14159265358979;
 
@@ -168,15 +168,15 @@ fn main() -> i32 {
     let _dummy1: f64 = assemble_elements(K_diag, K_upper, K_lower, M_diag, M_upper, M_lower, F, n_elem, h, pi, domain_len);
 
     // Combine: A = K + M (Helmholtz equation) and apply BCs
-    let A_diag: array[f64, 2001] = array_zeros[f64, 2001];
-    let A_upper: array[f64, 2001] = array_zeros[f64, 2001];
-    let A_lower: array[f64, 2001] = array_zeros[f64, 2001];
+    let A_diag: ptr[f64] = heap_alloc_zeroed(2001, 8);
+    let A_upper: ptr[f64] = heap_alloc_zeroed(2001, 8);
+    let A_lower: ptr[f64] = heap_alloc_zeroed(2001, 8);
 
     let _dummy2: f64 = combine_and_apply_bc(A_diag, A_upper, A_lower, K_diag, K_upper, K_lower, M_diag, M_upper, M_lower, F, n_nodes);
 
     // Solve tridiagonal system via Thomas algorithm
-    let c_prime: array[f64, 2001] = array_zeros[f64, 2001];
-    let d_prime: array[f64, 2001] = array_zeros[f64, 2001];
+    let c_prime: ptr[f64] = heap_alloc_zeroed(2001, 8);
+    let d_prime: ptr[f64] = heap_alloc_zeroed(2001, 8);
 
     let _dummy3: f64 = thomas_solve(u, c_prime, d_prime, A_diag, A_upper, A_lower, F, n_nodes);
 
@@ -188,5 +188,11 @@ fn main() -> i32 {
 
     let checksum: f64 = checksum_part + error_part;
     print_f64(checksum);
+
+    heap_free(K_diag); heap_free(K_upper); heap_free(K_lower);
+    heap_free(M_diag); heap_free(M_upper); heap_free(M_lower);
+    heap_free(F); heap_free(u);
+    heap_free(A_diag); heap_free(A_upper); heap_free(A_lower);
+    heap_free(c_prime); heap_free(d_prime);
     return 0;
 }

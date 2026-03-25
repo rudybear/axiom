@@ -154,6 +154,7 @@ fn compute_checksum(rho: ptr[f64], ux: ptr[f64], uy: ptr[f64],
 }
 
 fn main() -> i32 {
+    @strategy { timesteps: ?sim_steps, grid_width: ?grid_w };
     let nx: i32 = 200;
     let ny: i32 = 100;
     let total: i32 = 20000;

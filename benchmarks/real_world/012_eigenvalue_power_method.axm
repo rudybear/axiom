@@ -79,6 +79,7 @@ fn vec_weighted_sum(v: ptr[f64], n: i32) -> f64 {
 }
 
 fn main() -> i32 {
+    @strategy { max_iterations: ?power_iterations };
     let n: i32 = 500;
     let n_sq: i32 = 250000;
 

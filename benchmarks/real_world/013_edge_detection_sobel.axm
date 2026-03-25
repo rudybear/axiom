@@ -6,8 +6,8 @@ fn main() -> i32 {
     let height: i32 = 512;
     let total: i32 = 262144;
 
-    let image: array[i32, 262144] = array_zeros[i32, 262144];
-    let edges: array[i32, 262144] = array_zeros[i32, 262144];
+    let image: ptr[i32] = heap_alloc_zeroed(262144, 4);
+    let edges: ptr[i32] = heap_alloc_zeroed(262144, 4);
 
     // Generate pseudo-random grayscale image
     let seed: i64 = 42;
@@ -17,7 +17,7 @@ fn main() -> i32 {
 
     for i: i32 in range(0, total) {
         seed = (lcg_a * seed + lcg_c) % lcg_m;
-        image[i] = narrow(seed % 256);
+        ptr_write_i32(image, i, narrow(seed % 256));
     }
 
     // Add some structured content (horizontal and vertical lines)
@@ -26,17 +26,17 @@ fn main() -> i32 {
             let idx: i32 = y * width + x;
             // Horizontal stripes
             if y % 32 < 4 {
-                image[idx] = 200;
+                ptr_write_i32(image, idx, 200);
             }
             // Vertical stripes
             if x % 64 < 4 {
-                image[idx] = 180;
+                ptr_write_i32(image, idx, 180);
             }
             // Circle-like pattern
             let dx: i32 = x - 256;
             let dy: i32 = y - 256;
             if dx * dx + dy * dy > 14400 and dx * dx + dy * dy < 16900 {
-                image[idx] = 240;
+                ptr_write_i32(image, idx, 240);
             }
         }
     }
@@ -52,14 +52,14 @@ fn main() -> i32 {
     for y: i32 in range(1, height - 1) {
         for x: i32 in range(1, width - 1) {
             // Gather 3x3 neighborhood
-            let p00: i32 = image[(y - 1) * width + (x - 1)];
-            let p01: i32 = image[(y - 1) * width + x];
-            let p02: i32 = image[(y - 1) * width + (x + 1)];
-            let p10: i32 = image[y * width + (x - 1)];
-            let p12: i32 = image[y * width + (x + 1)];
-            let p20: i32 = image[(y + 1) * width + (x - 1)];
-            let p21: i32 = image[(y + 1) * width + x];
-            let p22: i32 = image[(y + 1) * width + (x + 1)];
+            let p00: i32 = ptr_read_i32(image, (y - 1) * width + (x - 1));
+            let p01: i32 = ptr_read_i32(image, (y - 1) * width + x);
+            let p02: i32 = ptr_read_i32(image, (y - 1) * width + (x + 1));
+            let p10: i32 = ptr_read_i32(image, y * width + (x - 1));
+            let p12: i32 = ptr_read_i32(image, y * width + (x + 1));
+            let p20: i32 = ptr_read_i32(image, (y + 1) * width + (x - 1));
+            let p21: i32 = ptr_read_i32(image, (y + 1) * width + x);
+            let p22: i32 = ptr_read_i32(image, (y + 1) * width + (x + 1));
 
             // Gx = -p00 + p02 - 2*p10 + 2*p12 - p20 + p22
             let gx: i32 = 0 - p00 + p02 - 2 * p10 + 2 * p12 - p20 + p22;
@@ -75,7 +75,7 @@ fn main() -> i32 {
                 mag = 255;
             }
 
-            edges[y * width + x] = mag;
+            ptr_write_i32(edges, y * width + x, mag);
             edge_sum = edge_sum + widen(mag);
             if mag > max_edge {
                 max_edge = mag;
@@ -87,7 +87,7 @@ fn main() -> i32 {
     let threshold: i32 = 50;
     let above_count: i32 = 0;
     for i: i32 in range(0, total) {
-        if edges[i] > threshold {
+        if ptr_read_i32(edges, i) > threshold {
             above_count = above_count + 1;
         }
     }
@@ -95,7 +95,7 @@ fn main() -> i32 {
     // Histogram of edge magnitudes (16 bins)
     let hist: array[i32, 16] = array_zeros[i32, 16];
     for i: i32 in range(0, total) {
-        let bin: i32 = edges[i] / 16;
+        let bin: i32 = ptr_read_i32(edges, i) / 16;
         if bin > 15 { bin = 15; }
         hist[bin] = hist[bin] + 1;
     }
@@ -107,5 +107,7 @@ fn main() -> i32 {
 
     let checksum: i64 = edge_sum + widen(max_edge) * 10000 + widen(above_count) + hist_sum;
     print_i64(checksum);
+    heap_free(image);
+    heap_free(edges);
     return 0;
 }

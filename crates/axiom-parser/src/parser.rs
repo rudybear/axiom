@@ -1609,7 +1609,7 @@ impl<'src> Parser<'src> {
                 if matches!(stmt.node, Stmt::For { .. }) && !pending_for_annotations.is_empty() {
                     if let Stmt::For { ref mut body, .. } = &mut stmt.node {
                         // Prepend the pending annotations to the for-loop's body block.
-                        let mut merged = pending_for_annotations.drain(..).collect::<Vec<_>>();
+                        let mut merged = std::mem::take(&mut pending_for_annotations);
                         merged.append(&mut body.annotations);
                         body.annotations = merged;
                     }

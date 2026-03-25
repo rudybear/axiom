@@ -56,6 +56,7 @@ fn accumulate_energy(block_out: array[f64, 64]) -> f64 {
 }
 
 fn main() -> i32 {
+    @strategy { block_size: ?block_size, iterations: ?dct_iterations };
     let nblocks: i32 = 50000;
     let pi: f64 = 3.14159265358979;
 

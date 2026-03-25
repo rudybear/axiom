@@ -504,7 +504,7 @@ fn main() -> miette::Result<()> {
                     println!("{llvm_ir}");
                 }
                 Some(level) => {
-                    eprintln!("TODO: --emit={level} not yet implemented");
+                    return Err(miette::miette!("unknown --emit level '{}'. Valid: tokens, ast, hir, llvm-ir", level));
                 }
                 None => {
                     // Full compilation: .axm -> native binary

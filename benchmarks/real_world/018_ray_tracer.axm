@@ -156,6 +156,7 @@ fn compute_image_checksum(img_r: ptr[i32], img_g: ptr[i32], img_b: ptr[i32], tot
 }
 
 fn main() -> i32 {
+    @strategy { image_width: ?render_width, image_height: ?render_height };
     let width: i32 = 256;
     let height: i32 = 256;
     let total: i32 = 65536;
