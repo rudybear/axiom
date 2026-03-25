@@ -6,7 +6,7 @@ A programming language designed as the canonical transfer format between AI agen
 
 > **This is NOT a language for humans to program in. This is a language for AI agents to communicate optimized computation through.**
 
-> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 120 commits. 30,124 LOC. 450 tests. 197 benchmarks.
+> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 138 commits. 35,802 LOC. 469 tests. 197 benchmarks. ALL 47 milestones COMPLETE.
 
 ## Why AXIOM Exists
 
@@ -113,6 +113,24 @@ axiom profile program.axm --iterations 10
 
 # Format an AXIOM source file (parse -> HIR -> pretty-print)
 axiom fmt program.axm
+
+# Generate documentation from @intent and doc comments
+axiom doc program.axm
+
+# Profile-guided optimization bootstrap
+axiom pgo program.axm --iterations 3
+
+# Watch mode -- recompile on file changes
+axiom watch program.axm
+
+# Build project with dependency resolution
+axiom build
+
+# Source-to-source AI rewriter
+axiom rewrite program.axm --strategy performance
+
+# Start LSP server for editor integration
+axiom lsp
 
 # Start MCP server for AI agent integration
 axiom mcp
@@ -305,6 +323,20 @@ get_argv(i)                   // Argument string
 cpu_features()                // CPUID feature bitmask
 ```
 
+### Input System
+```axiom
+input_key_pressed(key_code)    // Check if key is currently pressed
+input_mouse_x()                // Mouse X position
+input_mouse_y()                // Mouse Y position
+input_mouse_button(button)     // Mouse button state
+```
+
+### Audio
+```axiom
+audio_play(path)               // Play WAV file
+audio_stop()                   // Stop playback
+```
+
 ### Function Pointers
 ```axiom
 let fp: ptr[i32] = fn_ptr(my_function);
@@ -312,7 +344,7 @@ let result: i32 = call_fn_ptr_i32(fp, arg);
 let result: f64 = call_fn_ptr_f64(fp, arg);
 ```
 
-### Renderer (Stub/Vulkan FFI)
+### Renderer (Vulkan)
 ```axiom
 renderer_create(width, height, title)
 renderer_destroy(r)
@@ -326,6 +358,9 @@ renderer_get_time(r)
 shader_load(r, path)
 pipeline_create(r, vert_shader, frag_shader)
 renderer_bind_pipeline(r, pipeline)
+gpu_add_light(r, x, y, z, intensity)          // Multi-light support
+gpu_draw_instanced(r, verts, count, instances) // Instanced rendering
+gpu_screenshot(r, path)                        // Screenshot capture
 ```
 
 ### C Interop
@@ -408,7 +443,7 @@ axiom/
 │   ├── axiom-mir/              # Mid-level IR (stub)
 │   └── axiom-driver/           # CLI + MCP server + compilation (57 tests)
 │       └── runtime/
-│           └── axiom_rt.c      # C runtime (I/O, coroutines, threads, jobs, renderer)
+│           └── axiom_rt.c      # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
 ├── spec/                       # Formal language specification
 │   ├── grammar.ebnf            # EBNF grammar
 │   ├── types.md                # Type system
@@ -422,22 +457,27 @@ axiom/
 │   ├── memory/                 # 30 memory benchmarks
 │   ├── fib/                    # Recursive fibonacci (from drujensen/fib)
 │   └── leibniz/                # Leibniz Pi (from niklas-heer/speed-comparison)
-├── examples/                   # 20 example AXIOM programs
+├── examples/                   # 27 example AXIOM programs
 │   ├── sort/                   # Bubble, insertion, selection sort
 │   ├── nbody/                  # N-body gravitational simulation
 │   ├── numerical/              # Pi, root finding, integration
 │   ├── crypto/                 # Caesar cipher
 │   ├── matmul/                 # Matrix multiplication demos
 │   ├── ecs/                    # Entity-Component-System game demo
-│   ├── vulkan/                 # Triangle rendering (stub -> Vulkan planned)
+│   ├── vulkan/                 # Vulkan triangle rendering
 │   ├── particle_galaxy/        # 10K particle galaxy (windowed renderer)
 │   ├── game_loop/              # Frame allocator, zero per-frame allocs
+│   ├── killer_demo/            # 10K particles with real Vulkan + Lux shaders
 │   ├── self_opt/               # LLM optimization demos (primes, matmul)
 │   ├── multi_agent/            # Multi-agent handoff demo
 │   └── self_host/              # AXIOM lexer written in AXIOM
+├── lib/                        # AXIOM standard libraries
+│   └── ecs.axm                 # ECS library (archetype storage)
+├── scripts/                    # Development scripts
+│   └── self_optimize.sh        # Self-optimization bootstrap script
 ├── tests/samples/              # 24 test programs
 ├── docs/                       # Research documents
-│   ├── MASTER_TASK_LIST.md     # 47-milestone task tracker
+│   ├── MASTER_TASK_LIST.md     # 47-milestone task tracker (ALL COMPLETE)
 │   ├── OPTIMIZATION_RESEARCH.md
 │   ├── MEMORY_ALLOCATION_RESEARCH.md
 │   ├── GAME_ENGINE_RESEARCH.md
@@ -452,18 +492,20 @@ axiom/
 
 ## Stats
 
-- **30,124 lines of Rust** across 7 crates
-- **450 tests** (all passing)
+- **35,802 lines of Rust** across 7 crates
+- **469 tests** (all passing)
 - **197 benchmarks** (100% compile rate)
-- **120 git commits** across 8 development phases
-- **97 builtin functions** (I/O, math, memory, concurrency, rendering, collections)
-- **20 example programs**, **24 sample programs**
+- **138 git commits** across 11 development phases (all complete)
+- **113 builtin functions** (I/O, math, memory, concurrency, rendering, collections, input, audio, GPU)
+- **12 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp
+- **27 example programs**, **24 sample programs**
 - **5 formal specification documents**
 - **6 research documents** (optimization, memory, game engine, multithreading, Lux integration, language plan)
+- **47/47 milestones COMPLETE** across 8 tracks
 
 ## Roadmap
 
-### Completed Phases
+### ALL PHASES COMPLETE
 
 - **Phase A:** MT-1 -- Fixed UB/soundness: removed incorrect `@pure`/`noalias`/`nosync` on shared pointers, added fences, fixed `@pure` semantics for write-through-ptr
 - **Phase B:** MT-2, MT-3 -- `@parallel_for` with data clauses (private, shared_read, shared_write, reduction), HIR validation, correct LLVM IR with atomics/fences, thread-local accumulation + final combine
@@ -471,14 +513,11 @@ axiom/
 - **Phase D:** MT-4, MT-5, MT-6 -- `readonly_ptr[T]`/`writeonly_ptr[T]` ownership types, job dependency graph (`job_dispatch_handle`, `job_dispatch_after`, `job_wait_handle`), LLVM parallel metadata
 - **Phase E:** F1, F2, F3, F5 -- Option/Result sum type builtins, string builtins (fat pointer), vec (dynamic array) builtins, function pointer builtins (`fn_ptr`, `call_fn_ptr_i32`, `call_fn_ptr_f64`)
 - **Phase F:** L2, P2, P3 -- Hardware counter integration (perf data fed to LLM), `cpu_features()` CPUID detection, SIMD width metadata on vectorizable loops
-- **Phase G:** F4, F6, F7, F8 -- (partial) Generics parsed, module system parsed, Result type implemented as builtins, while-let/if-let parsed
+- **Phase G:** F4, F6, F7, F8 -- Generics with monomorphization, module system with separate compilation, Result type builtins, while-let/if-let codegen
 - **Phase H:** E1, E2, E3 -- GitHub Actions CI (`ci.yml`), DWARF debug info in LLVM IR, `axiom fmt` formatter, `axiom profile` profiler
-
-### Remaining Phases
-
-- **Phase I:** R1-R5 -- Real Vulkan renderer (ash + winit + gpu-allocator, GPU buffers, SPIR-V shaders, descriptor sets, production renderer)
-- **Phase J:** G1-G5 -- Game engine (archetype ECS, input system, audio, hot reload, 10K particle demo with real Vulkan)
-- **Phase K:** S1-S3 -- Self-improvement (self-hosted parser, compiler self-optimization, source-to-source AI optimizer)
+- **Phase I:** R1-R5 -- Real Vulkan renderer (ash + winit + gpu-allocator, GPU buffers, SPIR-V shaders, descriptor sets, production renderer with instancing and multi-light)
+- **Phase J:** G1-G5 -- Game engine (archetype ECS, input system, audio, hot reload, 10K particle killer demo with real Vulkan + Lux shaders + parallel jobs)
+- **Phase K:** S1-S3 -- Self-improvement (self-hosted parser, compiler self-optimization via PGO bootstrap, source-to-source AI optimizer with `axiom rewrite`)
 
 ## Development Pipeline
 

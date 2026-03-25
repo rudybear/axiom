@@ -24,7 +24,7 @@
 | **L1** | Constraint-Driven LLM Prompts | Thread `@constraint { optimize_for: X }` into LLM prompt. Changes reasoning (performance vs memory vs size vs latency). | -- | **DONE** |
 | **L2** | Hardware Counter Integration | Feed timing/profiling data to LLM via `axiom profile`. | L1 | **DONE** |
 | **L3** | Recursive `@const` Evaluation | Full function body interpretation with depth limits. Supports recursive @const functions. | -- | **DONE** |
-| **L4** | PGO Bootstrap | Profile the compiler itself, recompile with profile data, iterate. | L2 | TODO |
+| **L4** | PGO Bootstrap | Profile the compiler itself, recompile with profile data, iterate. | L2 | **DONE** |
 
 ## Track 3: Platform-Specific Optimization
 
@@ -42,11 +42,11 @@
 | **F1** | Sum Types + Pattern Matching | Option/Result implemented as builtin functions (tagged union packed into i64). | -- | **DONE** |
 | **F2** | String Type | `string_from_literal`, `string_len`, `string_ptr`, `string_eq`, `string_print` builtins. Fat pointer (ptr + len). | -- | **DONE** |
 | **F3** | Dynamic Arrays | `vec_new`, `vec_push_*`, `vec_get_*`, `vec_set_*`, `vec_len`, `vec_free` builtins. | -- | **DONE** |
-| **F4** | Generics / Monomorphization | Generics parsed in grammar. Monomorphization codegen not yet implemented. | F1 | **PARTIAL** |
+| **F4** | Generics / Monomorphization | Generics parsed, monomorphization codegen implemented. | F1 | **DONE** |
 | **F5** | Closures / Function Pointers | `fn_ptr`, `call_fn_ptr_i32`, `call_fn_ptr_f64` builtins. | -- | **DONE** |
-| **F6** | Module System (Codegen) | `import` parsed and lowered to HIR. Separate compilation not yet implemented. | -- | **PARTIAL** |
+| **F6** | Module System (Codegen) | `import` parsed, lowered to HIR, separate compilation implemented. | -- | **DONE** |
 | **F7** | Error Handling | `result_ok`, `result_err`, `result_is_ok`, `result_is_err`, `result_unwrap`, `result_err_code` builtins. | F1 | **DONE** |
-| **F8** | While-let / If-let | Parsed in grammar. Codegen not yet implemented. | F1, F7 | **PARTIAL** |
+| **F8** | While-let / If-let | Parsed in grammar, codegen implemented. | F1, F7 | **DONE** |
 
 ## Track 5: Ecosystem & Polish
 
@@ -55,37 +55,37 @@
 | **E1** | CI/CD Pipeline | GitHub Actions `.github/workflows/ci.yml`: `cargo test --workspace` on every push. | -- | **DONE** |
 | **E2** | DWARF Debug Info | `!dbg` metadata in LLVM IR for source-level debugging with gdb/lldb. | -- | **DONE** |
 | **E3** | Formatter (`axiom fmt`) | Parse -> HIR -> pretty-print. `axiom fmt program.axm`. | -- | **DONE** |
-| **E4** | LSP Server | Editor integration (syntax highlighting, go-to-definition, errors). | -- | TODO |
-| **E5** | Package Manager | Share AXIOM libraries. Dependency resolution. | F6 | TODO |
-| **E6** | Documentation Generator | Generate docs from `@intent` and doc comments. | -- | TODO |
+| **E4** | LSP Server | Editor integration (syntax highlighting, go-to-definition, errors). `axiom lsp`. | -- | **DONE** |
+| **E5** | Package Manager | Share AXIOM libraries. Dependency resolution. `axiom build`. | F6 | **DONE** |
+| **E6** | Documentation Generator | Generate docs from `@intent` and doc comments. `axiom doc`. | -- | **DONE** |
 
 ## Track 6: Real Vulkan Renderer (After Tracks 1-5)
 
 | ID | Milestone | Description | Depends On | Status |
 |----|-----------|-------------|------------|--------|
-| **R1** | Vulkan Bootstrap | ash + winit + gpu-allocator. Window + GPU triangle. | F1 (for error handling) | TODO |
-| **R2** | AXIOM Arrays -> GPU Buffers | Upload vertex data from AXIOM to Vulkan buffers. | R1 | TODO |
-| **R3** | Lux SPIR-V Shader Loading | Real VkShaderModule + VkPipeline from Lux-compiled .spv files. | R1 | TODO |
-| **R4** | Descriptor Sets + Uniforms | Pass MVP matrix, time, etc. from AXIOM to shaders. | R3 | TODO |
-| **R5** | Production Renderer | Instancing, depth buffer, compute shaders. | R4, MT-5 | TODO |
+| **R1** | Vulkan Bootstrap | ash + winit + gpu-allocator. Window + GPU triangle. | F1 (for error handling) | **DONE** |
+| **R2** | AXIOM Arrays -> GPU Buffers | Upload vertex data from AXIOM to Vulkan buffers. | R1 | **DONE** |
+| **R3** | Lux SPIR-V Shader Loading | Real VkShaderModule + VkPipeline from Lux-compiled .spv files. | R1 | **DONE** |
+| **R4** | Descriptor Sets + Uniforms | Pass MVP matrix, time, etc. from AXIOM to shaders. | R3 | **DONE** |
+| **R5** | Production Renderer | Instancing, depth buffer, compute shaders. | R4, MT-5 | **DONE** |
 
 ## Track 7: Game Engine (After Track 6)
 
 | ID | Milestone | Description | Depends On | Status |
 |----|-----------|-------------|------------|--------|
-| **G1** | Proper ECS with Archetype Storage | Beyond the current demo. Real archetype-based component storage. | R5, MT-5, F4 | TODO |
-| **G2** | Input System | Keyboard/mouse from Win32/Vulkan surface events. | R1 | TODO |
-| **G3** | Audio | Basic WAV playback via C runtime. | -- | TODO |
-| **G4** | Hot Reload | Recompile functions while program runs. | F6 | TODO |
-| **G5** | Killer Demo v2 | 10K particles with real Vulkan + Lux shaders + parallel jobs. | All above | TODO |
+| **G1** | Proper ECS with Archetype Storage | Beyond the current demo. Real archetype-based component storage. | R5, MT-5, F4 | **DONE** |
+| **G2** | Input System | Keyboard/mouse from Win32/Vulkan surface events. | R1 | **DONE** |
+| **G3** | Audio | Basic WAV playback via C runtime. | -- | **DONE** |
+| **G4** | Hot Reload | Recompile functions while program runs. | F6 | **DONE** |
+| **G5** | Killer Demo v2 | 10K particles with real Vulkan + Lux shaders + parallel jobs. | All above | **DONE** |
 
 ## Track 8: Self-Improvement (Ongoing)
 
 | ID | Milestone | Description | Depends On | Status |
 |----|-----------|-------------|------------|--------|
-| **S1** | Self-Hosted Parser | AXIOM parser written in AXIOM. | F2, F3, F4 | TODO |
-| **S2** | Compiler Self-Optimization | Compiler uses LLM loop to optimize its own hot paths. | L4 | TODO |
-| **S3** | Source-to-Source AI Optimizer | LLM rewrites AXIOM source (not just ?params). | L1, L2 | TODO |
+| **S1** | Self-Hosted Parser | AXIOM parser written in AXIOM. | F2, F3, F4 | **DONE** |
+| **S2** | Compiler Self-Optimization | Compiler uses LLM loop to optimize its own hot paths. | L4 | **DONE** |
+| **S3** | Source-to-Source AI Optimizer | LLM rewrites AXIOM source (not just ?params). `axiom rewrite`. | L1, L2 | **DONE** |
 
 ---
 
@@ -98,13 +98,13 @@ Phase C: L1, L3, P1, P4 (constraints + consteval + platform)             DONE
 Phase D: MT-4, MT-5, MT-6 (ownership + deps + LLVM metadata)             DONE
 Phase E: F1, F2, F3, F5 (sum types, strings, dynamic arrays, closures)   DONE
 Phase F: L2, P2, P3 (hardware counters, CPUID, SIMD)                     DONE
-Phase G: F4, F6, F7, F8 (generics, modules, errors -- partial)           DONE (partial)
+Phase G: F4, F6, F7, F8 (generics, modules, errors, pattern matching)    DONE
 Phase H: E1, E2, E3 (CI, debug info, formatter)                          DONE
-Phase I: R1-R5 (real Vulkan renderer)                                     TODO
-Phase J: G1-G5 (game engine)                                              TODO
-Phase K: S1-S3 (self-improvement)                                         TODO
+Phase I: R1-R5 (real Vulkan renderer)                                     DONE
+Phase J: G1-G5 (game engine)                                              DONE
+Phase K: S1-S3 (self-improvement)                                         DONE
 ```
 
 **Total: 47 milestones across 8 tracks.**
-**Completed: 30 milestones (Phases A-H). Remaining: 17 milestones (Phases I-K).**
+**Completed: 47/47 milestones (ALL PHASES COMPLETE).**
 **Each milestone goes through the full 7-agent pipeline.**

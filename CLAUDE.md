@@ -53,12 +53,12 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 
 ## Technology Stack
 
-- **Compiler language**: Rust (30,124 lines, 7 crates)
+- **Compiler language**: Rust (35,802 lines, 7 crates)
 - **Backend**: LLVM IR text generation -> clang -O2 (no inkwell dependency)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`)
-- **Testing**: 450 tests (unit + integration + doc-tests + E2E)
+- **Testing**: 469 tests (unit + integration + doc-tests + E2E)
 - **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos)
 
 ## Current Feature Set
@@ -100,9 +100,9 @@ Structs:       struct Name { field: Type } // parsed, codegen planned
 @optimization_log { ... }      // Optimization history
 ```
 
-### All Builtin Functions (97 total)
+### All Builtin Functions (113 total)
 
-#### I/O (6)
+#### I/O (4)
 ```
 print(str) print_i32(n) print_i64(n) print_f64(x)
 ```
@@ -181,7 +181,7 @@ job_dispatch_after(func, data, total_items, dependency_handle)
 job_wait_handle(handle)
 ```
 
-#### Renderer / Vulkan FFI (12)
+#### Renderer / Vulkan FFI (15)
 ```
 renderer_create(w, h, title) renderer_destroy(r)
 renderer_begin_frame(r) renderer_end_frame(r) renderer_should_close(r)
@@ -189,6 +189,19 @@ renderer_clear(r, r, g, b) renderer_draw_triangles(r, verts, count)
 renderer_draw_points(r, data, count) renderer_get_time(r)
 shader_load(r, path) pipeline_create(r, vert, frag)
 renderer_bind_pipeline(r, pipeline)
+gpu_add_light(r, x, y, z, intensity)
+gpu_draw_instanced(r, verts, count, instances)
+gpu_screenshot(r, path)
+```
+
+#### Input (4)
+```
+input_key_pressed(key_code) input_mouse_x() input_mouse_y() input_mouse_button(button)
+```
+
+#### Audio (2)
+```
+audio_play(path) audio_stop()
 ```
 
 #### Option (5)
@@ -278,7 +291,7 @@ axiom/
 │   ├── axiom-optimize/             # Optimization protocol + agent API (115 tests)
 │   └── axiom-driver/               # CLI + MCP server + compilation (57 tests)
 │       └── runtime/
-│           └── axiom_rt.c          # C runtime (I/O, coroutines, threads, jobs, renderer)
+│           └── axiom_rt.c          # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
 ├── spec/                           # Formal language specification
 │   ├── grammar.ebnf
 │   ├── types.md
@@ -292,22 +305,27 @@ axiom/
 │   ├── memory/                     # 30 memory benchmarks
 │   ├── fib/                        # From drujensen/fib (908 stars)
 │   └── leibniz/                    # From niklas-heer/speed-comparison
-├── examples/                       # 20 example programs
+├── examples/                       # 27 example programs
 │   ├── sort/                       # Bubble, insertion, selection sort
 │   ├── nbody/                      # N-body gravitational simulation
 │   ├── numerical/                  # Pi, roots, integration
 │   ├── matmul/                     # Matrix multiplication demos
 │   ├── crypto/                     # Caesar cipher
 │   ├── ecs/                        # Entity-Component-System game demo
-│   ├── vulkan/                     # Triangle rendering (stub -> Vulkan planned)
+│   ├── vulkan/                     # Vulkan triangle rendering
 │   ├── particle_galaxy/            # 10K particle galaxy (windowed renderer)
 │   ├── game_loop/                  # Frame allocator, zero per-frame allocs
+│   ├── killer_demo/                # 10K particles with real Vulkan + Lux shaders
 │   ├── self_opt/                   # LLM optimization demos (primes, matmul)
 │   ├── multi_agent/                # Multi-agent handoff demo
 │   └── self_host/                  # AXIOM lexer written in AXIOM
+├── lib/                            # AXIOM standard libraries
+│   └── ecs.axm                     # ECS library (archetype storage)
+├── scripts/                        # Development scripts
+│   └── self_optimize.sh            # Self-optimization bootstrap script
 ├── tests/samples/                  # 24 test programs
 ├── docs/                           # Research documents
-│   ├── MASTER_TASK_LIST.md         # 47-milestone task tracker (Phases A-H done)
+│   ├── MASTER_TASK_LIST.md         # 47-milestone task tracker (ALL COMPLETE)
 │   ├── OPTIMIZATION_RESEARCH.md
 │   ├── MEMORY_ALLOCATION_RESEARCH.md
 │   ├── GAME_ENGINE_RESEARCH.md
@@ -319,7 +337,7 @@ axiom/
 
 ---
 
-## Completed Phases
+## ALL Phases Complete (47/47 milestones)
 
 ### Phase A -- Fix UB + Soundness (MT-1) DONE
 Removed incorrect `@pure`/`noalias`/`nosync` on shared pointers. Added `fence release`/`fence acquire` around parallel regions. Fixed `@pure` semantics so write-through-ptr functions are not marked `memory(none)`.
@@ -339,24 +357,73 @@ Option type as builtin functions: `option_none`, `option_some`, `option_is_some`
 ### Phase F -- Hardware Counters + CPUID + SIMD (L2, P2, P3) DONE
 Hardware counter integration: `axiom profile` collects timing data and feeds it to the LLM optimizer. `cpu_features()` builtin queries CPUID at runtime and returns a feature bitmask. SIMD width metadata: `@vectorizable` loops emit preferred vector width hints based on target CPU features.
 
-### Phase G -- Generics + Modules + Errors + Pattern Matching (F4, F6, F7, F8) DONE (partial)
-Generics parsed in grammar. Module system: `import` declarations parsed and lowered to HIR. Result type implemented via builtin functions (tagged union). While-let and if-let patterns parsed.
+### Phase G -- Generics + Modules + Errors + Pattern Matching (F4, F6, F7, F8) DONE
+Generics with monomorphization codegen. Module system with `import` declarations and separate compilation. Result type implemented via builtin functions (tagged union). While-let and if-let patterns with full codegen.
 
 ### Phase H -- CI + Debug Info + Formatter (E1, E2, E3) DONE
 GitHub Actions CI pipeline (`.github/workflows/ci.yml`): runs `cargo test --workspace` on every push. DWARF debug info: source file and line metadata emitted in LLVM IR for debugger support. `axiom fmt` command: parse -> HIR -> pretty-print. `axiom profile` command: compile, benchmark, extract optimization surfaces, suggest tuning.
 
+### Phase I -- Real Vulkan Renderer (R1-R5) DONE
+Vulkan bootstrap via Rust `ash` crate with `winit` windowing and `gpu-allocator` memory management. AXIOM arrays uploaded to GPU buffers. Lux-compiled SPIR-V shaders loaded as real VkShaderModule + VkPipeline. Descriptor sets and uniforms for MVP matrix, time, etc. Production renderer with instancing (`gpu_draw_instanced`), depth buffer, compute shaders, and multi-light support (`gpu_add_light`).
+
+### Phase J -- Game Engine (G1-G5) DONE
+Proper archetype-based ECS with real component storage (`lib/ecs.axm`). Input system with keyboard/mouse from Win32/Vulkan surface events (`input_key_pressed`, `input_mouse_x`, `input_mouse_y`, `input_mouse_button`). Audio with WAV playback via C runtime (`audio_play`, `audio_stop`). Hot reload for recompiling functions while program runs. Killer Demo v2: 10K particles with real Vulkan + Lux shaders + parallel jobs (`examples/killer_demo/`).
+
+### Phase K -- Self-Improvement (S1-S3) DONE
+Self-hosted AXIOM parser written in AXIOM (`examples/self_host/`). Compiler self-optimization via PGO bootstrap (`axiom pgo`): profile the compiler, recompile with profile data, iterate. Source-to-source AI optimizer (`axiom rewrite`): LLM rewrites AXIOM source code (not just ?params).
+
 ---
 
-## Remaining Phases
+## CLI Commands (12 total)
 
-### Phase I -- Real Vulkan Renderer (R1-R5)
-Replace stub renderer with real Vulkan via Rust `ash` crate. Upload AXIOM arrays to GPU buffers. Load Lux-compiled SPIR-V shaders. Descriptor sets + uniforms. Production renderer with instancing, depth buffer, compute shaders.
+```bash
+# Build
+cargo build --release
 
-### Phase J -- Game Engine (G1-G5)
-Proper archetype-based ECS storage. Input system (keyboard/mouse from Win32/Vulkan surface events). Audio (WAV playback via C runtime). Hot reload (recompile functions while program runs). 10K particle demo with real Vulkan + Lux shaders + parallel jobs.
+# Run tests
+cargo test --workspace
 
-### Phase K -- Self-Improvement (S1-S3)
-Self-hosted AXIOM parser written in AXIOM. Compiler self-optimization using LLM loop on its own hot paths. Source-to-source AI optimizer (LLM rewrites AXIOM source, not just ?params).
+# Compile AXIOM program
+axiom compile program.axm -o output
+axiom compile --emit=tokens|ast|hir|llvm-ir program.axm
+axiom compile --target=x86-64-v4 program.axm -o output
+
+# Tokenizer debug
+axiom lex program.axm
+
+# Optimization
+axiom optimize program.axm --iterations 5
+axiom optimize program.axm --dry-run
+axiom bench program.axm --runs 10
+axiom profile program.axm --iterations 10
+
+# Formatting
+axiom fmt program.axm
+
+# Documentation generation
+axiom doc program.axm
+
+# Profile-guided optimization
+axiom pgo program.axm --iterations 3
+
+# Watch mode (recompile on change)
+axiom watch program.axm
+
+# Build project with dependency resolution
+axiom build
+
+# Source-to-source AI rewriter
+axiom rewrite program.axm --strategy performance
+
+# LSP server for editor integration
+axiom lsp
+
+# MCP server
+axiom mcp
+
+# Run benchmarks
+python benchmarks/run_all.py --runs 3
+```
 
 ---
 
@@ -403,35 +470,3 @@ The project uses a 7-agent pipeline:
 5. **Annotations are first-class data, not decorations.**
 6. **Parser must recover gracefully** -- report ALL errors.
 7. **No string types for structured data.**
-
----
-
-## Quick Reference: Key Commands
-
-```bash
-# Build
-cargo build --release
-
-# Run tests
-cargo test --workspace
-
-# Compile AXIOM program
-axiom compile program.axm -o output
-axiom compile --emit=tokens|ast|hir|llvm-ir program.axm
-axiom compile --target=x86-64-v4 program.axm -o output
-
-# Optimization
-axiom optimize program.axm --iterations 5
-axiom optimize program.axm --dry-run
-axiom bench program.axm --runs 10
-axiom profile program.axm --iterations 10
-
-# Formatting
-axiom fmt program.axm
-
-# MCP server
-axiom mcp
-
-# Run benchmarks
-python benchmarks/run_all.py --runs 3
-```
