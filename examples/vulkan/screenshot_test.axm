@@ -1,0 +1,23 @@
+@module screenshot_test;
+
+fn main() -> i32 {
+    let gpu: ptr[i32] = gpu_init(800, 600, "Screenshot Test");
+    let scene: i32 = gpu_load_gltf(gpu, "data/DamagedHelmet.glb");
+    gpu_set_camera(gpu, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 60.0);
+
+    // Render 5 frames to warm up
+    let i: i32 = 0;
+    while i < 5 {
+        gpu_begin_frame(gpu);
+        gpu_render(gpu);
+        gpu_end_frame(gpu);
+        i = i + 1;
+    }
+
+    // Capture screenshot
+    gpu_screenshot(gpu, "screenshot.png");
+    print("Screenshot saved to screenshot.png");
+
+    gpu_shutdown(gpu);
+    return 0;
+}

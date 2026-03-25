@@ -428,6 +428,37 @@ pub unsafe extern "C" fn gpu_render(_handle: *mut std::ffi::c_void) {
     with_renderer((), |r| r.render_scene());
 }
 
+/// Capture a screenshot of the current frame and save to a PNG file.
+/// Returns 0 on success, non-zero on failure.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_screenshot(
+    _handle: *mut std::ffi::c_void,
+    path: *const c_char,
+) -> c_int {
+    if path.is_null() {
+        eprintln!("[AXIOM GPU] Error: null path passed to gpu_screenshot");
+        return 1;
+    }
+
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[AXIOM GPU] Error: invalid UTF-8 path: {e}");
+            return 1;
+        }
+    };
+
+    with_renderer(1, |r| {
+        match r.screenshot(path_str) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[AXIOM GPU] Screenshot error: {e}");
+                1
+            }
+        }
+    })
+}
+
 /// Returns the time (in seconds) of the last completed frame.
 #[no_mangle]
 pub unsafe extern "C" fn gpu_get_frame_time(_handle: *mut std::ffi::c_void) -> c_double {

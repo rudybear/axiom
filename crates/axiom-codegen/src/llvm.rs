@@ -723,6 +723,10 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             ctx.output,
             "declare ptr @gpu_get_gpu_name(ptr)"
         );
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_screenshot(ptr, ptr)"
+        );
     }
 
     // Emit Vec (dynamic array) runtime extern declarations.
@@ -867,6 +871,7 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@gpu_render(")
         || ir.contains("@gpu_get_frame_time")
         || ir.contains("@gpu_get_gpu_name")
+        || ir.contains("@gpu_screenshot")
         // Vec builtins
         || ir.contains("@axiom_vec_new")
         || ir.contains("@axiom_vec_push_i32")
@@ -2900,6 +2905,7 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "gpu_render" => return emit_builtin_gpu_render(ctx, args),
             "gpu_get_frame_time" => return emit_builtin_gpu_get_frame_time(ctx, args),
             "gpu_get_gpu_name" => return emit_builtin_gpu_get_gpu_name(ctx, args),
+            "gpu_screenshot" => return emit_builtin_gpu_screenshot(ctx, args),
             // Option (sum type) builtins -- tagged union packed into i64
             "option_none" => return emit_builtin_option_none(ctx, args),
             "option_some" => return emit_builtin_option_some(ctx, args),
@@ -5656,6 +5662,36 @@ fn emit_builtin_gpu_get_gpu_name(ctx: &mut CodegenContext, args: &[HirExpr]) -> 
     LlvmValue {
         reg: result_reg,
         ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_screenshot(handle: ptr, path: ptr) -> i32`.
+fn emit_builtin_gpu_screenshot(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_screenshot() requires exactly 2 arguments (handle, path)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let path_val = emit_expr(ctx, &args[1], Some("ptr"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_screenshot(ptr {}, ptr {})",
+        handle_val.reg, path_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
     }
 }
 

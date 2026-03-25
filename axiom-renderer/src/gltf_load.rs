@@ -83,6 +83,7 @@ pub fn load_gltf(
     fallback_white: &wgpu::TextureView,
     fallback_normal: &wgpu::TextureView,
     fallback_mr: &wgpu::TextureView,
+    fallback_emissive: &wgpu::TextureView,
 ) -> Result<GpuScene, String> {
     let (document, buffers, images) = gltf::import(path).map_err(|e| format!("glTF load error: {e}"))?;
 
@@ -93,6 +94,20 @@ pub fn load_gltf(
         document.materials().count(),
         images.len(),
     );
+
+    // --- Determine which images are used as sRGB (base color) vs linear (normal, metallic-roughness) ---
+    let mut srgb_image_indices = std::collections::HashSet::new();
+    for mat in document.materials() {
+        let pbr = mat.pbr_metallic_roughness();
+        if let Some(info) = pbr.base_color_texture() {
+            srgb_image_indices.insert(info.texture().source().index());
+        }
+        // Emissive textures are also sRGB
+        if let Some(info) = mat.emissive_texture() {
+            srgb_image_indices.insert(info.texture().source().index());
+        }
+        // Normal and metallic-roughness remain linear (Rgba8Unorm)
+    }
 
     // --- Upload textures from glTF images ---
     let mut texture_views: Vec<wgpu::TextureView> = Vec::new();
@@ -143,6 +158,15 @@ pub fn load_gltf(
         let width = if rgba_data.len() == 4 { 1 } else { img_data.width };
         let height = if rgba_data.len() == 4 { 1 } else { img_data.height };
 
+        // Use sRGB format for base color and emissive textures (color data),
+        // linear for normal maps and metallic-roughness (non-color data).
+        let tex_format = if srgb_image_indices.contains(&i) {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        println!("[AXIOM glTF]   Image {i}: format_gpu={:?} (srgb={})", tex_format, srgb_image_indices.contains(&i));
+
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("glTF image {i}")),
             size: wgpu::Extent3d {
@@ -153,7 +177,7 @@ pub fn load_gltf(
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: tex_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -197,6 +221,28 @@ pub fn load_gltf(
             _pad2: 0.0,
         };
 
+        println!(
+            "[AXIOM glTF]   Material: base_color={:?}, metallic={}, roughness={}, emissive=({}, {}, {})",
+            params.base_color, params.metallic, params.roughness,
+            params.emissive_x, params.emissive_y, params.emissive_z
+        );
+        // Log which texture indices are being used
+        if let Some(info) = pbr.base_color_texture() {
+            println!("[AXIOM glTF]     base_color_tex: image index {}", info.texture().source().index());
+        } else {
+            println!("[AXIOM glTF]     base_color_tex: NONE (using fallback white)");
+        }
+        if let Some(nt) = mat.normal_texture() {
+            println!("[AXIOM glTF]     normal_tex: image index {}", nt.texture().source().index());
+        } else {
+            println!("[AXIOM glTF]     normal_tex: NONE (using fallback)");
+        }
+        if let Some(mr) = pbr.metallic_roughness_texture() {
+            println!("[AXIOM glTF]     metallic_roughness_tex: image index {}", mr.texture().source().index());
+        } else {
+            println!("[AXIOM glTF]     metallic_roughness_tex: NONE (using fallback)");
+        }
+
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material params"),
             contents: bytemuck::bytes_of(&params),
@@ -237,6 +283,19 @@ pub fn load_gltf(
             fallback_mr
         };
 
+        let emissive_view = if let Some(emissive_tex) = mat.emissive_texture() {
+            let idx = emissive_tex.texture().source().index();
+            if idx < texture_views.len() {
+                println!("[AXIOM glTF]     emissive_tex: image index {}", idx);
+                &texture_views[idx]
+            } else {
+                fallback_emissive
+            }
+        } else {
+            println!("[AXIOM glTF]     emissive_tex: NONE (using fallback black)");
+            fallback_emissive
+        };
+
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material bind group"),
             layout: material_bind_group_layout,
@@ -267,6 +326,14 @@ pub fn load_gltf(
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(emissive_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
@@ -329,6 +396,14 @@ pub fn load_gltf(
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(fallback_emissive),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],

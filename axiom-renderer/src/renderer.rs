@@ -302,7 +302,7 @@ impl Renderer {
             .unwrap_or(surface_caps.formats[0]);
 
         let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
             width,
             height,
@@ -728,6 +728,175 @@ impl Renderer {
         self.start_time.elapsed().as_secs_f64()
     }
 
+    /// Capture the current frame to a PNG file.
+    ///
+    /// This renders the PBR scene (if loaded) into the surface texture, copies
+    /// the result to a CPU-readable buffer, converts BGRA -> RGBA, and saves
+    /// a PNG using the `image` crate.
+    pub fn screenshot(&mut self, path: &str) -> Result<(), String> {
+        self.ensure_pbr_pipeline();
+        self.ensure_depth_texture();
+
+        let width = self.surface_config.width;
+        let height = self.surface_config.height;
+
+        // Get the current surface texture
+        let output = self.surface.get_current_texture().map_err(|e| format!("Surface: {e}"))?;
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // --- Render the scene into this texture ---
+        if let (Some(scene), Some(depth_view), Some(pbr)) =
+            (&self.loaded_scene, &self.depth_view, &self.pbr_pipeline)
+        {
+            let aspect = width as f32 / height.max(1) as f32;
+            let camera_uniform = CameraUniform::from_state(&self.camera, aspect);
+            pbr.update_camera(&self.queue, &camera_uniform);
+
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Screenshot Render Encoder"),
+            });
+
+            {
+                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Screenshot Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.1, g: 0.1, b: 0.1, a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                render_pass.set_pipeline(&pbr.pipeline);
+                render_pass.set_bind_group(0, &pbr.camera_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, scene.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(scene.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+
+                for range in &scene.draw_ranges {
+                    let mat_idx = range.material_index.min(scene.materials.len().saturating_sub(1));
+                    render_pass.set_bind_group(1, &scene.materials[mat_idx].bind_group, &[]);
+                    render_pass.draw_indexed(
+                        range.index_offset..range.index_offset + range.index_count,
+                        0,
+                        0..1,
+                    );
+                }
+            }
+
+            self.queue.submit(std::iter::once(encoder.finish()));
+        }
+
+        // --- Copy texture to CPU buffer ---
+        let bytes_per_pixel = 4u32;
+        let padded_row_size = ((width * bytes_per_pixel + 255) / 256) * 256;
+
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screenshot buffer"),
+            size: (padded_row_size * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            output.texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row_size),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Map and save
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::Maintain::Wait);
+
+        let data = slice.get_mapped_range();
+
+        // Determine if the surface format is BGRA (common on Windows/Vulkan)
+        let is_bgra = matches!(
+            self.surface_config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+
+        // Unpad rows and convert BGRA->RGBA if needed
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                let src_offset = y * padded_row_size as usize + x * 4;
+                let dst_offset = (y * width as usize + x) * 4;
+                if is_bgra {
+                    rgba[dst_offset]     = data[src_offset + 2]; // R from B
+                    rgba[dst_offset + 1] = data[src_offset + 1]; // G
+                    rgba[dst_offset + 2] = data[src_offset];     // B from R
+                } else {
+                    rgba[dst_offset]     = data[src_offset];
+                    rgba[dst_offset + 1] = data[src_offset + 1];
+                    rgba[dst_offset + 2] = data[src_offset + 2];
+                }
+                rgba[dst_offset + 3] = data[src_offset + 3]; // A
+            }
+        }
+        drop(data);
+        buffer.unmap();
+
+        // Log pixel statistics for debugging
+        let mut r_sum: u64 = 0;
+        let mut g_sum: u64 = 0;
+        let mut b_sum: u64 = 0;
+        let pixel_count = (width * height) as u64;
+        for i in 0..(width * height) as usize {
+            r_sum += rgba[i * 4] as u64;
+            g_sum += rgba[i * 4 + 1] as u64;
+            b_sum += rgba[i * 4 + 2] as u64;
+        }
+        let r_avg = r_sum as f64 / pixel_count as f64;
+        let g_avg = g_sum as f64 / pixel_count as f64;
+        let b_avg = b_sum as f64 / pixel_count as f64;
+        println!(
+            "[AXIOM Screenshot] {}x{} format={:?} avg_rgb=({:.1}, {:.1}, {:.1})",
+            width, height, self.surface_config.format, r_avg, g_avg, b_avg
+        );
+
+        // Sample center pixel
+        let cx = width as usize / 2;
+        let cy = height as usize / 2;
+        let ci = (cy * width as usize + cx) * 4;
+        println!(
+            "[AXIOM Screenshot] Center pixel ({},{}) = rgba({}, {}, {}, {})",
+            cx, cy, rgba[ci], rgba[ci+1], rgba[ci+2], rgba[ci+3]
+        );
+
+        // Present the texture (so the window shows the frame)
+        output.present();
+
+        image::save_buffer(path, &rgba, width, height, image::ColorType::Rgba8)
+            .map_err(|e| format!("Save PNG: {e}"))?;
+
+        println!("[AXIOM Screenshot] Saved to {path}");
+        Ok(())
+    }
+
     pub fn destroy(&mut self) {
         println!(
             "[AXIOM Renderer] Destroyed after {} frames",
@@ -781,6 +950,7 @@ impl Renderer {
             &pbr.fallback_white_view,
             &pbr.fallback_normal_view,
             &pbr.fallback_mr_view,
+            &pbr.fallback_emissive_view,
         ) {
             Ok(scene) => {
                 let id = self.next_scene_id;

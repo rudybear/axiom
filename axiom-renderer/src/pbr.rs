@@ -39,6 +39,8 @@ struct MaterialParams {
 @group(1) @binding(4) var normal_samp: sampler;
 @group(1) @binding(5) var metallic_roughness_tex: texture_2d<f32>;
 @group(1) @binding(6) var metallic_roughness_samp: sampler;
+@group(1) @binding(7) var emissive_tex: texture_2d<f32>;
+@group(1) @binding(8) var emissive_samp: sampler;
 
 // ---- Vertex I/O ----
 struct VertexInput {
@@ -102,64 +104,63 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Sample textures
+    // --- Sample textures ---
     let base_color_sample = textureSample(base_color_tex, base_color_samp, in.uv);
-    // sRGB to linear conversion (textures stored as Rgba8Unorm for compatibility)
-    let srgb = base_color_sample.rgb;
-    let linear_color = pow(srgb, vec3<f32>(2.2, 2.2, 2.2));
-    let albedo = linear_color * material.base_color.rgb;
+    let albedo = base_color_sample.rgb * material.base_color.rgb;
     let alpha = base_color_sample.a * material.base_color.a;
 
     let mr_sample = textureSample(metallic_roughness_tex, metallic_roughness_samp, in.uv);
     let metallic = mr_sample.b * material.metallic;
     let roughness = clamp(mr_sample.g * material.roughness, 0.04, 1.0);
 
-    // Normal mapping
-    let normal_sample = textureSample(normal_tex, normal_samp, in.uv).rgb;
-    let tangent_normal = normal_sample * 2.0 - 1.0;
-    let tbn = mat3x3<f32>(
-        normalize(in.tangent),
-        normalize(in.bitangent),
-        normalize(in.world_normal),
-    );
-    let n = normalize(tbn * tangent_normal);
+    // --- Normal mapping ---
+    let normal_sample = textureSample(normal_tex, normal_samp, in.uv).rgb * 2.0 - 1.0;
+    let T = normalize(in.tangent);
+    let B = normalize(in.bitangent);
+    let N_geom = normalize(in.world_normal);
+    let TBN = mat3x3<f32>(T, B, N_geom);
+    let N = normalize(TBN * normal_sample);
 
-    let v = normalize(camera.eye_pos - in.world_pos);
-    let l = normalize(LIGHT_DIR);
-    let h = normalize(v + l);
+    // --- PBR Cook-Torrance BRDF ---
+    let V = normalize(camera.eye_pos - in.world_pos);
+    let L = normalize(LIGHT_DIR);
+    let H = normalize(V + L);
 
-    let n_dot_l = max(dot(n, l), 0.0);
-    let n_dot_v = max(dot(n, v), 0.001);
-    let n_dot_h = max(dot(n, h), 0.0);
-    let h_dot_v = max(dot(h, v), 0.0);
+    let n_dot_v = max(dot(N, V), 0.0001);
+    let n_dot_l = max(dot(N, L), 0.0);
+    let n_dot_h = max(dot(N, H), 0.0);
+    let v_dot_h = max(dot(V, H), 0.0);
 
-    // PBR: Cook-Torrance BRDF
-    let f0_dielectric = vec3<f32>(0.04, 0.04, 0.04);
-    let f0 = mix(f0_dielectric, albedo, metallic);
+    let f0 = mix(vec3<f32>(0.04, 0.04, 0.04), albedo, metallic);
 
-    let d = distribution_ggx(n_dot_h, roughness);
-    let g = geometry_smith(n_dot_v, n_dot_l, roughness);
-    let f = fresnel_schlick(h_dot_v, f0);
+    let D = distribution_ggx(n_dot_h, roughness);
+    let G = geometry_smith(n_dot_v, n_dot_l, roughness);
+    let F = fresnel_schlick(v_dot_h, f0);
 
-    let specular = (d * g * f) / (4.0 * n_dot_v * n_dot_l + 0.0001);
+    let numerator = D * G * F;
+    let denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
+    let specular = numerator / denominator;
 
-    let ks = f;
-    let kd = (1.0 - ks) * (1.0 - metallic);
-    let diffuse = kd * albedo / PI;
+    let kS = F;
+    let kD = (vec3<f32>(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
 
-    let radiance = LIGHT_COLOR * LIGHT_INTENSITY;
-    var color = (diffuse + specular) * radiance * n_dot_l;
+    let Lo = (kD * albedo / PI + specular) * LIGHT_COLOR * LIGHT_INTENSITY * n_dot_l;
 
-    // Ambient
-    color += AMBIENT * albedo;
+    // Emissive: sample texture and multiply by factor
+    let emissive_sample = textureSample(emissive_tex, emissive_samp, in.uv).rgb;
+    let emissive_factor = vec3<f32>(material.emissive_x, material.emissive_y, material.emissive_z);
+    let emissive = emissive_sample * emissive_factor;
 
-    // Emissive
-    let emissive = vec3<f32>(material.emissive_x, material.emissive_y, material.emissive_z);
-    color += emissive;
+    var color = Lo + AMBIENT * albedo + emissive;
 
-    // Linear to sRGB for output
-    let srgb_out = pow(color, vec3<f32>(1.0/2.2, 1.0/2.2, 1.0/2.2));
-    return vec4<f32>(srgb_out, alpha);
+    // Simple Reinhard tone mapping
+    color = color / (color + vec3<f32>(1.0, 1.0, 1.0));
+
+    // Gamma correction (linear -> sRGB)
+    // Note: if the surface format is *Srgb, the hardware does this automatically.
+    // We skip manual gamma here since the surface is Bgra8UnormSrgb.
+
+    return vec4<f32>(color, alpha);
 }
 "#;
 
@@ -178,6 +179,8 @@ pub struct PbrPipeline {
     pub fallback_normal_view: wgpu::TextureView,
     pub fallback_mr_tex: wgpu::Texture,
     pub fallback_mr_view: wgpu::TextureView,
+    pub fallback_emissive_tex: wgpu::Texture,
+    pub fallback_emissive_view: wgpu::TextureView,
 }
 
 impl PbrPipeline {
@@ -273,6 +276,24 @@ impl PbrPipeline {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // binding 7: emissive texture
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // binding 8: emissive sampler
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
 
@@ -315,6 +336,8 @@ impl PbrPipeline {
             create_fallback_1x1(device, queue, [128, 128, 255, 255], "fallback_normal", false);
         let (fallback_mr_tex, fallback_mr_view) =
             create_fallback_1x1(device, queue, [0, 128, 0, 255], "fallback_mr", false);
+        let (fallback_emissive_tex, fallback_emissive_view) =
+            create_fallback_1x1(device, queue, [0, 0, 0, 255], "fallback_emissive", true);
 
         // --- Shader module ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -389,6 +412,8 @@ impl PbrPipeline {
             fallback_normal_view,
             fallback_mr_tex,
             fallback_mr_view,
+            fallback_emissive_tex,
+            fallback_emissive_view,
         }
     }
 
