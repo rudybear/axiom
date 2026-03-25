@@ -982,6 +982,14 @@ void axiom_job_wait_handle(int handle) {
 
 #endif /* _WIN32 / POSIX -- threading */
 
+/* ── Input State (globals) ───────────────────────────────────────────── */
+/* Declared here so the Win32 window procedure can update them, and the  */
+/* input API functions (further below) can read them.                    */
+static int axiom_key_state[256] = {0};
+static int axiom_mouse_x = 0;
+static int axiom_mouse_y = 0;
+static int axiom_mouse_buttons[3] = {0};
+
 /* ── Renderer API ────────────────────────────────────────────────────── */
 /* When AXIOM_USE_WGPU_RENDERER is defined, the renderer functions come  */
 /* from the axiom_renderer.dll (wgpu-based). Skip the C stub.           */
@@ -1005,7 +1013,7 @@ void axiom_job_wait_handle(int handle) {
  *   axiom_renderer_end_frame(r)                    End a frame (present)
  *   axiom_renderer_should_close(r) -> i32          1 if window should close
  *   axiom_renderer_clear(r, color)                 Clear framebuffer
- *   axiom_renderer_draw_triangles(r, pos, col, n)  Draw n vertices as tris
+ *   axiom_renderer_draw_triangles(r, pos, col, n)  Draw n vertices as tris (double*)
  *   axiom_renderer_draw_points(r, x, y, col, n)   Draw n colored points
  *   axiom_renderer_get_time(r) -> f64              Elapsed time in seconds
  *   axiom_shader_load(r, path, stage) -> ptr       Load SPIR-V shader module
@@ -1323,8 +1331,8 @@ static int axiom_edge_func(int ax, int ay, int bx, int by, int px, int py) {
 }
 
 void axiom_renderer_draw_triangles(void *renderer,
-                                   const float *positions,
-                                   const float *colors_f,
+                                   const double *positions,
+                                   const double *colors_f,
                                    int vertex_count) {
     if (!renderer || !positions) return;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
@@ -1332,27 +1340,27 @@ void axiom_renderer_draw_triangles(void *renderer,
     int h = r->height;
     unsigned int *fb = r->framebuffer;
 
-    /* Each triangle is 3 vertices, each vertex has 2 floats (x, y)
-       in the positions array, and 3 floats (r, g, b) in the colors array. */
+    /* Each triangle is 3 vertices, each vertex has 2 doubles (x, y)
+       in the positions array, and 3 doubles (r, g, b) in the colors array. */
     int tri_count = vertex_count / 3;
     int t;
     for (t = 0; t < tri_count; t++) {
         int base_p = t * 6;  /* 3 vertices * 2 coords */
         int base_c = t * 9;  /* 3 vertices * 3 color channels */
 
-        int x0 = (int)(positions[base_p + 0] + 0.5f);
-        int y0 = (int)(positions[base_p + 1] + 0.5f);
-        int x1 = (int)(positions[base_p + 2] + 0.5f);
-        int y1 = (int)(positions[base_p + 3] + 0.5f);
-        int x2 = (int)(positions[base_p + 4] + 0.5f);
-        int y2 = (int)(positions[base_p + 5] + 0.5f);
+        int x0 = (int)(positions[base_p + 0] + 0.5);
+        int y0 = (int)(positions[base_p + 1] + 0.5);
+        int x1 = (int)(positions[base_p + 2] + 0.5);
+        int y1 = (int)(positions[base_p + 3] + 0.5);
+        int x2 = (int)(positions[base_p + 4] + 0.5);
+        int y2 = (int)(positions[base_p + 5] + 0.5);
 
         /* Flat color from first vertex (for simplicity). */
         unsigned int cr = 255, cg = 255, cb = 255;
         if (colors_f) {
-            cr = (unsigned int)(colors_f[base_c + 0] * 255.0f);
-            cg = (unsigned int)(colors_f[base_c + 1] * 255.0f);
-            cb = (unsigned int)(colors_f[base_c + 2] * 255.0f);
+            cr = (unsigned int)(colors_f[base_c + 0] * 255.0);
+            cg = (unsigned int)(colors_f[base_c + 1] * 255.0);
+            cb = (unsigned int)(colors_f[base_c + 2] * 255.0);
             if (cr > 255) cr = 255;
             if (cg > 255) cg = 255;
             if (cb > 255) cb = 255;
@@ -1552,8 +1560,8 @@ void axiom_renderer_draw_points(void *renderer,
 }
 
 void axiom_renderer_draw_triangles(void *renderer,
-                                   const float *positions,
-                                   const float *colors,
+                                   const double *positions,
+                                   const double *colors,
                                    int vertex_count) {
     if (!renderer) return;
     (void)positions; (void)colors;
@@ -1825,10 +1833,8 @@ void axiom_string_print(long long s) {
  *   axiom_is_mouse_down(button)   -> i32 (0=left, 1=right, 2=middle)
  */
 
-static int axiom_key_state[256] = {0};  /* 1 = pressed, 0 = released */
-static int axiom_mouse_x = 0;
-static int axiom_mouse_y = 0;
-static int axiom_mouse_buttons[3] = {0}; /* left, right, middle */
+/* axiom_key_state, axiom_mouse_x/y, axiom_mouse_buttons are declared
+   earlier (before the renderer section) so the Win32 wnd_proc can use them. */
 
 int axiom_is_key_down(int key_code) {
     return axiom_key_state[key_code & 0xFF];
@@ -1858,6 +1864,7 @@ int axiom_is_mouse_down(int button) {
 
 #if defined(_WIN32)
 /* windows.h already included above */
+#include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
 
 void axiom_play_beep(int freq, int duration_ms) {
