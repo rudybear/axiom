@@ -16,3 +16,4 @@ benchmarks/results.json
 Thumbs.db
 *.pyc
 *.exe
+axiom_renderer.dll
