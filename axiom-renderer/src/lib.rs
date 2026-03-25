@@ -13,6 +13,7 @@ use std::ffi::{c_char, c_double, c_float, c_int, c_uint, CStr};
 use std::sync::Mutex;
 
 mod renderer;
+pub mod lux_shaders;
 
 // ---------------------------------------------------------------------------
 // Global renderer state
@@ -188,4 +189,112 @@ pub unsafe extern "C" fn axiom_renderer_get_time(
     _renderer: *mut std::ffi::c_void,
 ) -> c_double {
     with_renderer(0.0, |r| r.get_time())
+}
+
+// ---------------------------------------------------------------------------
+// Lux shader integration — C ABI exports
+// ---------------------------------------------------------------------------
+
+/// Load a Lux-compiled SPIR-V shader from disk.
+///
+/// - `path`: null-terminated path to a `.spv` file
+/// - `stage`: 0 = vertex, 1 = fragment
+///
+/// Returns an opaque handle to the loaded shader, or null on failure.
+/// The handle must eventually be freed with `axiom_shader_destroy`.
+#[no_mangle]
+pub unsafe extern "C" fn axiom_shader_load(
+    _renderer: *mut std::ffi::c_void,
+    path: *const c_char,
+    stage: c_int,
+) -> *mut std::ffi::c_void {
+    if path.is_null() {
+        eprintln!("[Lux Shader] Error: null path");
+        return std::ptr::null_mut();
+    }
+
+    let path_str = match CStr::from_ptr(path).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[Lux Shader] Error: invalid UTF-8 path: {e}");
+            return std::ptr::null_mut();
+        }
+    };
+
+    let shader_stage = match lux_shaders::ShaderStage::from_int(stage) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[Lux Shader] Error: {e}");
+            return std::ptr::null_mut();
+        }
+    };
+
+    match lux_shaders::load_shader(path_str, shader_stage) {
+        Ok(shader) => Box::into_raw(Box::new(shader)) as *mut std::ffi::c_void,
+        Err(e) => {
+            eprintln!("[Lux Shader] Error loading {path_str}: {e}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Destroy a loaded shader handle.
+#[no_mangle]
+pub unsafe extern "C" fn axiom_shader_destroy(shader: *mut std::ffi::c_void) {
+    if !shader.is_null() {
+        drop(Box::from_raw(shader as *mut lux_shaders::LuxShader));
+    }
+}
+
+/// Create a render pipeline from a vertex shader and fragment shader.
+///
+/// Both `vert_shader` and `frag_shader` must be handles returned by
+/// `axiom_shader_load`. Returns an opaque pipeline handle (encoded as the
+/// pipeline's numeric ID), or null on failure.
+///
+/// The returned handle is valid for the lifetime of the renderer — it does
+/// not need to be manually freed.
+#[no_mangle]
+pub unsafe extern "C" fn axiom_pipeline_create(
+    _renderer: *mut std::ffi::c_void,
+    vert_shader: *mut std::ffi::c_void,
+    frag_shader: *mut std::ffi::c_void,
+) -> *mut std::ffi::c_void {
+    if vert_shader.is_null() || frag_shader.is_null() {
+        eprintln!("[Lux Shader] Error: null shader handle passed to pipeline_create");
+        return std::ptr::null_mut();
+    }
+
+    let vert = &*(vert_shader as *const lux_shaders::LuxShader);
+    let frag = &*(frag_shader as *const lux_shaders::LuxShader);
+
+    with_renderer(std::ptr::null_mut(), |r| {
+        let device = r.device();
+        let format = r.surface_format();
+
+        match lux_shaders::create_render_pipeline(device, format, vert, frag) {
+            Ok(lux_pipeline) => {
+                let id = r.add_lux_pipeline(lux_pipeline);
+                // Return the pipeline ID as a pointer-sized handle
+                id as usize as *mut std::ffi::c_void
+            }
+            Err(e) => {
+                eprintln!("[Lux Shader] Error creating pipeline: {e}");
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
+/// Bind a Lux pipeline for subsequent draw calls.
+///
+/// Pass the handle returned by `axiom_pipeline_create`.
+/// Pass null (0) to revert to the built-in pipeline.
+#[no_mangle]
+pub unsafe extern "C" fn axiom_renderer_bind_pipeline(
+    _renderer: *mut std::ffi::c_void,
+    pipeline: *mut std::ffi::c_void,
+) {
+    let id = pipeline as u64;
+    with_renderer((), |r| r.bind_pipeline(id));
 }

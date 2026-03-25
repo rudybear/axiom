@@ -1,0 +1,37 @@
+// flat_color.lux — Minimal Lux shader for testing SPIR-V loading
+//
+// This shader passes per-vertex position and color through to the fragment
+// stage with no transformations. It is the simplest shader that exercises the
+// Lux -> SPIR-V -> wgpu pipeline.
+//
+// Vertex attributes match the AXIOM renderer's Vertex layout:
+//   location 0: position (vec2)
+//   location 1: color    (vec4)
+//
+// Compile with:
+//   python lux/lux.py examples/vulkan/flat_color.lux
+//
+// This produces:
+//   flat_color.vert.spv
+//   flat_color.frag.spv
+
+vertex {
+    in position: vec2;
+    in color: vec4;
+
+    out frag_color: vec4;
+
+    fn main() {
+        frag_color = color;
+        builtin_position = vec4(position, 0.0, 1.0);
+    }
+}
+
+fragment {
+    in frag_color: vec4;
+    out color: vec4;
+
+    fn main() {
+        color = frag_color;
+    }
+}

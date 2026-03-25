@@ -8,7 +8,7 @@ description = "AXIOM GPU renderer — wgpu-backed cdylib exposing C ABI for AXIO
 crate-type = ["cdylib"]
 
 [dependencies]
-wgpu = "24"
+wgpu = { version = "24", features = ["spirv"] }
 winit = "0.30"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }

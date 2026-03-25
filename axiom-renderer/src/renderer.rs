@@ -3,6 +3,7 @@
 // Core wgpu renderer. Manages a winit window, wgpu device/queue/surface, a
 // simple render pipeline for colored geometry, and per-frame draw commands.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
@@ -29,7 +30,7 @@ impl Vertex {
         1 => Float32x4,
     ];
 
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
+    pub fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -70,6 +71,13 @@ pub struct Renderer {
     // Dimensions
     width: u32,
     height: u32,
+
+    // Lux shader pipeline support
+    // Keyed by a monotonically increasing ID; the C ABI returns the ID as a handle.
+    lux_pipelines: HashMap<u64, crate::lux_shaders::LuxPipeline>,
+    next_pipeline_id: u64,
+    /// Currently bound Lux pipeline ID. If `None`, use the built-in WGSL pipeline.
+    active_lux_pipeline: Option<u64>,
 }
 
 // Inline WGSL shader source
@@ -196,6 +204,9 @@ impl Renderer {
             start_time: Instant::now(),
             width,
             height,
+            lux_pipelines: HashMap::new(),
+            next_pipeline_id: 1,
+            active_lux_pipeline: None,
         })
     }
 
@@ -499,7 +510,16 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self.pipeline);
+            // Use the active Lux pipeline if one is bound, otherwise the built-in pipeline
+            let active_pipeline = match self.active_lux_pipeline {
+                Some(id) => self
+                    .lux_pipelines
+                    .get(&id)
+                    .map(|lp| &lp.pipeline)
+                    .unwrap_or(&self.pipeline),
+                None => &self.pipeline,
+            };
+            render_pass.set_pipeline(active_pipeline);
 
             // Draw triangles (from triangle commands)
             if let Some(buf) = &tri_buf {
@@ -624,6 +644,42 @@ impl Renderer {
 
         if !verts.is_empty() {
             self.draw_commands.push(DrawCommand::Triangles(verts));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Lux shader pipeline integration
+    // -----------------------------------------------------------------------
+
+    /// Access the wgpu device (needed by `lux_shaders` for pipeline creation).
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The surface texture format (needed for pipeline creation).
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.surface_config.format
+    }
+
+    /// Register a Lux pipeline and return its handle ID.
+    pub fn add_lux_pipeline(&mut self, lp: crate::lux_shaders::LuxPipeline) -> u64 {
+        let id = self.next_pipeline_id;
+        self.next_pipeline_id += 1;
+        println!("[AXIOM Renderer] Registered Lux pipeline id={id}: {}", lp.label);
+        self.lux_pipelines.insert(id, lp);
+        id
+    }
+
+    /// Bind a Lux pipeline by ID. Pass 0 to revert to the built-in pipeline.
+    pub fn bind_pipeline(&mut self, pipeline_id: u64) {
+        if pipeline_id == 0 {
+            self.active_lux_pipeline = None;
+            println!("[AXIOM Renderer] Bound built-in WGSL pipeline");
+        } else if self.lux_pipelines.contains_key(&pipeline_id) {
+            self.active_lux_pipeline = Some(pipeline_id);
+            println!("[AXIOM Renderer] Bound Lux pipeline id={pipeline_id}");
+        } else {
+            eprintln!("[AXIOM Renderer] Warning: unknown pipeline id={pipeline_id}, ignoring");
         }
     }
 
