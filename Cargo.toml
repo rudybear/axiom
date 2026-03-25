@@ -4,7 +4,6 @@ members = [
     "crates/axiom-lexer",
     "crates/axiom-parser",
     "crates/axiom-hir",
-    "crates/axiom-mir",
     "crates/axiom-codegen",
     "crates/axiom-optimize",
     "crates/axiom-driver",

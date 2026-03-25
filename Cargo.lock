@@ -232,13 +232,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axiom-mir"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "axiom-optimize"
 version = "0.1.0"
 dependencies = [

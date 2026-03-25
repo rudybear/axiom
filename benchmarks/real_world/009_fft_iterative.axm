@@ -37,8 +37,8 @@ fn main() -> i32 {
     let pi2: f64 = 6.28318530717959;
     let pi: f64 = 3.14159265358979;
 
-    let re: array[f64, 8192] = array_zeros[f64, 8192];
-    let im: array[f64, 8192] = array_zeros[f64, 8192];
+    let re: ptr[f64] = heap_alloc_zeroed(8192, 8);
+    let im: ptr[f64] = heap_alloc_zeroed(8192, 8);
 
     // Generate input signal: sum of sinusoids
     for i: i32 in range(0, n) {
@@ -48,8 +48,8 @@ fn main() -> i32 {
         let s1: f64 = taylor_sin(a1, pi, pi2);
         let s2: f64 = taylor_sin(a2, pi, pi2);
 
-        re[i] = s1 + 0.5 * s2;
-        im[i] = 0.0;
+        ptr_write_f64(re, i, s1 + 0.5 * s2);
+        ptr_write_f64(im, i, 0.0);
     }
 
     // Bit-reversal permutation
@@ -58,12 +58,12 @@ fn main() -> i32 {
     for i: i32 in range(0, n) {
         let rev: i32 = reverse_bits(i, log_n);
         if rev > i {
-            let tmp_re: f64 = re[i];
-            let tmp_im: f64 = im[i];
-            re[i] = re[rev];
-            im[i] = im[rev];
-            re[rev] = tmp_re;
-            im[rev] = tmp_im;
+            let tmp_re: f64 = ptr_read_f64(re, i);
+            let tmp_im: f64 = ptr_read_f64(im, i);
+            ptr_write_f64(re, i, ptr_read_f64(re, rev));
+            ptr_write_f64(im, i, ptr_read_f64(im, rev));
+            ptr_write_f64(re, rev, tmp_re);
+            ptr_write_f64(im, rev, tmp_im);
         }
     }
 
@@ -84,13 +84,13 @@ fn main() -> i32 {
                 let odd_idx: i32 = group + k + half;
 
                 // Butterfly: even +/- (twiddle * odd)
-                let tr: f64 = cos_a * re[odd_idx] - sin_a * im[odd_idx];
-                let ti: f64 = sin_a * re[odd_idx] + cos_a * im[odd_idx];
+                let tr: f64 = cos_a * ptr_read_f64(re, odd_idx) - sin_a * ptr_read_f64(im, odd_idx);
+                let ti: f64 = sin_a * ptr_read_f64(re, odd_idx) + cos_a * ptr_read_f64(im, odd_idx);
 
-                re[odd_idx] = re[even_idx] - tr;
-                im[odd_idx] = im[even_idx] - ti;
-                re[even_idx] = re[even_idx] + tr;
-                im[even_idx] = im[even_idx] + ti;
+                ptr_write_f64(re, odd_idx, ptr_read_f64(re, even_idx) - tr);
+                ptr_write_f64(im, odd_idx, ptr_read_f64(im, even_idx) - ti);
+                ptr_write_f64(re, even_idx, ptr_read_f64(re, even_idx) + tr);
+                ptr_write_f64(im, even_idx, ptr_read_f64(im, even_idx) + ti);
             }
             group = group + stage_size;
         }
@@ -100,8 +100,10 @@ fn main() -> i32 {
     // Checksum: sum of magnitudes
     let checksum: f64 = 0.0;
     for i: i32 in range(0, n) {
-        checksum = checksum + sqrt(re[i] * re[i] + im[i] * im[i]);
+        checksum = checksum + sqrt(ptr_read_f64(re, i) * ptr_read_f64(re, i) + ptr_read_f64(im, i) * ptr_read_f64(im, i));
     }
     print_f64(checksum);
+    heap_free(re);
+    heap_free(im);
     return 0;
 }

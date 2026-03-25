@@ -7,7 +7,7 @@ fn main() -> i32 {
     let lookahead_size: i32 = 18;
 
     // Generate semi-compressible data (with some repetition)
-    let data: array[i32, 100000] = array_zeros[i32, 100000];
+    let data: ptr[i32] = heap_alloc_zeroed(100000, 4);
     let seed: i64 = 42;
     let lcg_a: i64 = 1103515245;
     let lcg_c: i64 = 12345;
@@ -20,27 +20,27 @@ fn main() -> i32 {
             // Repeated pattern: copy from earlier
             let copy_dist: i32 = narrow((seed / 100) % 50) + 1;
             if i >= copy_dist {
-                data[i] = data[i - copy_dist];
+                ptr_write_i32(data, i, ptr_read_i32(data, i - copy_dist));
             }
             if i < copy_dist {
-                data[i] = narrow(seed % 256);
+                ptr_write_i32(data, i, narrow(seed % 256));
             }
         }
         if r >= 30 and r < 60 {
             // Low-entropy: limited alphabet
-            data[i] = narrow(seed % 16);
+            ptr_write_i32(data, i, narrow(seed % 16));
         }
         if r >= 60 {
             // Random byte
-            data[i] = narrow(seed % 256);
+            ptr_write_i32(data, i, narrow(seed % 256));
         }
     }
 
     // LZ77 compression
     // Output: array of (offset, length, next_char) triples
-    let out_offset: array[i32, 100000] = array_zeros[i32, 100000];
-    let out_length: array[i32, 100000] = array_zeros[i32, 100000];
-    let out_char: array[i32, 100000] = array_zeros[i32, 100000];
+    let out_offset: ptr[i32] = heap_alloc_zeroed(100000, 4);
+    let out_length: ptr[i32] = heap_alloc_zeroed(100000, 4);
+    let out_char: ptr[i32] = heap_alloc_zeroed(100000, 4);
     let out_count: i32 = 0;
 
     let pos: i32 = 0;
@@ -60,7 +60,7 @@ fn main() -> i32 {
                 max_match = data_size - pos;
             }
 
-            while match_len < max_match and data[si + match_len] == data[pos + match_len] {
+            while match_len < max_match and ptr_read_i32(data, si + match_len) == ptr_read_i32(data, pos + match_len) {
                 match_len = match_len + 1;
                 // Handle wrapping in source (can match past si into pos area)
                 if si + match_len >= pos {
@@ -78,13 +78,13 @@ fn main() -> i32 {
 
         // Output triple
         if out_count < 100000 {
-            out_offset[out_count] = best_offset;
-            out_length[out_count] = best_length;
+            ptr_write_i32(out_offset, out_count, best_offset);
+            ptr_write_i32(out_length, out_count, best_length);
             if pos + best_length < data_size {
-                out_char[out_count] = data[pos + best_length];
+                ptr_write_i32(out_char, out_count, ptr_read_i32(data, pos + best_length));
             }
             if pos + best_length >= data_size {
-                out_char[out_count] = 0;
+                ptr_write_i32(out_char, out_count, 0);
             }
             out_count = out_count + 1;
         }
@@ -99,14 +99,14 @@ fn main() -> i32 {
     let max_match_len: i32 = 0;
 
     for i: i32 in range(0, out_count) {
-        if out_length[i] == 0 {
+        if ptr_read_i32(out_length, i) == 0 {
             literal_count = literal_count + 1;
         }
-        if out_length[i] > 0 {
+        if ptr_read_i32(out_length, i) > 0 {
             match_count = match_count + 1;
-            total_match_len = total_match_len + widen(out_length[i]);
-            if out_length[i] > max_match_len {
-                max_match_len = out_length[i];
+            total_match_len = total_match_len + widen(ptr_read_i32(out_length, i));
+            if ptr_read_i32(out_length, i) > max_match_len {
+                max_match_len = ptr_read_i32(out_length, i);
             }
         }
     }
@@ -117,5 +117,9 @@ fn main() -> i32 {
 
     let checksum: i64 = widen(out_count) * 10000 + compressed_bits + total_match_len * 100 + widen(max_match_len);
     print_i64(checksum);
+    heap_free(data);
+    heap_free(out_offset);
+    heap_free(out_length);
+    heap_free(out_char);
     return 0;
 }
