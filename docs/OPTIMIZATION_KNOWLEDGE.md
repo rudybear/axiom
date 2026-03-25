@@ -251,6 +251,32 @@ Before bitwise builtins existed, some benchmarks used `x % 256` for `x & 0xFF`. 
 ### Anti-Pattern 5: Not using @pure on obviously pure functions
 If a function only reads params and returns a value, mark it `@pure`. There's no reason not to.
 
+### Anti-Pattern 6: Trusting agent reports without verification
+The LLM optimization agent may report "fixed N files" but only actually modify M < N. In self-opt pass 1, the agent claimed to convert stack arrays to heap in 9 benchmarks — but 4 benchmarks (edge_detection, lz77, fft, finite_element) were NOT actually changed.
+
+**Always run `verify-optimization.sh` after optimization passes.** The script checks:
+1. Large stack arrays that should be heap (Rule 5)
+2. Missing @pure on helper functions (Rule 1)
+3. Missing @constraint annotations (Rule 2)
+4. LLVM IR attributes match expectations
+
+**Pipeline integration:** The QA agent now runs this script automatically and rejects if issues are found.
+
+---
+
+## Rule 15: Always verify optimization changes persisted
+
+**Discovery:** Self-improvement pass 3 (2026-03-25)
+**Impact:** Prevents false "optimization complete" status
+**Evidence:** 4 of 9 benchmarks in self-opt pass 1 were not actually modified despite agent reporting success.
+
+**Verification command:**
+```bash
+bash .pipeline/scripts/verify-optimization.sh benchmarks/real_world/
+```
+
+**When to apply:** After EVERY optimization pass. Before accepting any commit that claims performance improvements.
+
 ---
 
 ## How This File Is Used
