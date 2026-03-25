@@ -1,0 +1,115 @@
+@module fannkuch_redux;
+@intent("Fannkuch-redux: pancake flipping permutation benchmark, N=10");
+@constraint { optimize_for: "performance" };
+
+// Benchmarks Game fannkuch-redux: count the maximum number of flips
+// needed to bring 1 to the front of a permutation, over all N! permutations.
+// N=10 gives 3628800 permutations.
+
+@pure @inline(always)
+fn flip_count(perm: ptr[i32], n: i32, tmp: ptr[i32]) -> i32 {
+    // Copy perm to tmp
+    for i: i32 in range(0, n) {
+        ptr_write_i32(tmp, i, ptr_read_i32(perm, i));
+    }
+    let flips: i32 = 0;
+    let first: i32 = ptr_read_i32(tmp, 0);
+    for guard: i32 in range(0, 100) {
+        if first == 0 { return flips; }
+        // Reverse first (first+1) elements
+        let lo: i32 = 0;
+        let hi: i32 = first;
+        for rev_guard: i32 in range(0, 50) {
+            if lo >= hi { lo = 999; }
+            if lo < hi {
+                let t: i32 = ptr_read_i32(tmp, lo);
+                ptr_write_i32(tmp, lo, ptr_read_i32(tmp, hi));
+                ptr_write_i32(tmp, hi, t);
+                lo = lo + 1;
+                hi = hi - 1;
+            }
+        }
+        flips = flips + 1;
+        first = ptr_read_i32(tmp, 0);
+    }
+    return flips;
+}
+
+fn main() -> i32 {
+    let n: i32 = 10;
+
+    // Allocate arrays on heap
+    let perm: ptr[i32] = heap_alloc_zeroed(n, 4);
+    let count: ptr[i32] = heap_alloc_zeroed(n, 4);
+    let tmp: ptr[i32] = heap_alloc_zeroed(n, 4);
+
+    // Initialize identity permutation
+    for i: i32 in range(0, n) {
+        ptr_write_i32(perm, i, i);
+        ptr_write_i32(count, i, i + 1);
+    }
+
+    let max_flips: i32 = 0;
+    let checksum: i32 = 0;
+    let perm_count: i32 = 0;
+
+    // Iterate through all permutations using Heap's algorithm variant
+    let done: i32 = 0;
+    for outer: i32 in range(0, 4000000) {
+        if done == 0 {
+            let flips: i32 = flip_count(perm, n, tmp);
+            if flips > max_flips { max_flips = flips; }
+            if perm_count % 2 == 0 {
+                checksum = checksum + flips;
+            }
+            if perm_count % 2 == 1 {
+                checksum = checksum - flips;
+            }
+            perm_count = perm_count + 1;
+
+            // Generate next permutation
+            let i: i32 = 1;
+            // Rotate left: perm[0] <- perm[1] <- ... <- perm[i] <- perm[0]
+            let saved: i32 = ptr_read_i32(perm, 0);
+            for r: i32 in range(0, i) {
+                ptr_write_i32(perm, r, ptr_read_i32(perm, r + 1));
+            }
+            ptr_write_i32(perm, i, saved);
+            ptr_write_i32(count, i, ptr_read_i32(count, i) - 1);
+
+            let found: i32 = 0;
+            for search: i32 in range(0, n) {
+                if found == 0 {
+                    if ptr_read_i32(count, i) > 0 {
+                        found = 1;
+                    }
+                    if found == 0 {
+                        ptr_write_i32(count, i, i + 1);
+                        i = i + 1;
+                        if i >= n {
+                            done = 1;
+                            found = 1;
+                        }
+                        if done == 0 and found == 0 {
+                            // Rotate left first i+1 elements
+                            saved = ptr_read_i32(perm, 0);
+                            for r: i32 in range(0, i) {
+                                ptr_write_i32(perm, r, ptr_read_i32(perm, r + 1));
+                            }
+                            ptr_write_i32(perm, i, saved);
+                            ptr_write_i32(count, i, ptr_read_i32(count, i) - 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    print_i32(checksum);
+    print_i32(max_flips);
+
+    heap_free(perm);
+    heap_free(count);
+    heap_free(tmp);
+    return 0;
+}

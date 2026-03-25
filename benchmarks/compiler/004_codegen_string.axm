@@ -1,0 +1,127 @@
+@module codegen_string;
+@intent("Simulate code generation: build LLVM IR text by writing characters sequentially into a buffer");
+@constraint { optimize_for: "performance" };
+
+// Simulates what a code generator does: iterate over instructions
+// and emit character sequences into an output buffer. Tests sequential
+// memory writes and branch-heavy instruction dispatch.
+
+@pure @inline(always)
+fn emit_opcode(buf: ptr[i32], pos: i32, opcode: i32) -> i32 {
+    // Emit different "instruction text" based on opcode
+    // Each opcode emits 3-8 characters simulating LLVM IR mnemonics
+    if opcode == 0 {
+        // "add"
+        ptr_write_i32(buf, pos, 97); ptr_write_i32(buf, pos + 1, 100); ptr_write_i32(buf, pos + 2, 100);
+        return 3;
+    }
+    if opcode == 1 {
+        // "sub"
+        ptr_write_i32(buf, pos, 115); ptr_write_i32(buf, pos + 1, 117); ptr_write_i32(buf, pos + 2, 98);
+        return 3;
+    }
+    if opcode == 2 {
+        // "mul"
+        ptr_write_i32(buf, pos, 109); ptr_write_i32(buf, pos + 1, 117); ptr_write_i32(buf, pos + 2, 108);
+        return 3;
+    }
+    if opcode == 3 {
+        // "load"
+        ptr_write_i32(buf, pos, 108); ptr_write_i32(buf, pos + 1, 111); ptr_write_i32(buf, pos + 2, 97);
+        ptr_write_i32(buf, pos + 3, 100);
+        return 4;
+    }
+    if opcode == 4 {
+        // "store"
+        ptr_write_i32(buf, pos, 115); ptr_write_i32(buf, pos + 1, 116); ptr_write_i32(buf, pos + 2, 111);
+        ptr_write_i32(buf, pos + 3, 114); ptr_write_i32(buf, pos + 4, 101);
+        return 5;
+    }
+    if opcode == 5 {
+        // "call"
+        ptr_write_i32(buf, pos, 99); ptr_write_i32(buf, pos + 1, 97); ptr_write_i32(buf, pos + 2, 108);
+        ptr_write_i32(buf, pos + 3, 108);
+        return 4;
+    }
+    if opcode == 6 {
+        // "br"
+        ptr_write_i32(buf, pos, 98); ptr_write_i32(buf, pos + 1, 114);
+        return 2;
+    }
+    if opcode == 7 {
+        // "ret"
+        ptr_write_i32(buf, pos, 114); ptr_write_i32(buf, pos + 1, 101); ptr_write_i32(buf, pos + 2, 116);
+        return 3;
+    }
+    // "icmp"
+    ptr_write_i32(buf, pos, 105); ptr_write_i32(buf, pos + 1, 99); ptr_write_i32(buf, pos + 2, 109);
+    ptr_write_i32(buf, pos + 3, 112);
+    return 4;
+}
+
+@pure @inline(always)
+fn emit_register(buf: ptr[i32], pos: i32, reg_num: i32) -> i32 {
+    // Emit "%rN " where N is the register number mod 100
+    ptr_write_i32(buf, pos, 37);  // '%'
+    ptr_write_i32(buf, pos + 1, 114);  // 'r'
+    let tens: i32 = (reg_num / 10) % 10;
+    let ones: i32 = reg_num % 10;
+    ptr_write_i32(buf, pos + 2, 48 + tens);
+    ptr_write_i32(buf, pos + 3, 48 + ones);
+    ptr_write_i32(buf, pos + 4, 32);  // ' '
+    return 5;
+}
+
+fn main() -> i32 {
+    let n_instructions: i32 = 2000000;
+    // Buffer large enough for all emitted text (max ~13 chars per instruction)
+    let buf_size: i32 = n_instructions * 16;
+    let buf: ptr[i32] = heap_alloc_zeroed(buf_size, 4);
+
+    let seed: i64 = 42;
+    let pos: i32 = 0;
+
+    for i: i32 in range(0, n_instructions) {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        let opcode: i32 = narrow(seed % 9);
+
+        // Emit: "%rN = opcode %rM\n"
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        let dst_reg: i32 = narrow(seed % 100);
+        let written: i32 = emit_register(buf, pos, dst_reg);
+        pos = pos + written;
+
+        // '=' and space
+        ptr_write_i32(buf, pos, 61);
+        ptr_write_i32(buf, pos + 1, 32);
+        pos = pos + 2;
+
+        // opcode
+        let op_len: i32 = emit_opcode(buf, pos, opcode);
+        pos = pos + op_len;
+
+        // space
+        ptr_write_i32(buf, pos, 32);
+        pos = pos + 1;
+
+        // source register
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        let src_reg: i32 = narrow(seed % 100);
+        written = emit_register(buf, pos, src_reg);
+        pos = pos + written;
+
+        // newline
+        ptr_write_i32(buf, pos, 10);
+        pos = pos + 1;
+    }
+
+    // Compute checksum over emitted buffer
+    let checksum: i64 = 0;
+    for i: i32 in range(0, pos) {
+        checksum = (checksum * 31 + widen(ptr_read_i32(buf, i))) % 1000000007;
+    }
+
+    print_i64(checksum);
+    heap_free(buf);
+    return 0;
+}

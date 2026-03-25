@@ -1,0 +1,117 @@
+@module full_pipeline;
+@intent("Simulate full compiler pipeline: lex -> parse -> HIR walk -> codegen on 500K tokens");
+@constraint { optimize_for: "performance" };
+
+// Combined pipeline benchmark: simulates all 4 compiler phases as a single hot path.
+// Phase 1: Lexing - classify characters into token types
+// Phase 2: Parsing - compute expression hashes from token windows
+// Phase 3: HIR Walk - dispatch on node types to accumulate results
+// Phase 4: Codegen - emit instruction opcodes into output buffer
+
+@pure @inline(always)
+fn lex_classify(c: i32) -> i32 {
+    if c >= 48 and c <= 57 { return 1; }
+    if c >= 97 and c <= 122 { return 2; }
+    if c == 32 or c == 10 { return 3; }
+    if c == 40 or c == 41 { return 4; }
+    if c == 123 or c == 125 { return 5; }
+    if c == 59 { return 6; }
+    return 7;
+}
+
+@pure @inline(always)
+fn hash_combine(a: i64, b: i64) -> i64 {
+    return ((a * 31) + b) % 1000000007;
+}
+
+@pure
+fn parse_window(tokens: ptr[i32], start: i32, end: i32) -> i64 {
+    let h: i64 = 0;
+    for i: i32 in range(start, end) {
+        let tok: i32 = ptr_read_i32(tokens, i);
+        h = hash_combine(h, widen(tok));
+        // Simulate precedence climbing: different weights per token type
+        if tok == 1 { h = hash_combine(h, widen(tok) * 7); }
+        if tok == 2 { h = hash_combine(h, widen(tok) * 13); }
+        if tok == 4 { h = hash_combine(h, widen(tok) * 29); }
+    }
+    return h;
+}
+
+@pure @inline(always)
+fn hir_dispatch(node_type: i32, val: i64) -> i64 {
+    if node_type == 0 { return val * 3 + 7; }
+    if node_type == 1 { return (val * 37 + 11) % 1000000007; }
+    if node_type == 2 { return (val * 101 + 53) % 1000000007; }
+    if node_type == 3 { return (val * 17 + 31) % 1000000007; }
+    if node_type == 4 { return (val * 19 + 41) % 1000000007; }
+    if node_type == 5 { return (val * 23 + 47) % 1000000007; }
+    if node_type == 6 { return (val * 29 + 59) % 1000000007; }
+    return (val * 43 + 67) % 1000000007;
+}
+
+@pure @inline(always)
+fn codegen_emit(buf: ptr[i32], pos: i32, opcode: i32) -> i32 {
+    // Emit a compact instruction representation
+    ptr_write_i32(buf, pos, opcode + 48);
+    ptr_write_i32(buf, pos + 1, 58);  // ':'
+    ptr_write_i32(buf, pos + 2, 32);  // ' '
+    return 3;
+}
+
+fn main() -> i32 {
+    let n: i32 = 500000;
+    let window_size: i32 = 16;
+
+    // Phase 1: Lexing - generate and classify characters
+    let tokens: ptr[i32] = heap_alloc_zeroed(n, 4);
+    let seed: i64 = 42;
+
+    for i: i32 in range(0, n) {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        let c: i32 = narrow(seed % 128);
+        let tok: i32 = lex_classify(c);
+        ptr_write_i32(tokens, i, tok);
+    }
+
+    // Phase 2: Parsing - process token windows
+    let num_windows: i32 = n / window_size;
+    let parse_results: ptr[i64] = heap_alloc_zeroed(num_windows, 8);
+
+    for w: i32 in range(0, num_windows) {
+        let start: i32 = w * window_size;
+        let result: i64 = parse_window(tokens, start, start + window_size);
+        ptr_write_i64(parse_results, w, result);
+    }
+
+    // Phase 3: HIR Walk - dispatch on derived node types
+    let hir_accum: i64 = 0;
+    for i: i32 in range(0, num_windows) {
+        let parse_val: i64 = ptr_read_i64(parse_results, i);
+        let node_type: i32 = narrow(parse_val % 8);
+        hir_accum = (hir_accum + hir_dispatch(node_type, parse_val)) % 1000000007;
+    }
+
+    // Phase 4: Codegen - emit instructions based on HIR results
+    let emit_buf: ptr[i32] = heap_alloc_zeroed(num_windows * 4, 4);
+    let emit_pos: i32 = 0;
+
+    for i: i32 in range(0, num_windows) {
+        let parse_val: i64 = ptr_read_i64(parse_results, i);
+        let opcode: i32 = narrow(parse_val % 8);
+        let written: i32 = codegen_emit(emit_buf, emit_pos, opcode);
+        emit_pos = emit_pos + written;
+    }
+
+    // Final checksum combining all phases
+    let checksum: i64 = hir_accum;
+    for i: i32 in range(0, emit_pos) {
+        checksum = hash_combine(checksum, widen(ptr_read_i32(emit_buf, i)));
+    }
+
+    print_i64(checksum);
+    heap_free(tokens);
+    heap_free(parse_results);
+    heap_free(emit_buf);
+    return 0;
+}

@@ -1,0 +1,90 @@
+@module parser_sim;
+@intent("Simulate recursive descent parser: nested expression evaluation with recursive calls");
+@constraint { optimize_for: "performance" };
+
+// Simulates parsing nested arithmetic expressions via recursive descent.
+// Token types stored in a heap array, recursion mimics real parser behavior.
+
+@pure @inline(always)
+fn hash_combine(h: i64, val: i64) -> i64 {
+    return ((h * 31) + val) % 1000000007;
+}
+
+@pure
+fn parse_atom(tokens: ptr[i32], pos: i32, limit: i32) -> i64 {
+    if pos >= limit { return 0; }
+    let tok: i32 = ptr_read_i32(tokens, pos);
+    // If token is a number (type 1), return its "value"
+    if tok == 1 {
+        return widen(pos * 7 + 13);
+    }
+    // If token is open-paren (type 3), recurse into parse_expr
+    if tok == 3 {
+        let inner: i64 = parse_expr(tokens, pos + 1, limit);
+        return inner;
+    }
+    return widen(tok);
+}
+
+@pure
+fn parse_term(tokens: ptr[i32], pos: i32, limit: i32) -> i64 {
+    let left: i64 = parse_atom(tokens, pos, limit);
+    let p: i32 = pos + 1;
+    if p < limit {
+        let tok: i32 = ptr_read_i32(tokens, p);
+        // If operator (type 2) found, combine with next atom
+        if tok == 2 {
+            let right: i64 = parse_atom(tokens, p + 1, limit);
+            left = hash_combine(left, right);
+        }
+    }
+    return left;
+}
+
+@pure
+fn parse_expr(tokens: ptr[i32], pos: i32, limit: i32) -> i64 {
+    let result: i64 = parse_term(tokens, pos, limit);
+    let p: i32 = pos + 2;
+    // Chain multiple terms
+    for step: i32 in range(0, 5) {
+        let pp: i32 = p + step * 2;
+        if pp < limit {
+            let tok: i32 = ptr_read_i32(tokens, pp);
+            if tok == 2 {
+                let next: i64 = parse_term(tokens, pp + 1, limit);
+                result = hash_combine(result, next);
+            }
+        }
+    }
+    return result;
+}
+
+fn main() -> i32 {
+    let n: i32 = 1000000;
+    // Allocate token array on heap
+    let tokens: ptr[i32] = heap_alloc_zeroed(n, 4);
+
+    // Generate pseudo-random token stream
+    // Token types: 1=number, 2=operator, 3=open_paren, 4=close_paren, 5=semicolon
+    let seed: i64 = 42;
+    for i: i32 in range(0, n) {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        let tok: i32 = narrow(seed % 5) + 1;
+        ptr_write_i32(tokens, i, tok);
+    }
+
+    // Parse expressions across the token stream in windows
+    let checksum: i64 = 0;
+    let window: i32 = 20;
+    let num_windows: i32 = n / window;
+
+    for w: i32 in range(0, num_windows) {
+        let start: i32 = w * window;
+        let result: i64 = parse_expr(tokens, start, start + window);
+        checksum = hash_combine(checksum, result);
+    }
+
+    print_i64(checksum);
+    heap_free(tokens);
+    return 0;
+}
