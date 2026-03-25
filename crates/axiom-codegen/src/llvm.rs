@@ -735,6 +735,32 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             ctx.output,
             "declare i32 @gpu_screenshot(ptr, ptr)"
         );
+        // Multi-light support
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_add_light(ptr, double, double, double, double, double, double, double)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare void @gpu_clear_lights(ptr)"
+        );
+        // Procedural mesh generation & per-object drawing
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_create_cube(ptr)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_create_sphere(ptr, i32, i32)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare void @gpu_set_mesh_transform(ptr, i32, double, double, double, double, double, double)"
+        );
+        let _ = writeln!(
+            ctx.output,
+            "declare void @gpu_draw_mesh(ptr, i32)"
+        );
     }
 
     // Emit Vec (dynamic array) runtime extern declarations.
@@ -880,6 +906,12 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@gpu_get_frame_time")
         || ir.contains("@gpu_get_gpu_name")
         || ir.contains("@gpu_screenshot")
+        || ir.contains("@gpu_add_light")
+        || ir.contains("@gpu_clear_lights")
+        || ir.contains("@gpu_create_cube")
+        || ir.contains("@gpu_create_sphere")
+        || ir.contains("@gpu_set_mesh_transform")
+        || ir.contains("@gpu_draw_mesh")
         // Vec builtins
         || ir.contains("@axiom_vec_new")
         || ir.contains("@axiom_vec_push_i32")
@@ -2923,6 +2955,14 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "gpu_get_frame_time" => return emit_builtin_gpu_get_frame_time(ctx, args),
             "gpu_get_gpu_name" => return emit_builtin_gpu_get_gpu_name(ctx, args),
             "gpu_screenshot" => return emit_builtin_gpu_screenshot(ctx, args),
+            // Multi-light support
+            "gpu_add_light" => return emit_builtin_gpu_add_light(ctx, args),
+            "gpu_clear_lights" => return emit_builtin_gpu_clear_lights(ctx, args),
+            // Procedural mesh generation & per-object drawing
+            "gpu_create_cube" => return emit_builtin_gpu_create_cube(ctx, args),
+            "gpu_create_sphere" => return emit_builtin_gpu_create_sphere(ctx, args),
+            "gpu_set_mesh_transform" => return emit_builtin_gpu_set_mesh_transform(ctx, args),
+            "gpu_draw_mesh" => return emit_builtin_gpu_draw_mesh(ctx, args),
             // Option (sum type) builtins -- tagged union packed into i64
             "option_none" => return emit_builtin_option_none(ctx, args),
             "option_some" => return emit_builtin_option_some(ctx, args),
@@ -5717,6 +5757,205 @@ fn emit_builtin_gpu_screenshot(ctx: &mut CodegenContext, args: &[HirExpr]) -> Ll
     LlvmValue {
         reg: result_reg,
         ty: "i32".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-light support builtins
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `gpu_add_light(handle, x, y, z, r, g, b, intensity) -> i32`.
+fn emit_builtin_gpu_add_light(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 8 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_add_light() requires exactly 8 arguments (handle, x, y, z, r, g, b, intensity)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let x_val = emit_expr(ctx, &args[1], Some("double"));
+    let y_val = emit_expr(ctx, &args[2], Some("double"));
+    let z_val = emit_expr(ctx, &args[3], Some("double"));
+    let r_val = emit_expr(ctx, &args[4], Some("double"));
+    let g_val = emit_expr(ctx, &args[5], Some("double"));
+    let b_val = emit_expr(ctx, &args[6], Some("double"));
+    let intensity_val = emit_expr(ctx, &args[7], Some("double"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_add_light(ptr {}, double {}, double {}, double {}, double {}, double {}, double {}, double {})",
+        handle_val.reg, x_val.reg, y_val.reg, z_val.reg,
+        r_val.reg, g_val.reg, b_val.reg, intensity_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_clear_lights(handle: ptr)`.
+fn emit_builtin_gpu_clear_lights(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_clear_lights() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+
+    ctx.emit(&format!(
+        "call void @gpu_clear_lights(ptr {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Procedural mesh generation & per-object drawing builtins
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `gpu_create_cube(handle: ptr) -> i32`.
+fn emit_builtin_gpu_create_cube(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_create_cube() requires exactly 1 argument (handle)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_create_cube(ptr {})",
+        handle_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_create_sphere(handle: ptr, segments: i32, rings: i32) -> i32`.
+fn emit_builtin_gpu_create_sphere(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_create_sphere() requires exactly 3 arguments (handle, segments, rings)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let segments_val = emit_expr(ctx, &args[1], Some("i32"));
+    let rings_val = emit_expr(ctx, &args[2], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_create_sphere(ptr {}, i32 {}, i32 {})",
+        handle_val.reg, segments_val.reg, rings_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_set_mesh_transform(handle: ptr, mesh_id: i32, x, y, z, sx, sy, sz: f64)`.
+fn emit_builtin_gpu_set_mesh_transform(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 8 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_set_mesh_transform() requires exactly 8 arguments (handle, mesh_id, x, y, z, sx, sy, sz)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let mesh_id_val = emit_expr(ctx, &args[1], Some("i32"));
+    let x_val = emit_expr(ctx, &args[2], Some("double"));
+    let y_val = emit_expr(ctx, &args[3], Some("double"));
+    let z_val = emit_expr(ctx, &args[4], Some("double"));
+    let sx_val = emit_expr(ctx, &args[5], Some("double"));
+    let sy_val = emit_expr(ctx, &args[6], Some("double"));
+    let sz_val = emit_expr(ctx, &args[7], Some("double"));
+
+    ctx.emit(&format!(
+        "call void @gpu_set_mesh_transform(ptr {}, i32 {}, double {}, double {}, double {}, double {}, double {}, double {})",
+        handle_val.reg, mesh_id_val.reg,
+        x_val.reg, y_val.reg, z_val.reg,
+        sx_val.reg, sy_val.reg, sz_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_draw_mesh(handle: ptr, mesh_id: i32)`.
+fn emit_builtin_gpu_draw_mesh(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_draw_mesh() requires exactly 2 arguments (handle, mesh_id)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let mesh_id_val = emit_expr(ctx, &args[1], Some("i32"));
+
+    ctx.emit(&format!(
+        "call void @gpu_draw_mesh(ptr {}, i32 {})",
+        handle_val.reg, mesh_id_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
     }
 }
 
