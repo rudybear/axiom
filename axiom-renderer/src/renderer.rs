@@ -97,6 +97,12 @@ pub struct Renderer {
     frame_start: Option<Instant>,
     last_frame_time: f64,
     next_scene_id: u64,
+
+    // Input state (G2: Input System)
+    key_state: [bool; 256],
+    mouse_x: i32,
+    mouse_y: i32,
+    mouse_buttons: [bool; 3], // left, right, middle
 }
 
 // Inline WGSL shader source
@@ -237,6 +243,10 @@ impl Renderer {
             frame_start: None,
             last_frame_time: 0.0,
             next_scene_id: 1,
+            key_state: [false; 256],
+            mouse_x: 0,
+            mouse_y: 0,
+            mouse_buttons: [false; 3],
         })
     }
 
@@ -382,6 +392,11 @@ impl Renderer {
                     surface: &'a wgpu::Surface<'static>,
                     device: &'a wgpu::Device,
                     surface_config: &'a mut wgpu::SurfaceConfiguration,
+                    // Input state references (G2: Input System)
+                    key_state: &'a mut [bool; 256],
+                    mouse_x: &'a mut i32,
+                    mouse_y: &'a mut i32,
+                    mouse_buttons: &'a mut [bool; 3],
                 }
 
                 impl ApplicationHandler for PollApp<'_> {
@@ -407,6 +422,30 @@ impl Renderer {
                                     self.surface.configure(self.device, self.surface_config);
                                 }
                             }
+                            // G2: Input System — track keyboard events
+                            WindowEvent::KeyboardInput { event: key_event, .. } => {
+                                if let winit::keyboard::PhysicalKey::Code(code) = key_event.physical_key {
+                                    let idx = code as usize;
+                                    if idx < 256 {
+                                        self.key_state[idx] = key_event.state == winit::event::ElementState::Pressed;
+                                    }
+                                }
+                            }
+                            // G2: Input System — track cursor position
+                            WindowEvent::CursorMoved { position, .. } => {
+                                *self.mouse_x = position.x as i32;
+                                *self.mouse_y = position.y as i32;
+                            }
+                            // G2: Input System — track mouse buttons
+                            WindowEvent::MouseInput { state, button, .. } => {
+                                let pressed = state == winit::event::ElementState::Pressed;
+                                match button {
+                                    winit::event::MouseButton::Left => self.mouse_buttons[0] = pressed,
+                                    winit::event::MouseButton::Right => self.mouse_buttons[1] = pressed,
+                                    winit::event::MouseButton::Middle => self.mouse_buttons[2] = pressed,
+                                    _ => {}
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -419,6 +458,10 @@ impl Renderer {
                     surface: &self.surface,
                     device: &self.device,
                     surface_config: &mut self.surface_config,
+                    key_state: &mut self.key_state,
+                    mouse_x: &mut self.mouse_x,
+                    mouse_y: &mut self.mouse_y,
+                    mouse_buttons: &mut self.mouse_buttons,
                 };
 
                 let _ = event_loop.pump_app_events(
@@ -726,6 +769,31 @@ impl Renderer {
 
     pub fn get_time(&self) -> f64 {
         self.start_time.elapsed().as_secs_f64()
+    }
+
+    // G2: Input System accessors
+
+    /// Check if a key is currently pressed.
+    /// `key_code` uses platform-specific virtual key codes (0..255).
+    pub fn is_key_down(&self, key_code: i32) -> bool {
+        let idx = (key_code & 0xFF) as usize;
+        self.key_state[idx]
+    }
+
+    /// Get the current mouse X position in client coordinates.
+    pub fn get_mouse_x(&self) -> i32 {
+        self.mouse_x
+    }
+
+    /// Get the current mouse Y position in client coordinates.
+    pub fn get_mouse_y(&self) -> i32 {
+        self.mouse_y
+    }
+
+    /// Check if a mouse button is pressed (0=left, 1=right, 2=middle).
+    pub fn is_mouse_down(&self, button: i32) -> bool {
+        if button < 0 || button > 2 { return false; }
+        self.mouse_buttons[button as usize]
     }
 
     /// Capture the current frame to a PNG file.

@@ -679,6 +679,14 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             ctx.output,
             "declare void @axiom_renderer_bind_pipeline(ptr, ptr)"
         );
+        // G2: Input System
+        let _ = writeln!(ctx.output, "declare i32 @axiom_is_key_down(i32)");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_get_mouse_x()");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_get_mouse_y()");
+        let _ = writeln!(ctx.output, "declare i32 @axiom_is_mouse_down(i32)");
+        // G3: Audio
+        let _ = writeln!(ctx.output, "declare void @axiom_play_beep(i32, i32)");
+        let _ = writeln!(ctx.output, "declare void @axiom_play_sound(ptr)");
     }
 
     // Emit GPU PBR / glTF extern declarations (axiom-renderer gpu_* functions).
@@ -890,6 +898,14 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_string_print")
         // CPUID feature detection
         || ir.contains("@axiom_cpu_features")
+        // G2: Input System
+        || ir.contains("@axiom_is_key_down")
+        || ir.contains("@axiom_get_mouse_x")
+        || ir.contains("@axiom_get_mouse_y")
+        || ir.contains("@axiom_is_mouse_down")
+        // G3: Audio
+        || ir.contains("@axiom_play_beep")
+        || ir.contains("@axiom_play_sound")
 }
 
 /// Register a struct type in the codegen context.
@@ -2941,6 +2957,14 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "result_err_code" => return emit_builtin_result_err_code(ctx, args),
             // CPUID feature detection (axiom_rt.c)
             "cpu_features" => return emit_builtin_cpu_features(ctx, args),
+            // G2: Input System builtins
+            "is_key_down" => return emit_builtin_is_key_down(ctx, args),
+            "get_mouse_x" => return emit_builtin_get_mouse_x(ctx, args),
+            "get_mouse_y" => return emit_builtin_get_mouse_y(ctx, args),
+            "is_mouse_down" => return emit_builtin_is_mouse_down(ctx, args),
+            // G3: Audio builtins
+            "play_beep" => return emit_builtin_play_beep(ctx, args),
+            "play_sound" => return emit_builtin_play_sound(ctx, args),
             _ => {}
         }
 
@@ -7099,6 +7123,177 @@ fn format_float(value: f64) -> String {
         }
     } else {
         format!("{s}.0")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// G2: Input System builtins
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `is_key_down(key_code: i32) -> i32`.
+///
+/// Returns 1 if the given key is currently pressed, 0 otherwise.
+fn emit_builtin_is_key_down(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "is_key_down() requires exactly 1 argument (key_code)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let key_val = emit_expr(ctx, &args[0], Some("i32"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_is_key_down(i32 {})",
+        key_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `get_mouse_x() -> i32`.
+///
+/// Returns the current mouse X position in client coordinates.
+fn emit_builtin_get_mouse_x(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if !args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "get_mouse_x() takes no arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{result_reg} = call i32 @axiom_get_mouse_x()"));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `get_mouse_y() -> i32`.
+///
+/// Returns the current mouse Y position in client coordinates.
+fn emit_builtin_get_mouse_y(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if !args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "get_mouse_y() takes no arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+    }
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{result_reg} = call i32 @axiom_get_mouse_y()"));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `is_mouse_down(button: i32) -> i32`.
+///
+/// Returns 1 if the given mouse button is pressed (0=left, 1=right, 2=middle).
+fn emit_builtin_is_mouse_down(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "is_mouse_down() requires exactly 1 argument (button)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let btn_val = emit_expr(ctx, &args[0], Some("i32"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @axiom_is_mouse_down(i32 {})",
+        btn_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// G3: Audio builtins
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `play_beep(freq: i32, duration_ms: i32)`.
+///
+/// Plays a beep at the given frequency for the given duration (Windows Beep API).
+fn emit_builtin_play_beep(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "play_beep() requires exactly 2 arguments (freq, duration_ms)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let freq_val = emit_expr(ctx, &args[0], Some("i32"));
+    let dur_val = emit_expr(ctx, &args[1], Some("i32"));
+    ctx.emit(&format!(
+        "call void @axiom_play_beep(i32 {}, i32 {})",
+        freq_val.reg, dur_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `play_sound(path: ptr)`.
+///
+/// Plays a sound file asynchronously (Windows PlaySound API).
+fn emit_builtin_play_sound(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_renderer = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "play_sound() requires exactly 1 argument (path)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let path_val = emit_expr(ctx, &args[0], Some("ptr"));
+    ctx.emit(&format!(
+        "call void @axiom_play_sound(ptr {})",
+        path_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
     }
 }
 

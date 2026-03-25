@@ -4,6 +4,8 @@ mod compile;
 mod mcp;
 
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "axiom", about = "AXIOM — AI eXchange Intermediate Optimization Medium")]
@@ -97,6 +99,191 @@ enum Commands {
         /// Input .axm file
         input: String,
     },
+
+    /// Generate documentation from AXIOM source
+    Doc {
+        /// Input .axm file
+        input: String,
+    },
+}
+
+/// Process `@include "path.axm"` directives in source code.
+///
+/// Scans the source for lines matching `@include "path"` and replaces them
+/// with the contents of the referenced file. Supports recursive includes up
+/// to a depth of 10. Paths are resolved relative to `base_dir`.
+fn process_includes(source: &str, base_dir: &Path, depth: usize, visited: &mut HashSet<String>) -> miette::Result<String> {
+    if depth > 10 {
+        return Err(miette::miette!("@include depth exceeds 10 — possible circular include"));
+    }
+
+    let mut output = String::with_capacity(source.len());
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("@include") {
+            let rest = rest.trim();
+            // Extract the path from quotes
+            if let Some(path_str) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                let include_path = base_dir.join(path_str);
+                let canonical = include_path.display().to_string();
+                if visited.contains(&canonical) {
+                    // Already included — skip to avoid infinite recursion
+                    output.push_str(&format!("// [already included: {path_str}]\n"));
+                    continue;
+                }
+                visited.insert(canonical.clone());
+                let included_source = std::fs::read_to_string(&include_path)
+                    .map_err(|e| miette::miette!("@include failed for \"{}\": {}", include_path.display(), e))?;
+                let included_dir = include_path.parent().unwrap_or(base_dir);
+                let processed = process_includes(&included_source, included_dir, depth + 1, visited)?;
+                output.push_str(&processed);
+                output.push('\n');
+            } else {
+                // Not a valid include — pass through as-is
+                output.push_str(line);
+                output.push('\n');
+            }
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    Ok(output)
+}
+
+/// Read a source file and process `@include` directives.
+fn read_source_with_includes(input: &str) -> miette::Result<String> {
+    let source = std::fs::read_to_string(input)
+        .map_err(|e| miette::miette!("Failed to read {}: {}", input, e))?;
+    let base_dir = Path::new(input).parent().unwrap_or(Path::new("."));
+    let mut visited = HashSet::new();
+    visited.insert(
+        std::fs::canonicalize(input)
+            .unwrap_or_else(|_| Path::new(input).to_path_buf())
+            .display()
+            .to_string(),
+    );
+    process_includes(&source, base_dir, 0, &mut visited)
+}
+
+/// Generate markdown documentation from an AXIOM source file.
+///
+/// Parses the source, extracts `@intent` and `@module` annotations, lists all
+/// function signatures, and prints a markdown document to stdout.
+fn run_doc(input: &str) -> miette::Result<()> {
+    let source = read_source_with_includes(input)?;
+
+    let result = axiom_parser::parse(&source);
+    if result.has_errors() {
+        eprintln!("--- Parse Errors ---");
+        for err in &result.errors {
+            eprintln!("  {err}");
+        }
+        return Err(miette::miette!("parsing failed with {} error(s)", result.errors.len()));
+    }
+
+    let module = &result.module;
+
+    // Header
+    let module_name = module.name.as_ref().map(|s| s.node.as_str()).unwrap_or("(unnamed)");
+    println!("# Module: {module_name}");
+    println!();
+
+    // Module-level annotations
+    let mut has_module_annotations = false;
+    for ann in &module.annotations {
+        match &ann.node {
+            axiom_parser::ast::Annotation::Intent(text) => {
+                if !has_module_annotations {
+                    println!("## Module Annotations");
+                    println!();
+                    has_module_annotations = true;
+                }
+                println!("- **Intent**: {text}");
+            }
+            axiom_parser::ast::Annotation::Module(name) => {
+                if !has_module_annotations {
+                    println!("## Module Annotations");
+                    println!();
+                    has_module_annotations = true;
+                }
+                println!("- **Module**: {name}");
+            }
+            _ => {}
+        }
+    }
+    if has_module_annotations {
+        println!();
+    }
+
+    // Functions
+    println!("## Functions");
+    println!();
+
+    for item in &module.items {
+        match &item.node {
+            axiom_parser::ast::Item::Function(f) => {
+                let name = &f.name.node;
+                let params: Vec<String> = f.params.iter().map(|p| {
+                    format!("{}: {:?}", p.name.node, p.ty)
+                }).collect();
+                let ret = format!("{:?}", f.return_type);
+                println!("### `fn {name}({})`", params.join(", "));
+                println!();
+                println!("- **Returns**: `{ret}`");
+
+                // Extract annotations
+                for ann in &f.annotations {
+                    match &ann.node {
+                        axiom_parser::ast::Annotation::Intent(text) => {
+                            println!("- **Intent**: {text}");
+                        }
+                        axiom_parser::ast::Annotation::Pure => {
+                            println!("- **Pure**: yes");
+                        }
+                        axiom_parser::ast::Annotation::Const => {
+                            println!("- **Const**: yes (compile-time evaluable)");
+                        }
+                        axiom_parser::ast::Annotation::Complexity(c) => {
+                            println!("- **Complexity**: {c}");
+                        }
+                        axiom_parser::ast::Annotation::Export => {
+                            println!("- **Exported**: yes");
+                        }
+                        axiom_parser::ast::Annotation::Inline(hint) => {
+                            println!("- **Inline**: {hint:?}");
+                        }
+                        _ => {}
+                    }
+                }
+                println!();
+            }
+            axiom_parser::ast::Item::ExternFunction(f) => {
+                let name = &f.name.node;
+                let params: Vec<String> = f.params.iter().map(|p| {
+                    format!("{}: {:?}", p.name.node, p.ty)
+                }).collect();
+                let ret = format!("{:?}", f.return_type);
+                println!("### `extern fn {name}({})`", params.join(", "));
+                println!();
+                println!("- **Returns**: `{ret}`");
+                println!("- **External**: yes");
+                println!();
+            }
+            axiom_parser::ast::Item::Struct(s) => {
+                let name = &s.name.node;
+                println!("### `struct {name}`");
+                println!();
+                for field in &s.fields {
+                    println!("- `{}`: `{:?}`", field.name.node, field.ty);
+                }
+                println!();
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 fn main() -> miette::Result<()> {
@@ -199,8 +386,7 @@ fn main() -> miette::Result<()> {
         }
 
         Commands::Compile { input, output, emit, target } => {
-            let source = std::fs::read_to_string(&input)
-                .map_err(|e| miette::miette!("Failed to read {}: {}", input, e))?;
+            let source = read_source_with_includes(&input)?;
 
             match emit.as_deref() {
                 Some("tokens") => {
@@ -327,6 +513,8 @@ fn main() -> miette::Result<()> {
 
             Ok(())
         }
+
+        Commands::Doc { input } => run_doc(&input),
     }
 }
 
