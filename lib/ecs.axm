@@ -1,0 +1,157 @@
+@module ecs_lib;
+@intent("ECS library written in AXIOM — proof-of-concept archetype storage");
+
+// =============================================================================
+// Entity-Component-System Library (lib/ecs.axm)
+// =============================================================================
+//
+// An ECS library written entirely in AXIOM that can be @include'd.
+//
+// Design:
+//   - World stores component arrays using heap allocation
+//   - Entities are integer IDs mapping into component arrays
+//   - Components are identified by integer IDs (0-15)
+//   - SOA (Struct of Arrays) layout for cache-friendly iteration
+//
+// World layout (ptr[i32]):
+//   slot 0:  entity count (current)
+//   slot 1:  max entities (capacity)
+//   slots 2-15: reserved for component metadata
+//
+// Usage:
+//   @include "lib/ecs.axm"
+//   let world: ptr[i32] = ecs_create_world(1000);
+//   let positions_x: ptr[f64] = ecs_add_component_f64(world, 0, 1000);
+//   let positions_y: ptr[f64] = ecs_add_component_f64(world, 1, 1000);
+//   let id: i32 = ecs_spawn(world);
+//   ecs_set_f64(positions_x, id, 42.0);
+//   ecs_destroy_world(world);
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// World management
+// ---------------------------------------------------------------------------
+
+// Create a world with capacity for max_entities entities.
+// Returns a ptr to the world state (metadata array).
+fn ecs_create_world(max_entities: i32) -> ptr[i32] {
+    // 16 slots: [entity_count, max_entities, reserved x14]
+    let world: ptr[i32] = heap_alloc(16, 4);
+    // slot 0: entity count = 0
+    ptr_write_i32(world, 0, 0);
+    // slot 1: max entities
+    ptr_write_i32(world, 1, max_entities);
+    // Initialize reserved slots to 0
+    for i: i32 in range(2, 16) {
+        ptr_write_i32(world, i, 0);
+    }
+    return world;
+}
+
+// Destroy a world and free its metadata.
+// NOTE: Component arrays allocated via ecs_add_component_* must be freed
+// separately by calling heap_free on each component array pointer.
+fn ecs_destroy_world(world: ptr[i32]) {
+    heap_free(world);
+}
+
+// ---------------------------------------------------------------------------
+// Entity management
+// ---------------------------------------------------------------------------
+
+// Spawn a new entity. Returns the entity ID (integer index).
+// Entity IDs are sequential starting from 0.
+fn ecs_spawn(world: ptr[i32]) -> i32 {
+    let count: i32 = ptr_read_i32(world, 0);
+    let max: i32 = ptr_read_i32(world, 1);
+    // Guard: do not exceed capacity
+    if count >= max {
+        return count - 1;
+    }
+    ptr_write_i32(world, 0, count + 1);
+    return count;
+}
+
+// Return the current entity count.
+fn ecs_entity_count(world: ptr[i32]) -> i32 {
+    return ptr_read_i32(world, 0);
+}
+
+// Return the max entity capacity.
+fn ecs_max_entities(world: ptr[i32]) -> i32 {
+    return ptr_read_i32(world, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Component arrays (f64)
+// ---------------------------------------------------------------------------
+
+// Allocate a new f64 component array for max_entities.
+// Returns a heap-allocated, zeroed f64 array.
+fn ecs_add_component_f64(world: ptr[i32], component_id: i32, max_entities: i32) -> ptr[f64] {
+    let arr: ptr[f64] = heap_alloc_zeroed(max_entities, 8);
+    return arr;
+}
+
+// Set a f64 component value for an entity.
+@pure
+fn ecs_set_f64(component: ptr[f64], entity_id: i32, value: f64) {
+    ptr_write_f64(component, entity_id, value);
+}
+
+// Get a f64 component value for an entity.
+@pure
+fn ecs_get_f64(component: ptr[f64], entity_id: i32) -> f64 {
+    return ptr_read_f64(component, entity_id);
+}
+
+// ---------------------------------------------------------------------------
+// Component arrays (i32)
+// ---------------------------------------------------------------------------
+
+// Allocate a new i32 component array for max_entities.
+// Returns a heap-allocated, zeroed i32 array.
+fn ecs_add_component_i32(world: ptr[i32], component_id: i32, max_entities: i32) -> ptr[i32] {
+    let arr: ptr[i32] = heap_alloc_zeroed(max_entities, 4);
+    return arr;
+}
+
+// Set an i32 component value for an entity.
+@pure
+fn ecs_set_i32(component: ptr[i32], entity_id: i32, value: i32) {
+    ptr_write_i32(component, entity_id, value);
+}
+
+// Get an i32 component value for an entity.
+@pure
+fn ecs_get_i32(component: ptr[i32], entity_id: i32) -> i32 {
+    return ptr_read_i32(component, entity_id);
+}
+
+// ---------------------------------------------------------------------------
+// Free component arrays
+// ---------------------------------------------------------------------------
+
+// Free a component array (any type — i32 or f64).
+// Caller must not use the pointer after this call.
+fn ecs_free_component(arr: ptr[i32]) {
+    heap_free(arr);
+}
+
+// ---------------------------------------------------------------------------
+// System utilities
+// ---------------------------------------------------------------------------
+
+// Iterate a system function over all alive entities.
+// alive_arr: i32 component where 1=alive, 0=dead
+// This is a helper pattern — real systems just loop with for/range.
+@pure
+fn ecs_count_alive(alive_arr: ptr[i32], count: i32) -> i32 {
+    let n: i32 = 0;
+    for i: i32 in range(0, count) {
+        if ptr_read_i32(alive_arr, i) == 1 {
+            n = n + 1;
+        }
+    }
+    return n;
+}

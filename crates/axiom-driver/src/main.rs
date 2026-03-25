@@ -140,6 +140,24 @@ enum Commands {
         #[arg(long)]
         manifest: Option<String>,
     },
+
+    /// AI-driven source-to-source rewrite (S3)
+    Rewrite {
+        /// Input .axm file
+        input: String,
+
+        /// Just print the LLM prompt without calling the API
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Anthropic API key (or set ANTHROPIC_API_KEY env var)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Write rewritten source to this output file
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 /// Process `@include "path.axm"` directives in source code.
@@ -595,6 +613,11 @@ fn main() -> miette::Result<()> {
         Commands::Build { manifest } => {
             let manifest_path = manifest.unwrap_or_else(|| "axiom.toml".to_string());
             run_build(&manifest_path)
+        }
+
+        // S3: Source-to-Source AI Rewrite
+        Commands::Rewrite { input, dry_run, api_key, output } => {
+            run_rewrite(&input, dry_run, api_key.as_deref(), output.as_deref())
         }
     }
 }
@@ -1421,6 +1444,107 @@ fn get_timestamp() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// S3: Source-to-Source AI Rewrite
+// ---------------------------------------------------------------------------
+
+fn run_rewrite(input: &str, dry_run: bool, api_key: Option<&str>, output: Option<&str>) -> miette::Result<()> {
+    use axiom_optimize::llm_optimizer::{self, LlmResult};
+
+    // Resolve API key
+    let resolved_api_key: Option<String> = api_key
+        .map(|k| k.to_string())
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+
+    // Read source
+    let source = read_source_with_includes(input)?;
+
+    eprintln!("=== AXIOM Source-to-Source Rewrite ===\n");
+    eprintln!("Source: {input} ({} bytes)", source.len());
+    eprintln!(
+        "Mode: {}",
+        if dry_run {
+            "dry-run (prompt only)"
+        } else if resolved_api_key.is_some() {
+            "Claude API"
+        } else {
+            "auto-detect (claude CLI or dry-run)"
+        }
+    );
+    eprintln!();
+
+    // Verify source parses correctly
+    let result = axiom_parser::parse(&source);
+    if result.has_errors() {
+        eprintln!("Warning: source has parse errors:");
+        for err in &result.errors {
+            eprintln!("  {err}");
+        }
+        eprintln!();
+    }
+
+    // Extract constraints for reporting
+    let constraints = llm_optimizer::extract_constraints_from_source(&source);
+    if !constraints.is_empty() {
+        eprintln!("Detected constraints:");
+        for c in &constraints {
+            eprintln!("  {}: {}", c.key, c.value);
+        }
+        eprintln!();
+    }
+
+    // Run rewrite
+    let rewrite_result = llm_optimizer::run_rewrite(
+        &source,
+        resolved_api_key.as_deref(),
+        dry_run,
+    );
+
+    match rewrite_result {
+        LlmResult::Suggestion(suggestion) => {
+            eprintln!("Rewrite suggestion (confidence: {:.0}%):\n", suggestion.confidence * 100.0);
+
+            if !suggestion.code_changes.is_empty() {
+                eprintln!("Changes applied:");
+                for change in &suggestion.code_changes {
+                    let line_str = change
+                        .line
+                        .map(|l| format!(" (line {l})"))
+                        .unwrap_or_default();
+                    eprintln!("  - {}{}", change.description, line_str);
+                }
+                eprintln!();
+            }
+
+            // The rewritten source is stored in the reasoning field
+            let rewritten = &suggestion.reasoning;
+
+            match output {
+                Some(out_path) => {
+                    std::fs::write(out_path, rewritten)
+                        .map_err(|e| miette::miette!("Failed to write {}: {}", out_path, e))?;
+                    eprintln!("Rewritten source written to: {out_path}");
+                }
+                None => {
+                    println!("{rewritten}");
+                }
+            }
+        }
+
+        LlmResult::DryRun { prompt_path, prompt } => {
+            eprintln!("[DRY RUN] Prompt written to: {prompt_path}");
+            eprintln!("Prompt length: {} chars\n", prompt.len());
+            println!("{prompt}");
+        }
+
+        LlmResult::Error(err) => {
+            return Err(miette::miette!("Rewrite failed: {err}"));
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests for new features (E5: manifest parsing, G4/L4 helpers)
 // ---------------------------------------------------------------------------
 
@@ -1506,6 +1630,27 @@ version = "0.1.0"
     #[test]
     fn test_try_compile_nonexistent_file() {
         let result = try_compile("nonexistent_file_12345.axm", "out.exe");
+        assert!(result.is_err());
+    }
+
+    // S3: Rewrite command integration
+
+    #[test]
+    fn test_process_includes_basic() {
+        let source = "let x: i32 = 1;\n";
+        let base_dir = Path::new(".");
+        let mut visited = HashSet::new();
+        let result = process_includes(source, base_dir, 0, &mut visited).unwrap();
+        assert_eq!(result, "let x: i32 = 1;\n");
+    }
+
+    #[test]
+    fn test_process_includes_depth_limit() {
+        // Simulate deep include chain — should error at depth > 10
+        let source = "@include \"nonexistent.axm\"\n";
+        let base_dir = Path::new(".");
+        let mut visited = HashSet::new();
+        let result = process_includes(source, base_dir, 11, &mut visited);
         assert!(result.is_err());
     }
 }
