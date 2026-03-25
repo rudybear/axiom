@@ -103,6 +103,9 @@ pub struct Renderer {
     mouse_x: i32,
     mouse_y: i32,
     mouse_buttons: [bool; 3], // left, right, middle
+
+    // R5: Multi-light support
+    lights: crate::pbr::LightUniformGpu,
 }
 
 // Inline WGSL shader source
@@ -247,6 +250,19 @@ impl Renderer {
             mouse_x: 0,
             mouse_y: 0,
             mouse_buttons: [false; 3],
+            // R5: Multi-light support
+            lights: crate::pbr::LightUniformGpu {
+                lights: [crate::pbr::PointLightGpu {
+                    position: [0.0; 3],
+                    intensity: 0.0,
+                    color: [0.0; 3],
+                    _pad: 0.0,
+                }; crate::pbr::MAX_LIGHTS],
+                count: 0,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
+            },
         })
     }
 
@@ -1043,6 +1059,158 @@ impl Renderer {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // R5: Multi-light support
+    // -----------------------------------------------------------------------
+
+    /// Add a point light to the scene. Up to 8 lights are supported.
+    /// Returns `true` if the light was added, `false` if at capacity.
+    pub fn add_light(
+        &mut self,
+        x: f32, y: f32, z: f32,
+        r: f32, g: f32, b: f32,
+        intensity: f32,
+    ) -> bool {
+        let idx = self.lights.count as usize;
+        if idx >= crate::pbr::MAX_LIGHTS {
+            eprintln!("[AXIOM Renderer] Warning: max {} lights reached, ignoring", crate::pbr::MAX_LIGHTS);
+            return false;
+        }
+        self.lights.lights[idx] = crate::pbr::PointLightGpu {
+            position: [x, y, z],
+            intensity,
+            color: [r, g, b],
+            _pad: 0.0,
+        };
+        self.lights.count += 1;
+        true
+    }
+
+    /// Clear all lights.
+    pub fn clear_lights(&mut self) {
+        self.lights.count = 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // R5: Instanced rendering
+    // -----------------------------------------------------------------------
+
+    /// Draw the loaded scene multiple times using the provided 4x4 transform
+    /// matrices (column-major f32[16] each). `count` is the number of instances.
+    pub fn render_scene_instanced(&mut self, transforms: &[[f32; 16]], count: u32) {
+        self.ensure_pbr_pipeline();
+        self.ensure_depth_texture();
+
+        let scene = match &self.loaded_scene {
+            Some(s) => s,
+            None => return,
+        };
+
+        let depth_view = match &self.depth_view {
+            Some(v) => v,
+            None => return,
+        };
+
+        // Update camera + lights
+        let aspect = self.width as f32 / self.height.max(1) as f32;
+        let camera_uniform = CameraUniform::from_state(&self.camera, aspect);
+        let pbr = self.pbr_pipeline.as_ref().unwrap();
+        pbr.update_camera(&self.queue, &camera_uniform);
+        pbr.update_lights(&self.queue, &self.lights);
+
+        // Create per-instance buffer of mat4 transforms
+        let instance_data: Vec<u8> = transforms.iter()
+            .take(count as usize)
+            .flat_map(|t| bytemuck::cast_slice::<f32, u8>(t).to_vec())
+            .collect();
+
+        if instance_data.is_empty() {
+            return;
+        }
+
+        let instance_buffer = self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Instance Transform Buffer"),
+                contents: &instance_data,
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        );
+
+        // Get surface texture
+        let output = match self.surface.get_current_texture() {
+            Ok(t) => t,
+            Err(wgpu::SurfaceError::Lost) => {
+                self.surface.configure(&self.device, &self.surface_config);
+                match self.surface.get_current_texture() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("[AXIOM Renderer] Surface error in render_scene_instanced: {e}");
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[AXIOM Renderer] Surface error in render_scene_instanced: {e}");
+                return;
+            }
+        };
+
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("PBR Instanced Frame Encoder"),
+            });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("PBR Instanced Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.1, g: 0.1, b: 0.1, a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(&pbr.pipeline);
+            render_pass.set_bind_group(0, &pbr.camera_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, scene.vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, instance_buffer.slice(..));
+            render_pass.set_index_buffer(scene.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+
+            for range in &scene.draw_ranges {
+                let mat_idx = range.material_index.min(scene.materials.len().saturating_sub(1));
+                render_pass.set_bind_group(1, &scene.materials[mat_idx].bind_group, &[]);
+                render_pass.draw_indexed(
+                    range.index_offset..range.index_offset + range.index_count,
+                    0,
+                    0..count,
+                );
+            }
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+    }
+
     /// Render the loaded PBR scene with the current camera.
     /// Must be called between begin_frame() and end_frame().
     pub fn render_scene(&mut self) {
@@ -1059,11 +1227,12 @@ impl Renderer {
             None => return,
         };
 
-        // Update camera uniform
+        // Update camera + light uniforms
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let camera_uniform = CameraUniform::from_state(&self.camera, aspect);
         let pbr = self.pbr_pipeline.as_ref().unwrap();
         pbr.update_camera(&self.queue, &camera_uniform);
+        pbr.update_lights(&self.queue, &self.lights);
 
         // Get surface texture
         let output = match self.surface.get_current_texture() {

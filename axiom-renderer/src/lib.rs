@@ -503,3 +503,62 @@ pub unsafe extern "C" fn axiom_get_mouse_y() -> c_int {
 pub unsafe extern "C" fn axiom_is_mouse_down(button: c_int) -> c_int {
     with_renderer(0, |r| if r.is_mouse_down(button) { 1 } else { 0 })
 }
+
+// ---------------------------------------------------------------------------
+// R5: Multi-light support — C ABI exports
+// ---------------------------------------------------------------------------
+
+/// Add a point light to the scene.
+/// Returns 1 on success, 0 if max lights (8) already reached.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_add_light(
+    _handle: *mut std::ffi::c_void,
+    x: c_double, y: c_double, z: c_double,
+    r: c_double, g: c_double, b: c_double,
+    intensity: c_double,
+) -> c_int {
+    with_renderer(0, |renderer| {
+        if renderer.add_light(
+            x as f32, y as f32, z as f32,
+            r as f32, g as f32, b as f32,
+            intensity as f32,
+        ) { 1 } else { 0 }
+    })
+}
+
+/// Clear all point lights.
+#[no_mangle]
+pub unsafe extern "C" fn gpu_clear_lights(_handle: *mut std::ffi::c_void) {
+    with_renderer((), |r| r.clear_lights());
+}
+
+// ---------------------------------------------------------------------------
+// R5: Instanced rendering — C ABI exports
+// ---------------------------------------------------------------------------
+
+/// Draw the loaded scene instanced with the provided transform matrices.
+/// `transforms_ptr` points to `count` contiguous 4x4 column-major f32 matrices (16 floats each).
+/// `scene_id` is currently ignored (uses the loaded scene).
+#[no_mangle]
+pub unsafe extern "C" fn gpu_draw_instanced(
+    _handle: *mut std::ffi::c_void,
+    _scene_id: c_int,
+    transforms_ptr: *const c_float,
+    count: c_int,
+) {
+    if transforms_ptr.is_null() || count <= 0 {
+        return;
+    }
+    let n = count as usize;
+    let raw = std::slice::from_raw_parts(transforms_ptr, n * 16);
+    // Reinterpret as array of [f32; 16]
+    let transforms: Vec<[f32; 16]> = raw
+        .chunks_exact(16)
+        .map(|chunk| {
+            let mut arr = [0.0f32; 16];
+            arr.copy_from_slice(chunk);
+            arr
+        })
+        .collect();
+    with_renderer((), |r| r.render_scene_instanced(&transforms, count as u32));
+}

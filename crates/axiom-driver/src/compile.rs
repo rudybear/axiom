@@ -357,6 +357,191 @@ fn install_instructions() -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------------
+// L4: PGO (Profile-Guided Optimization) Bootstrap
+// ---------------------------------------------------------------------------
+
+/// Compile an AXIOM program with Profile-Guided Optimization.
+///
+/// Steps:
+/// 1. Compile with `-fprofile-generate` to instrument the binary
+/// 2. Run the instrumented binary with `training_args` to generate profile data
+/// 3. Merge profile data (llvm-profdata if available)
+/// 4. Recompile with `-fprofile-use` for optimized output
+///
+/// Returns (output_path, speedup_message).
+pub fn compile_with_pgo(
+    llvm_ir: &str,
+    output_path: &str,
+    training_args: &[String],
+) -> miette::Result<String> {
+    let compiler = find_compiler()?;
+    let clang_path = match &compiler {
+        CompilerKind::Clang(p) => p.clone(),
+    };
+
+    let temp_ll = temp_ll_path();
+    std::fs::write(&temp_ll, llvm_ir)
+        .map_err(|e| miette::miette!("failed to write temp file {}: {}", temp_ll.display(), e))?;
+
+    let needs_rt = axiom_codegen::needs_runtime(llvm_ir);
+    let rt_path = if needs_rt {
+        Some(write_runtime_c()?)
+    } else {
+        None
+    };
+
+    let prof_dir = std::env::temp_dir().join(format!("axiom_pgo_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&prof_dir);
+
+    let instrumented_bin = if cfg!(windows) {
+        prof_dir.join("instrumented.exe")
+    } else {
+        prof_dir.join("instrumented")
+    };
+
+    // Step 1: Compile with -fprofile-generate
+    eprintln!("[PGO] Step 1: Compiling with instrumentation...");
+    let mut cmd1 = Command::new(&clang_path);
+    cmd1.arg("-O2")
+        .arg("-Wno-override-module")
+        .arg("-march=native")
+        .arg(&format!("-fprofile-generate={}", prof_dir.display()))
+        .arg(&temp_ll);
+    if let Some(ref rt) = rt_path {
+        cmd1.arg(rt);
+        #[cfg(not(target_os = "windows"))]
+        cmd1.arg("-lpthread");
+        #[cfg(target_os = "windows")]
+        {
+            cmd1.arg("-lgdi32");
+            cmd1.arg("-luser32");
+        }
+    }
+    cmd1.arg("-o").arg(&instrumented_bin);
+    #[cfg(target_os = "windows")]
+    cmd1.arg("-Wl,/STACK:67108864");
+
+    let out1 = cmd1.output()
+        .map_err(|e| miette::miette!("PGO step 1 failed to run: {e}"))?;
+    if !out1.status.success() {
+        let stderr = String::from_utf8_lossy(&out1.stderr);
+        return Err(miette::miette!("PGO instrumentation build failed:\n{stderr}"));
+    }
+
+    // Step 2: Run instrumented binary to generate profile data
+    eprintln!("[PGO] Step 2: Running instrumented binary for profiling...");
+    let t_start = std::time::Instant::now();
+    let mut cmd2 = Command::new(&instrumented_bin);
+    for arg in training_args {
+        cmd2.arg(arg);
+    }
+    let out2 = cmd2.output()
+        .map_err(|e| miette::miette!("PGO training run failed: {e}"))?;
+    let training_time = t_start.elapsed();
+    if !out2.status.success() {
+        eprintln!("[PGO] Warning: training run exited with {}", out2.status);
+    }
+    eprintln!("[PGO] Training run completed in {:.3}s", training_time.as_secs_f64());
+
+    // Step 3: Merge profile data if llvm-profdata is available
+    let prof_data = prof_dir.join("default.profdata");
+    // Look for .profraw files
+    let profraw_files: Vec<_> = std::fs::read_dir(&prof_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map_or(false, |ext| ext == "profraw"))
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if !profraw_files.is_empty() {
+        // Try llvm-profdata merge
+        let profdata_tool = find_profdata_tool();
+        if let Some(tool) = profdata_tool {
+            eprintln!("[PGO] Step 2.5: Merging profile data with {tool}...");
+            let mut merge_cmd = Command::new(&tool);
+            merge_cmd.arg("merge").arg("-output").arg(&prof_data);
+            for pf in &profraw_files {
+                merge_cmd.arg(pf);
+            }
+            let _ = merge_cmd.output(); // Best-effort
+        }
+    }
+
+    // Step 4: Recompile with profile data
+    eprintln!("[PGO] Step 3: Recompiling with profile data...");
+    let t_opt_start = std::time::Instant::now();
+    let mut cmd3 = Command::new(&clang_path);
+    cmd3.arg("-O2")
+        .arg("-Wno-override-module")
+        .arg("-march=native");
+
+    // Use -fprofile-use if merged profdata exists, otherwise -fprofile-use=dir
+    if prof_data.exists() {
+        cmd3.arg(&format!("-fprofile-use={}", prof_data.display()));
+    } else {
+        cmd3.arg(&format!("-fprofile-use={}", prof_dir.display()));
+    }
+
+    cmd3.arg(&temp_ll);
+    if let Some(ref rt) = rt_path {
+        cmd3.arg(rt);
+        #[cfg(not(target_os = "windows"))]
+        cmd3.arg("-lpthread");
+        #[cfg(target_os = "windows")]
+        {
+            cmd3.arg("-lgdi32");
+            cmd3.arg("-luser32");
+        }
+    }
+    cmd3.arg("-o").arg(output_path);
+    #[cfg(target_os = "windows")]
+    cmd3.arg("-Wl,/STACK:67108864");
+
+    let out3 = cmd3.output()
+        .map_err(|e| miette::miette!("PGO optimized build failed to run: {e}"))?;
+    let opt_time = t_opt_start.elapsed();
+
+    if !out3.status.success() {
+        let stderr = String::from_utf8_lossy(&out3.stderr);
+        return Err(miette::miette!("PGO optimized build failed:\n{stderr}"));
+    }
+
+    // Clean up
+    let _ = std::fs::remove_file(&temp_ll);
+    if let Some(ref rp) = rt_path {
+        let _ = std::fs::remove_file(rp);
+    }
+    let _ = std::fs::remove_dir_all(&prof_dir);
+
+    let message = format!(
+        "[PGO] Complete. Training: {:.3}s, Optimized build: {:.3}s\n\
+         [PGO] Output: {output_path}",
+        training_time.as_secs_f64(),
+        opt_time.as_secs_f64(),
+    );
+    Ok(message)
+}
+
+/// Try to find llvm-profdata on PATH.
+fn find_profdata_tool() -> Option<String> {
+    let candidates = [
+        "llvm-profdata",
+        "llvm-profdata-19",
+        "llvm-profdata-18",
+        "llvm-profdata-17",
+    ];
+    for name in &candidates {
+        if compiler_exists(name) {
+            return Some((*name).to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
