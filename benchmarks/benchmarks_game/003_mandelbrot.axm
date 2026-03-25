@@ -1,0 +1,65 @@
+@module mandelbrot;
+@intent("Mandelbrot set: compute 4000x4000 pixel grid, 50 iterations max, output checksum of bitmap");
+@constraint { optimize_for: "performance" };
+
+// Benchmarks Game mandelbrot: compute the Mandelbrot set for a 4000x4000 grid.
+// For each pixel, iterate z = z^2 + c up to 50 times.
+// Output a checksum of which pixels are inside the set.
+
+@pure @inline(always)
+fn mandelbrot_pixel(cr: f64, ci: f64, max_iter: i32) -> i32 {
+    let zr: f64 = 0.0;
+    let zi: f64 = 0.0;
+    for iter: i32 in range(0, max_iter) {
+        let zr2: f64 = zr * zr;
+        let zi2: f64 = zi * zi;
+        if zr2 + zi2 > 4.0 {
+            return 0;
+        }
+        let new_zr: f64 = zr2 - zi2 + cr;
+        zi = 2.0 * zr * zi + ci;
+        zr = new_zr;
+    }
+    return 1;
+}
+
+fn main() -> i32 {
+    let width: i32 = 4000;
+    let height: i32 = 4000;
+    let max_iter: i32 = 50;
+
+    // We compute a bitmap packed as bytes (8 pixels per byte).
+    // Each row has width/8 bytes. Total bytes = height * width / 8
+    let row_bytes: i32 = width / 8;
+    let total_bytes: i32 = height * row_bytes;
+
+    // Allocate bitmap on heap
+    let bitmap: ptr[i32] = heap_alloc_zeroed(total_bytes, 4);
+
+    let inv_w: f64 = 2.0 / to_f64(width);
+    let inv_h: f64 = 2.0 / to_f64(height);
+
+    for py: i32 in range(0, height) {
+        let ci: f64 = to_f64(py) * inv_h - 1.0;
+        for px_byte: i32 in range(0, row_bytes) {
+            let byte_val: i32 = 0;
+            for bit: i32 in range(0, 8) {
+                let px: i32 = px_byte * 8 + bit;
+                let cr: f64 = to_f64(px) * inv_w - 1.5;
+                let inside: i32 = mandelbrot_pixel(cr, ci, max_iter);
+                byte_val = byte_val * 2 + inside;
+            }
+            ptr_write_i32(bitmap, py * row_bytes + px_byte, byte_val);
+        }
+    }
+
+    // Compute checksum: sum of all bitmap bytes
+    let checksum: i64 = 0;
+    for i: i32 in range(0, total_bytes) {
+        checksum = checksum + widen(ptr_read_i32(bitmap, i));
+    }
+
+    print_i64(checksum);
+    heap_free(bitmap);
+    return 0;
+}

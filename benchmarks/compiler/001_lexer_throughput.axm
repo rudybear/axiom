@@ -1,0 +1,35 @@
+@module lexer_throughput;
+@intent("Simulate lexer throughput: classify 10M characters into token categories");
+@constraint { optimize_for: "performance" };
+
+@pure @inline(always)
+fn classify_char(c: i32) -> i32 {
+    if c >= 48 and c <= 57 { return 1; }
+    if c >= 65 and c <= 90 { return 2; }
+    if c >= 97 and c <= 122 { return 2; }
+    if c == 32 or c == 10 { return 3; }
+    if c == 40 or c == 41 { return 4; }
+    if c == 123 or c == 125 { return 5; }
+    if c == 59 { return 6; }
+    if c == 64 { return 7; }
+    if c == 63 { return 8; }
+    return 9;
+}
+
+fn main() -> i32 {
+    let n: i32 = 10000000;
+    let counts: array[i32, 10] = array_zeros[i32, 10];
+    let seed: i64 = 42;
+    for i: i32 in range(0, n) {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        let c: i32 = narrow(seed % 128);
+        let cls: i32 = classify_char(c);
+        counts[cls] = counts[cls] + 1;
+    }
+    let checksum: i64 = 0;
+    for i: i32 in range(0, 10) {
+        checksum = checksum + widen(counts[i]) * widen(i);
+    }
+    print_i64(checksum);
+    return 0;
+}

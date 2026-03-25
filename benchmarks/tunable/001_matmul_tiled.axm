@@ -1,0 +1,75 @@
+@module matmul_tiled;
+@intent("Tiled matrix multiply with configurable tile size: 512x512 matrices");
+@constraint { optimize_for: "performance" };
+
+// Matrix multiplication with tiling. The tile_size parameter controls cache blocking.
+// The LLM optimizer can discover optimal tile sizes for different cache hierarchies.
+
+@pure
+fn matmul_tiled(a: ptr[f64], b: ptr[f64], c: ptr[f64], n: i32, tile: i32) -> f64 {
+    // Tiled matrix multiply: C += A * B
+    // Iterate over tiles
+    for ii: i32 in range(0, n / tile) {
+        for jj: i32 in range(0, n / tile) {
+            for kk: i32 in range(0, n / tile) {
+                let i_base: i32 = ii * tile;
+                let j_base: i32 = jj * tile;
+                let k_base: i32 = kk * tile;
+
+                // Multiply within the tile
+                for i: i32 in range(i_base, i_base + tile) {
+                    for k: i32 in range(k_base, k_base + tile) {
+                        let a_ik: f64 = ptr_read_f64(a, i * n + k);
+                        for j: i32 in range(j_base, j_base + tile) {
+                            let old: f64 = ptr_read_f64(c, i * n + j);
+                            ptr_write_f64(c, i * n + j, old + a_ik * ptr_read_f64(b, k * n + j));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0.0;
+}
+
+@pure @inline(always)
+fn compute_checksum(mat: ptr[f64], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    let total: i32 = n * n;
+    // Sample every 97th element for speed
+    for idx: i32 in range(0, total / 97) {
+        let i: i32 = idx * 97;
+        sum = sum + ptr_read_f64(mat, i);
+    }
+    return sum;
+}
+
+fn main() -> i32 {
+    @strategy { tile_size: ?tile_size, unroll: ?unroll_factor };
+    let n: i32 = 512;
+    let tile: i32 = 32;  // Default tile size; optimizer can change via @strategy
+    let total: i32 = n * n;
+
+    let a: ptr[f64] = heap_alloc_zeroed(total, 8);
+    let b: ptr[f64] = heap_alloc_zeroed(total, 8);
+    let c: ptr[f64] = heap_alloc_zeroed(total, 8);
+
+    // Initialize matrices with pseudo-random values
+    let seed: i64 = 42;
+    for i: i32 in range(0, total) {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        ptr_write_f64(a, i, to_f64_i64(seed % 100) / 100.0);
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        ptr_write_f64(b, i, to_f64_i64(seed % 100) / 100.0);
+    }
+
+    let _d: f64 = matmul_tiled(a, b, c, n, tile);
+
+    let checksum: f64 = compute_checksum(c, n);
+    print_f64(checksum);
+
+    heap_free(a);
+    heap_free(b);
+    heap_free(c);
+    return 0;
+}

@@ -1,0 +1,152 @@
+@module sort_hybrid;
+@intent("Hybrid quicksort/insertion sort with tunable threshold on 5M elements");
+@constraint { optimize_for: "performance" };
+
+// Hybrid sorting algorithm: uses quicksort for large partitions and switches
+// to insertion sort below a configurable threshold. The optimizer discovers
+// the optimal crossover point for the target CPU cache hierarchy.
+
+@pure
+fn insertion_sort(arr: ptr[i32], lo: i32, hi: i32) -> i32 {
+    for i: i32 in range(lo + 1, hi + 1) {
+        let key: i32 = ptr_read_i32(arr, i);
+        let j: i32 = i - 1;
+        let done: i32 = 0;
+        for guard: i32 in range(0, hi - lo + 1) {
+            if done == 0 and j >= lo and ptr_read_i32(arr, j) > key {
+                ptr_write_i32(arr, j + 1, ptr_read_i32(arr, j));
+                j = j - 1;
+            }
+            if done == 0 {
+                if j < lo or ptr_read_i32(arr, j) <= key {
+                    done = 1;
+                }
+            }
+        }
+        ptr_write_i32(arr, j + 1, key);
+    }
+    return 0;
+}
+
+@pure @inline(always)
+fn median_of_three(arr: ptr[i32], a: i32, b: i32, c: i32) -> i32 {
+    let va: i32 = ptr_read_i32(arr, a);
+    let vb: i32 = ptr_read_i32(arr, b);
+    let vc: i32 = ptr_read_i32(arr, c);
+    if va <= vb and vb <= vc { return b; }
+    if vc <= vb and vb <= va { return b; }
+    if vb <= va and va <= vc { return a; }
+    if vc <= va and va <= vb { return a; }
+    return c;
+}
+
+@pure
+fn partition(arr: ptr[i32], lo: i32, hi: i32) -> i32 {
+    let mid: i32 = lo + (hi - lo) / 2;
+    let pivot_idx: i32 = median_of_three(arr, lo, mid, hi);
+    let pivot: i32 = ptr_read_i32(arr, pivot_idx);
+
+    // Move pivot to end
+    let tmp: i32 = ptr_read_i32(arr, pivot_idx);
+    ptr_write_i32(arr, pivot_idx, ptr_read_i32(arr, hi));
+    ptr_write_i32(arr, hi, tmp);
+
+    let store: i32 = lo;
+    for j: i32 in range(lo, hi) {
+        if ptr_read_i32(arr, j) < pivot {
+            let t: i32 = ptr_read_i32(arr, store);
+            ptr_write_i32(arr, store, ptr_read_i32(arr, j));
+            ptr_write_i32(arr, j, t);
+            store = store + 1;
+        }
+    }
+
+    // Move pivot to final position
+    let t2: i32 = ptr_read_i32(arr, store);
+    ptr_write_i32(arr, store, ptr_read_i32(arr, hi));
+    ptr_write_i32(arr, hi, t2);
+
+    return store;
+}
+
+// Iterative quicksort using an explicit stack to avoid deep recursion
+fn quicksort_hybrid(arr: ptr[i32], n: i32, threshold: i32) -> i32 {
+    // Explicit stack for iterative quicksort (max depth ~64 for 5M elements)
+    let stack_lo: ptr[i32] = heap_alloc_zeroed(128, 4);
+    let stack_hi: ptr[i32] = heap_alloc_zeroed(128, 4);
+    let sp: i32 = 0;
+
+    ptr_write_i32(stack_lo, sp, 0);
+    ptr_write_i32(stack_hi, sp, n - 1);
+    sp = sp + 1;
+
+    for guard: i32 in range(0, n) {
+        if sp <= 0 { sp = -1; }
+        if sp > 0 {
+            sp = sp - 1;
+            let lo: i32 = ptr_read_i32(stack_lo, sp);
+            let hi: i32 = ptr_read_i32(stack_hi, sp);
+
+            if hi - lo < threshold {
+                let _d: i32 = insertion_sort(arr, lo, hi);
+            }
+            if hi - lo >= threshold {
+                let p: i32 = partition(arr, lo, hi);
+                if p - 1 > lo {
+                    ptr_write_i32(stack_lo, sp, lo);
+                    ptr_write_i32(stack_hi, sp, p - 1);
+                    sp = sp + 1;
+                }
+                if p + 1 < hi {
+                    ptr_write_i32(stack_lo, sp, p + 1);
+                    ptr_write_i32(stack_hi, sp, hi);
+                    sp = sp + 1;
+                }
+            }
+        }
+    }
+
+    heap_free(stack_lo);
+    heap_free(stack_hi);
+    return 0;
+}
+
+fn main() -> i32 {
+    @strategy { threshold: ?insertion_threshold };
+    let n: i32 = 5000000;
+    let threshold: i32 = 32;  // Default; optimizer can tune
+
+    let arr: ptr[i32] = heap_alloc_zeroed(n, 4);
+
+    // Fill with pseudo-random data
+    let seed: i64 = 42;
+    for i: i32 in range(0, n) {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        ptr_write_i32(arr, i, narrow(seed));
+    }
+
+    let _d: i32 = quicksort_hybrid(arr, n, threshold);
+
+    // Verify sort and compute checksum
+    let checksum: i64 = 0;
+    let sorted_ok: i32 = 1;
+    for i: i32 in range(0, n / 1000) {
+        let idx: i32 = i * 1000;
+        checksum = checksum + widen(ptr_read_i32(arr, idx));
+    }
+    // Check a few sorted pairs
+    for i: i32 in range(0, n - 1000) {
+        let idx: i32 = i * 1;
+        if i < 100 {
+            if ptr_read_i32(arr, i) > ptr_read_i32(arr, i + 1) {
+                sorted_ok = 0;
+            }
+        }
+    }
+
+    print_i64(checksum);
+    print_i32(sorted_ok);
+
+    heap_free(arr);
+    return 0;
+}

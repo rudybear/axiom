@@ -1,0 +1,199 @@
+@module sobel_filter;
+@intent("Sobel edge detection on a procedurally generated 512x512 grayscale image");
+
+// =============================================================================
+// Sobel Edge Detection Filter
+// =============================================================================
+//
+// Generates a 512x512 grayscale image procedurally (concentric ring pattern),
+// then applies the Sobel operator to detect edges. The Sobel filter uses
+// two 3x3 convolution kernels (Gx and Gy) to compute horizontal and vertical
+// gradients. The edge magnitude is sqrt(Gx^2 + Gy^2), clamped to [0, 255].
+//
+// Uses @pure functions for the convolution kernels and @parallel_for for
+// the main processing loop.
+//
+// Sobel Gx kernel:       Sobel Gy kernel:
+//   -1  0  +1              -1  -2  -1
+//   -2  0  +2               0   0   0
+//   -1  0  +1              +1  +2  +1
+//
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Image dimensions
+// ---------------------------------------------------------------------------
+
+@pure
+fn img_width() -> i32 { return 512; }
+
+@pure
+fn img_height() -> i32 { return 512; }
+
+// ---------------------------------------------------------------------------
+// Pixel access helpers
+// ---------------------------------------------------------------------------
+
+@pure
+fn pixel_index(x: i32, y: i32, w: i32) -> i32 {
+    return y * w + x;
+}
+
+@pure
+fn get_pixel(img: ptr[i32], x: i32, y: i32, w: i32, h: i32) -> i32 {
+    // Clamp coordinates to image bounds
+    let cx: i32 = x;
+    let cy: i32 = y;
+    if cx < 0 { cx = 0; }
+    if cx >= w { cx = w - 1; }
+    if cy < 0 { cy = 0; }
+    if cy >= h { cy = h - 1; }
+    return ptr_read_i32(img, pixel_index(cx, cy, w));
+}
+
+// ---------------------------------------------------------------------------
+// Procedural image generation: concentric rings + gradient
+// ---------------------------------------------------------------------------
+
+@pure
+fn generate_pixel(x: i32, y: i32, w: i32, h: i32) -> i32 {
+    // Distance from center
+    let cx: f64 = to_f64(x) - to_f64(w) / 2.0;
+    let cy: f64 = to_f64(y) - to_f64(h) / 2.0;
+    let dist: f64 = sqrt(cx * cx + cy * cy);
+
+    // Create a ring pattern: use modular distance
+    // Scale so rings are about 30 pixels apart
+    let ring_val: f64 = dist / 30.0;
+    // Get fractional part via: frac = val - floor(val)
+    // Approximate floor: truncate to int and adjust
+    let ring_int: i32 = truncate(ring_val);
+    let ring_frac: f64 = ring_val - to_f64(ring_int);
+
+    // Sharp rings: threshold the fractional part
+    let brightness: i32 = 0;
+    if ring_frac < 0.5 {
+        brightness = 200;
+    } else {
+        brightness = 50;
+    }
+
+    // Add a diagonal gradient for variety
+    let grad: i32 = (x + y) / 4;
+    if grad > 255 { grad = 255; }
+
+    // Blend ring pattern with gradient
+    let result: i32 = (brightness + grad) / 2;
+    if result > 255 { result = 255; }
+    if result < 0 { result = 0; }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Sobel operator: compute edge magnitude at a single pixel
+// ---------------------------------------------------------------------------
+
+@pure
+fn sobel_at(img: ptr[i32], x: i32, y: i32, w: i32, h: i32) -> i32 {
+    // Gx = -1*p(-1,-1) + 0*p(0,-1) + 1*p(1,-1)
+    //      -2*p(-1, 0) + 0*p(0, 0) + 2*p(1, 0)
+    //      -1*p(-1,+1) + 0*p(0,+1) + 1*p(1,+1)
+    let gx: i32 = 0 - get_pixel(img, x - 1, y - 1, w, h)
+                    + get_pixel(img, x + 1, y - 1, w, h)
+                    - 2 * get_pixel(img, x - 1, y, w, h)
+                    + 2 * get_pixel(img, x + 1, y, w, h)
+                    - get_pixel(img, x - 1, y + 1, w, h)
+                    + get_pixel(img, x + 1, y + 1, w, h);
+
+    // Gy = -1*p(-1,-1) -2*p(0,-1) -1*p(1,-1)
+    //       0*p(-1, 0) +0*p(0, 0) +0*p(1, 0)
+    //      +1*p(-1,+1) +2*p(0,+1) +1*p(1,+1)
+    let gy: i32 = 0 - get_pixel(img, x - 1, y - 1, w, h)
+                    - 2 * get_pixel(img, x, y - 1, w, h)
+                    - get_pixel(img, x + 1, y - 1, w, h)
+                    + get_pixel(img, x - 1, y + 1, w, h)
+                    + 2 * get_pixel(img, x, y + 1, w, h)
+                    + get_pixel(img, x + 1, y + 1, w, h);
+
+    // Magnitude = sqrt(gx^2 + gy^2)
+    let mag_f: f64 = sqrt(to_f64(gx * gx + gy * gy));
+    let mag: i32 = truncate(mag_f);
+
+    // Clamp to [0, 255]
+    if mag > 255 { mag = 255; }
+    if mag < 0 { mag = 0; }
+    return mag;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    let w: i32 = img_width();
+    let h: i32 = img_height();
+    let total_pixels: i32 = w * h;
+
+    print("=== Sobel Edge Detection ===");
+    print("Image size: 512x512");
+
+    // Allocate input and output images
+    let input: ptr[i32] = heap_alloc(total_pixels, 4);
+    let output: ptr[i32] = heap_alloc(total_pixels, 4);
+
+    // --- Generate procedural input image ---
+    print("Generating input image...");
+    for y: i32 in range(0, h) {
+        for x: i32 in range(0, w) {
+            let val: i32 = generate_pixel(x, y, w, h);
+            ptr_write_i32(input, pixel_index(x, y, w), val);
+        }
+    }
+
+    // --- Apply Sobel filter ---
+    print("Applying Sobel filter...");
+    @parallel_for(shared_read: [input], shared_write: [output])
+    for y: i32 in range(0, h) {
+        for x: i32 in range(0, w) {
+            let edge: i32 = sobel_at(input, x, y, w, h);
+            ptr_write_i32(output, pixel_index(x, y, w), edge);
+        }
+    }
+
+    // --- Compute checksum and statistics ---
+    let checksum: i64 = 0;
+    let edge_count: i32 = 0;
+    let max_val: i32 = 0;
+
+    for i: i32 in range(0, total_pixels) {
+        let val: i32 = ptr_read_i32(output, i);
+        checksum = checksum + widen(val);
+        if val > 128 {
+            edge_count = edge_count + 1;
+        }
+        if val > max_val {
+            max_val = val;
+        }
+    }
+
+    print("Edge magnitude checksum:");
+    print_i64(checksum);
+    print("Strong edge pixels (>128):");
+    print_i32(edge_count);
+    print("Maximum edge magnitude:");
+    print_i32(max_val);
+
+    // Verify the filter produced edges (non-zero checksum)
+    if checksum > 0 {
+        print("PASS: Sobel filter detected edges");
+    } else {
+        print("FAIL: No edges detected");
+    }
+
+    // --- Cleanup ---
+    heap_free(output);
+    heap_free(input);
+
+    print("=== Sobel filter complete ===");
+    return 0;
+}

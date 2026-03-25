@@ -1,0 +1,104 @@
+@module stencil_2d;
+@intent("2D 5-point stencil computation with configurable blocking, 2000x2000 grid, 100 iterations");
+@constraint { optimize_for: "performance" };
+
+// 2D heat equation stencil: u_new[i][j] = (u[i-1][j] + u[i+1][j] + u[i][j-1] + u[i][j+1] + u[i][j]) / 5
+// Block dimensions control cache utilization. The optimizer discovers optimal block sizes.
+
+@pure
+fn stencil_step(src: ptr[f64], dst: ptr[f64], nx: i32, ny: i32,
+                block_x: i32, block_y: i32) -> f64 {
+    // Process grid in blocks for cache efficiency
+    let num_bx: i32 = (nx - 2) / block_x;
+    let num_by: i32 = (ny - 2) / block_y;
+
+    // Handle main blocked region
+    for bj: i32 in range(0, num_by) {
+        for bi: i32 in range(0, num_bx) {
+            let i_start: i32 = bi * block_x + 1;
+            let j_start: i32 = bj * block_y + 1;
+            let i_end: i32 = i_start + block_x;
+            let j_end: i32 = j_start + block_y;
+
+            for i: i32 in range(i_start, i_end) {
+                for j: i32 in range(j_start, j_end) {
+                    let center: f64 = ptr_read_f64(src, i * ny + j);
+                    let north: f64 = ptr_read_f64(src, (i - 1) * ny + j);
+                    let south: f64 = ptr_read_f64(src, (i + 1) * ny + j);
+                    let west: f64 = ptr_read_f64(src, i * ny + (j - 1));
+                    let east: f64 = ptr_read_f64(src, i * ny + (j + 1));
+                    ptr_write_f64(dst, i * ny + j, (center + north + south + west + east) / 5.0);
+                }
+            }
+        }
+    }
+
+    // Handle remaining interior cells not covered by blocks
+    let covered_x: i32 = num_bx * block_x + 1;
+    let covered_y: i32 = num_by * block_y + 1;
+    for i: i32 in range(1, nx - 1) {
+        for j: i32 in range(1, ny - 1) {
+            let in_blocked: i32 = 0;
+            if i < covered_x and j < covered_y and i >= 1 and j >= 1 {
+                in_blocked = 1;
+            }
+            if in_blocked == 0 {
+                let center: f64 = ptr_read_f64(src, i * ny + j);
+                let north: f64 = ptr_read_f64(src, (i - 1) * ny + j);
+                let south: f64 = ptr_read_f64(src, (i + 1) * ny + j);
+                let west: f64 = ptr_read_f64(src, i * ny + (j - 1));
+                let east: f64 = ptr_read_f64(src, i * ny + (j + 1));
+                ptr_write_f64(dst, i * ny + j, (center + north + south + west + east) / 5.0);
+            }
+        }
+    }
+    return 0.0;
+}
+
+fn main() -> i32 {
+    @strategy { block_x: ?block_x, block_y: ?block_y, iterations: ?stencil_iters };
+    let nx: i32 = 2000;
+    let ny: i32 = 2000;
+    let n_iter: i32 = 100;
+    let block_x: i32 = 64;
+    let block_y: i32 = 64;
+    let total: i32 = nx * ny;
+
+    let grid_a: ptr[f64] = heap_alloc_zeroed(total, 8);
+    let grid_b: ptr[f64] = heap_alloc_zeroed(total, 8);
+
+    // Initialize with a heat source in the center
+    let seed: i64 = 42;
+    for i: i32 in range(0, nx) {
+        for j: i32 in range(0, ny) {
+            let dx: f64 = to_f64(i - nx / 2);
+            let dy: f64 = to_f64(j - ny / 2);
+            let dist2: f64 = dx * dx + dy * dy;
+            if dist2 < 10000.0 {
+                ptr_write_f64(grid_a, i * ny + j, 100.0);
+            }
+        }
+    }
+
+    // Run stencil iterations, ping-ponging between grids
+    for iter: i32 in range(0, n_iter) {
+        if iter % 2 == 0 {
+            let _d: f64 = stencil_step(grid_a, grid_b, nx, ny, block_x, block_y);
+        }
+        if iter % 2 == 1 {
+            let _d: f64 = stencil_step(grid_b, grid_a, nx, ny, block_x, block_y);
+        }
+    }
+
+    // Compute checksum: sum of every 97th element
+    let checksum: f64 = 0.0;
+    for idx: i32 in range(0, total / 97) {
+        let i: i32 = idx * 97;
+        checksum = checksum + ptr_read_f64(grid_a, i);
+    }
+
+    print_f64(checksum);
+    heap_free(grid_a);
+    heap_free(grid_b);
+    return 0;
+}

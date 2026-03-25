@@ -1,0 +1,511 @@
+@module json_parser;
+@intent("JSON parser: tokenize and parse a hardcoded JSON string encoded as i32 char codes");
+
+// =============================================================================
+// JSON Parser in AXIOM
+// =============================================================================
+//
+// Parses a JSON string represented as an array of integer character codes.
+// Supports: objects, arrays, strings, numbers (integers), booleans, null.
+// Counts total elements and validates structure.
+//
+// Token types:
+//   0 = EOF          5 = COLON        10 = STRING
+//   1 = LBRACE {     6 = COMMA        11 = NUMBER
+//   2 = RBRACE }     7 = TRUE
+//   3 = LBRACKET [   8 = FALSE
+//   4 = RBRACKET ]   9 = NULL
+//
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Character classification
+// ---------------------------------------------------------------------------
+
+@pure
+fn is_digit(c: i32) -> i32 {
+    if c >= 48 and c <= 57 { return 1; }
+    return 0;
+}
+
+@pure
+fn is_whitespace(c: i32) -> i32 {
+    if c == 32 { return 1; }
+    if c == 10 { return 1; }
+    if c == 13 { return 1; }
+    if c == 9 { return 1; }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Keyword matching helpers
+// ---------------------------------------------------------------------------
+
+@pure
+fn match_true(src: ptr[i32], pos: i32, src_len: i32) -> i32 {
+    if pos + 4 > src_len { return 0; }
+    if ptr_read_i32(src, pos) != 116 { return 0; }
+    if ptr_read_i32(src, pos + 1) != 114 { return 0; }
+    if ptr_read_i32(src, pos + 2) != 117 { return 0; }
+    if ptr_read_i32(src, pos + 3) != 101 { return 0; }
+    return 1;
+}
+
+@pure
+fn match_false(src: ptr[i32], pos: i32, src_len: i32) -> i32 {
+    if pos + 5 > src_len { return 0; }
+    if ptr_read_i32(src, pos) != 102 { return 0; }
+    if ptr_read_i32(src, pos + 1) != 97 { return 0; }
+    if ptr_read_i32(src, pos + 2) != 108 { return 0; }
+    if ptr_read_i32(src, pos + 3) != 115 { return 0; }
+    if ptr_read_i32(src, pos + 4) != 101 { return 0; }
+    return 1;
+}
+
+@pure
+fn match_null(src: ptr[i32], pos: i32, src_len: i32) -> i32 {
+    if pos + 4 > src_len { return 0; }
+    if ptr_read_i32(src, pos) != 110 { return 0; }
+    if ptr_read_i32(src, pos + 1) != 117 { return 0; }
+    if ptr_read_i32(src, pos + 2) != 108 { return 0; }
+    if ptr_read_i32(src, pos + 3) != 108 { return 0; }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Single-char token classifier (avoids else-if chains)
+// Returns token type for single-char tokens, or 0 for non-single-char
+// ---------------------------------------------------------------------------
+
+@pure
+fn single_char_token(c: i32) -> i32 {
+    if c == 123 { return 1; }   // {
+    if c == 125 { return 2; }   // }
+    if c == 91 { return 3; }    // [
+    if c == 93 { return 4; }    // ]
+    if c == 58 { return 5; }    // :
+    if c == 44 { return 6; }    // ,
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Emit a single token into the token arrays
+// ---------------------------------------------------------------------------
+
+fn emit_token(tok_types: ptr[i32], tok_starts: ptr[i32],
+              tok_lens: ptr[i32], tok_values: ptr[i32],
+              idx: i32, tt: i32, start: i32, len: i32, val: i32) {
+    ptr_write_i32(tok_types, idx, tt);
+    ptr_write_i32(tok_starts, idx, start);
+    ptr_write_i32(tok_lens, idx, len);
+    ptr_write_i32(tok_values, idx, val);
+}
+
+// ---------------------------------------------------------------------------
+// Lexer: lex one token starting at pos. Returns new pos.
+// Writes token to tok arrays at index count.
+// Sets consumed[0]=1 if a token was produced, 0 otherwise.
+// ---------------------------------------------------------------------------
+
+fn lex_one(src: ptr[i32], src_len: i32, pos: i32,
+           tok_types: ptr[i32], tok_starts: ptr[i32],
+           tok_lens: ptr[i32], tok_values: ptr[i32],
+           count: i32, consumed: ptr[i32]) -> i32 {
+    // Skip whitespace
+    while pos < src_len and is_whitespace(ptr_read_i32(src, pos)) == 1 {
+        pos = pos + 1;
+    }
+    if pos >= src_len {
+        ptr_write_i32(consumed, 0, 0);
+        return pos;
+    }
+
+    let c: i32 = ptr_read_i32(src, pos);
+
+    // Try single-char tokens
+    let sc: i32 = single_char_token(c);
+    if sc > 0 {
+        emit_token(tok_types, tok_starts, tok_lens, tok_values, count, sc, pos, 1, 0);
+        ptr_write_i32(consumed, 0, 1);
+        return pos + 1;
+    }
+
+    // String literal
+    if c == 34 {
+        let start: i32 = pos;
+        pos = pos + 1;
+        while pos < src_len and ptr_read_i32(src, pos) != 34 {
+            pos = pos + 1;
+        }
+        if pos < src_len { pos = pos + 1; }
+        emit_token(tok_types, tok_starts, tok_lens, tok_values, count, 10, start, pos - start, 0);
+        ptr_write_i32(consumed, 0, 1);
+        return pos;
+    }
+
+    // Number
+    if is_digit(c) == 1 or c == 45 {
+        let start: i32 = pos;
+        let sign: i32 = 1;
+        if c == 45 { sign = 0 - 1; pos = pos + 1; }
+        let value: i32 = 0;
+        while pos < src_len and is_digit(ptr_read_i32(src, pos)) == 1 {
+            value = value * 10 + (ptr_read_i32(src, pos) - 48);
+            pos = pos + 1;
+        }
+        emit_token(tok_types, tok_starts, tok_lens, tok_values, count, 11, start, pos - start, value * sign);
+        ptr_write_i32(consumed, 0, 1);
+        return pos;
+    }
+
+    // true
+    if match_true(src, pos, src_len) == 1 {
+        emit_token(tok_types, tok_starts, tok_lens, tok_values, count, 7, pos, 4, 1);
+        ptr_write_i32(consumed, 0, 1);
+        return pos + 4;
+    }
+
+    // false
+    if match_false(src, pos, src_len) == 1 {
+        emit_token(tok_types, tok_starts, tok_lens, tok_values, count, 8, pos, 5, 0);
+        ptr_write_i32(consumed, 0, 1);
+        return pos + 5;
+    }
+
+    // null
+    if match_null(src, pos, src_len) == 1 {
+        emit_token(tok_types, tok_starts, tok_lens, tok_values, count, 9, pos, 4, 0);
+        ptr_write_i32(consumed, 0, 1);
+        return pos + 4;
+    }
+
+    // Unknown — skip
+    ptr_write_i32(consumed, 0, 0);
+    return pos + 1;
+}
+
+// ---------------------------------------------------------------------------
+// Tokenize entire source
+// ---------------------------------------------------------------------------
+
+fn tokenize(src: ptr[i32], src_len: i32,
+            tok_types: ptr[i32], tok_starts: ptr[i32],
+            tok_lens: ptr[i32], tok_values: ptr[i32],
+            consumed: ptr[i32]) -> i32 {
+    let pos: i32 = 0;
+    let count: i32 = 0;
+    while pos < src_len {
+        let new_pos: i32 = lex_one(src, src_len, pos, tok_types, tok_starts,
+                                    tok_lens, tok_values, count, consumed);
+        if ptr_read_i32(consumed, 0) == 1 {
+            count = count + 1;
+        }
+        pos = new_pos;
+    }
+    // Append EOF
+    emit_token(tok_types, tok_starts, tok_lens, tok_values, count, 0, pos, 0, 0);
+    count = count + 1;
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Parser: recursive descent — counts elements by type
+// ---------------------------------------------------------------------------
+// state[0] = current token index
+// state[1] = object count     state[2] = array count
+// state[3] = string count     state[4] = number count
+// state[5] = bool count       state[6] = null count
+// state[7] = total count      state[8] = error flag
+
+fn parse_object(tok_types: ptr[i32], tok_values: ptr[i32],
+                tok_count: i32, state: ptr[i32]) -> i32 {
+    ptr_write_i32(state, 1, ptr_read_i32(state, 1) + 1);
+    ptr_write_i32(state, 7, ptr_read_i32(state, 7) + 1);
+    let pos: i32 = ptr_read_i32(state, 0) + 1;  // skip '{'
+    ptr_write_i32(state, 0, pos);
+
+    // Empty object?
+    if pos < tok_count and ptr_read_i32(tok_types, pos) == 2 {
+        ptr_write_i32(state, 0, pos + 1);
+        return 0;
+    }
+
+    let done: i32 = 0;
+    while done == 0 {
+        let cp: i32 = ptr_read_i32(state, 0);
+        if cp >= tok_count or ptr_read_i32(tok_types, cp) != 10 {
+            ptr_write_i32(state, 8, 1); return 0;
+        }
+        ptr_write_i32(state, 0, cp + 1);
+        cp = ptr_read_i32(state, 0);
+        if cp >= tok_count or ptr_read_i32(tok_types, cp) != 5 {
+            ptr_write_i32(state, 8, 1); return 0;
+        }
+        ptr_write_i32(state, 0, cp + 1);
+
+        let ignored: i32 = parse_value(tok_types, tok_values, tok_count, state);
+
+        cp = ptr_read_i32(state, 0);
+        if cp >= tok_count { ptr_write_i32(state, 8, 1); return 0; }
+        let next_tt: i32 = ptr_read_i32(tok_types, cp);
+        if next_tt == 6 { ptr_write_i32(state, 0, cp + 1); }
+        if next_tt == 2 { ptr_write_i32(state, 0, cp + 1); done = 1; }
+        if next_tt != 6 and next_tt != 2 { ptr_write_i32(state, 8, 1); done = 1; }
+    }
+    return 0;
+}
+
+fn parse_array(tok_types: ptr[i32], tok_values: ptr[i32],
+               tok_count: i32, state: ptr[i32]) -> i32 {
+    ptr_write_i32(state, 2, ptr_read_i32(state, 2) + 1);
+    ptr_write_i32(state, 7, ptr_read_i32(state, 7) + 1);
+    let pos: i32 = ptr_read_i32(state, 0) + 1;  // skip '['
+    ptr_write_i32(state, 0, pos);
+
+    if pos < tok_count and ptr_read_i32(tok_types, pos) == 4 {
+        ptr_write_i32(state, 0, pos + 1);
+        return 0;
+    }
+
+    let done: i32 = 0;
+    while done == 0 {
+        let ignored: i32 = parse_value(tok_types, tok_values, tok_count, state);
+        let cp: i32 = ptr_read_i32(state, 0);
+        if cp >= tok_count { ptr_write_i32(state, 8, 1); return 0; }
+        let next_tt: i32 = ptr_read_i32(tok_types, cp);
+        if next_tt == 6 { ptr_write_i32(state, 0, cp + 1); }
+        if next_tt == 4 { ptr_write_i32(state, 0, cp + 1); done = 1; }
+        if next_tt != 6 and next_tt != 4 { ptr_write_i32(state, 8, 1); done = 1; }
+    }
+    return 0;
+}
+
+fn parse_value(tok_types: ptr[i32], tok_values: ptr[i32],
+               tok_count: i32, state: ptr[i32]) -> i32 {
+    let pos: i32 = ptr_read_i32(state, 0);
+    if pos >= tok_count { ptr_write_i32(state, 8, 1); return 0; }
+    let tt: i32 = ptr_read_i32(tok_types, pos);
+
+    if tt == 1 { return parse_object(tok_types, tok_values, tok_count, state); }
+    if tt == 3 { return parse_array(tok_types, tok_values, tok_count, state); }
+    if tt == 10 {
+        ptr_write_i32(state, 3, ptr_read_i32(state, 3) + 1);
+        ptr_write_i32(state, 7, ptr_read_i32(state, 7) + 1);
+        ptr_write_i32(state, 0, pos + 1);
+        return 0;
+    }
+    if tt == 11 {
+        ptr_write_i32(state, 4, ptr_read_i32(state, 4) + 1);
+        ptr_write_i32(state, 7, ptr_read_i32(state, 7) + 1);
+        ptr_write_i32(state, 0, pos + 1);
+        return 0;
+    }
+    if tt == 7 or tt == 8 {
+        ptr_write_i32(state, 5, ptr_read_i32(state, 5) + 1);
+        ptr_write_i32(state, 7, ptr_read_i32(state, 7) + 1);
+        ptr_write_i32(state, 0, pos + 1);
+        return 0;
+    }
+    if tt == 9 {
+        ptr_write_i32(state, 6, ptr_read_i32(state, 6) + 1);
+        ptr_write_i32(state, 7, ptr_read_i32(state, 7) + 1);
+        ptr_write_i32(state, 0, pos + 1);
+        return 0;
+    }
+    ptr_write_i32(state, 8, 1);
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Fill JSON source as char codes
+// {"name":"AXIOM","version":1,"features":["pure","arena","gpu"],"meta":{"stable":true,"count":42},"data":null}
+// ---------------------------------------------------------------------------
+
+fn fill_json_source(src: ptr[i32]) -> i32 {
+    let i: i32 = 0;
+    // {"name":"AXIOM","version":1,"features":["pure","arena","gpu"],"meta":{"stable":true,"count":42},"data":null}
+    // Encoded character by character:
+    ptr_write_i32(src, i, 123); i = i + 1;  // {
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 110); i = i + 1;  // n
+    ptr_write_i32(src, i, 97); i = i + 1;   // a
+    ptr_write_i32(src, i, 109); i = i + 1;  // m
+    ptr_write_i32(src, i, 101); i = i + 1;  // e
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 58); i = i + 1;   // :
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 65); i = i + 1;   // A
+    ptr_write_i32(src, i, 88); i = i + 1;   // X
+    ptr_write_i32(src, i, 73); i = i + 1;   // I
+    ptr_write_i32(src, i, 79); i = i + 1;   // O
+    ptr_write_i32(src, i, 77); i = i + 1;   // M
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 44); i = i + 1;   // ,
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 118); i = i + 1;  // v
+    ptr_write_i32(src, i, 101); i = i + 1;  // e
+    ptr_write_i32(src, i, 114); i = i + 1;  // r
+    ptr_write_i32(src, i, 115); i = i + 1;  // s
+    ptr_write_i32(src, i, 105); i = i + 1;  // i
+    ptr_write_i32(src, i, 111); i = i + 1;  // o
+    ptr_write_i32(src, i, 110); i = i + 1;  // n
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 58); i = i + 1;   // :
+    ptr_write_i32(src, i, 49); i = i + 1;   // 1
+    ptr_write_i32(src, i, 44); i = i + 1;   // ,
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 102); i = i + 1;  // f
+    ptr_write_i32(src, i, 101); i = i + 1;  // e
+    ptr_write_i32(src, i, 97); i = i + 1;   // a
+    ptr_write_i32(src, i, 116); i = i + 1;  // t
+    ptr_write_i32(src, i, 117); i = i + 1;  // u
+    ptr_write_i32(src, i, 114); i = i + 1;  // r
+    ptr_write_i32(src, i, 101); i = i + 1;  // e
+    ptr_write_i32(src, i, 115); i = i + 1;  // s
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 58); i = i + 1;   // :
+    ptr_write_i32(src, i, 91); i = i + 1;   // [
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 112); i = i + 1;  // p
+    ptr_write_i32(src, i, 117); i = i + 1;  // u
+    ptr_write_i32(src, i, 114); i = i + 1;  // r
+    ptr_write_i32(src, i, 101); i = i + 1;  // e
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 44); i = i + 1;   // ,
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 97); i = i + 1;   // a
+    ptr_write_i32(src, i, 114); i = i + 1;  // r
+    ptr_write_i32(src, i, 101); i = i + 1;  // e
+    ptr_write_i32(src, i, 110); i = i + 1;  // n
+    ptr_write_i32(src, i, 97); i = i + 1;   // a
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 44); i = i + 1;   // ,
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 103); i = i + 1;  // g
+    ptr_write_i32(src, i, 112); i = i + 1;  // p
+    ptr_write_i32(src, i, 117); i = i + 1;  // u
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 93); i = i + 1;   // ]
+    ptr_write_i32(src, i, 44); i = i + 1;   // ,
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 109); i = i + 1;  // m
+    ptr_write_i32(src, i, 101); i = i + 1;  // e
+    ptr_write_i32(src, i, 116); i = i + 1;  // t
+    ptr_write_i32(src, i, 97); i = i + 1;   // a
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 58); i = i + 1;   // :
+    ptr_write_i32(src, i, 123); i = i + 1;  // {
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 115); i = i + 1;  // s
+    ptr_write_i32(src, i, 116); i = i + 1;  // t
+    ptr_write_i32(src, i, 97); i = i + 1;   // a
+    ptr_write_i32(src, i, 98); i = i + 1;   // b
+    ptr_write_i32(src, i, 108); i = i + 1;  // l
+    ptr_write_i32(src, i, 101); i = i + 1;  // e
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 58); i = i + 1;   // :
+    ptr_write_i32(src, i, 116); i = i + 1;  // t
+    ptr_write_i32(src, i, 114); i = i + 1;  // r
+    ptr_write_i32(src, i, 117); i = i + 1;  // u
+    ptr_write_i32(src, i, 101); i = i + 1;  // e
+    ptr_write_i32(src, i, 44); i = i + 1;   // ,
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 99); i = i + 1;   // c
+    ptr_write_i32(src, i, 111); i = i + 1;  // o
+    ptr_write_i32(src, i, 117); i = i + 1;  // u
+    ptr_write_i32(src, i, 110); i = i + 1;  // n
+    ptr_write_i32(src, i, 116); i = i + 1;  // t
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 58); i = i + 1;   // :
+    ptr_write_i32(src, i, 52); i = i + 1;   // 4
+    ptr_write_i32(src, i, 50); i = i + 1;   // 2
+    ptr_write_i32(src, i, 125); i = i + 1;  // }
+    ptr_write_i32(src, i, 44); i = i + 1;   // ,
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 100); i = i + 1;  // d
+    ptr_write_i32(src, i, 97); i = i + 1;   // a
+    ptr_write_i32(src, i, 116); i = i + 1;  // t
+    ptr_write_i32(src, i, 97); i = i + 1;   // a
+    ptr_write_i32(src, i, 34); i = i + 1;   // "
+    ptr_write_i32(src, i, 58); i = i + 1;   // :
+    ptr_write_i32(src, i, 110); i = i + 1;  // n
+    ptr_write_i32(src, i, 117); i = i + 1;  // u
+    ptr_write_i32(src, i, 108); i = i + 1;  // l
+    ptr_write_i32(src, i, 108); i = i + 1;  // l
+    ptr_write_i32(src, i, 125); i = i + 1;  // }
+    return i;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    print("=== AXIOM JSON Parser ===");
+
+    let max_src: i32 = 512;
+    let src: ptr[i32] = heap_alloc(max_src, 4);
+    let src_len: i32 = fill_json_source(src);
+    print("JSON source length (chars):");
+    print_i32(src_len);
+
+    let max_tokens: i32 = 256;
+    let tok_types: ptr[i32] = heap_alloc(max_tokens, 4);
+    let tok_starts: ptr[i32] = heap_alloc(max_tokens, 4);
+    let tok_lens: ptr[i32] = heap_alloc(max_tokens, 4);
+    let tok_values: ptr[i32] = heap_alloc(max_tokens, 4);
+    let consumed: ptr[i32] = heap_alloc(1, 4);
+
+    // --- Lexer phase ---
+    print("--- Lexer ---");
+    let tok_count: i32 = tokenize(src, src_len, tok_types, tok_starts,
+                                   tok_lens, tok_values, consumed);
+    print("Token count:");
+    print_i32(tok_count);
+
+    // --- Parser phase ---
+    print("--- Parser ---");
+    let state: ptr[i32] = heap_alloc(9, 4);
+    for si: i32 in range(0, 9) {
+        ptr_write_i32(state, si, 0);
+    }
+
+    let ignored: i32 = parse_value(tok_types, tok_values, tok_count, state);
+
+    let has_error: i32 = ptr_read_i32(state, 8);
+    if has_error == 0 { print("Parse successful!"); }
+    if has_error != 0 { print("Parse error detected."); }
+
+    print("Objects found:");
+    print_i32(ptr_read_i32(state, 1));
+    print("Arrays found:");
+    print_i32(ptr_read_i32(state, 2));
+    print("Strings found:");
+    print_i32(ptr_read_i32(state, 3));
+    print("Numbers found:");
+    print_i32(ptr_read_i32(state, 4));
+    print("Booleans found:");
+    print_i32(ptr_read_i32(state, 5));
+    print("Nulls found:");
+    print_i32(ptr_read_i32(state, 6));
+    print("Total values:");
+    print_i32(ptr_read_i32(state, 7));
+
+    // Expected: 2 objects, 1 array, 3 strings, 2 numbers, 1 bool, 1 null = 10
+    let total: i32 = ptr_read_i32(state, 7);
+    if total == 10 and has_error == 0 {
+        print("PASS: Correctly parsed JSON with 10 values");
+    }
+
+    // --- Cleanup ---
+    heap_free(state);
+    heap_free(consumed);
+    heap_free(tok_values);
+    heap_free(tok_lens);
+    heap_free(tok_starts);
+    heap_free(tok_types);
+    heap_free(src);
+
+    print("=== JSON parser complete ===");
+    return 0;
+}

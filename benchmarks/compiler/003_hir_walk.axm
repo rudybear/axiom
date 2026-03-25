@@ -1,0 +1,97 @@
+@module hir_walk;
+@intent("Simulate HIR tree walking: dispatch on node types, accumulate results over 2M nodes");
+@constraint { optimize_for: "performance" };
+
+// Simulates walking an HIR (High-level IR) tree.
+// Each node has a type and two child indices. We walk the flat array
+// and dispatch on node type to accumulate a result, mimicking what
+// a compiler does when lowering HIR to MIR.
+
+// Node types: 0=Literal, 1=BinOp, 2=UnaryOp, 3=Call, 4=If, 5=Let, 6=Return, 7=Block
+
+@pure @inline(always)
+fn process_literal(value: i64) -> i64 {
+    return value * 3 + 7;
+}
+
+@pure @inline(always)
+fn process_binop(left: i64, right: i64) -> i64 {
+    return (left + right) % 1000000007;
+}
+
+@pure @inline(always)
+fn process_unaryop(operand: i64) -> i64 {
+    return (operand * 37 + 11) % 1000000007;
+}
+
+@pure @inline(always)
+fn process_call(func_id: i64, arg: i64) -> i64 {
+    return (func_id * 101 + arg * 53) % 1000000007;
+}
+
+@pure @inline(always)
+fn process_if(cond: i64, then_val: i64) -> i64 {
+    return (cond * 17 + then_val * 31) % 1000000007;
+}
+
+@pure @inline(always)
+fn process_let(name_hash: i64, init_val: i64) -> i64 {
+    return (name_hash + init_val * 19) % 1000000007;
+}
+
+@pure @inline(always)
+fn process_return(val: i64) -> i64 {
+    return (val * 23 + 1) % 1000000007;
+}
+
+@pure @inline(always)
+fn process_block(first: i64, last: i64) -> i64 {
+    return (first * 41 + last * 43) % 1000000007;
+}
+
+fn main() -> i32 {
+    let n: i32 = 2000000;
+
+    // Allocate node arrays on heap: type, left_child, right_child
+    let node_type: ptr[i32] = heap_alloc_zeroed(n, 4);
+    let node_left: ptr[i32] = heap_alloc_zeroed(n, 4);
+    let node_right: ptr[i32] = heap_alloc_zeroed(n, 4);
+
+    // Generate pseudo-random HIR nodes
+    let seed: i64 = 42;
+    for i: i32 in range(0, n) {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        ptr_write_i32(node_type, i, narrow(seed % 8));
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        let l: i32 = narrow(seed % widen(n));
+        ptr_write_i32(node_left, i, l);
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        let r: i32 = narrow(seed % widen(n));
+        ptr_write_i32(node_right, i, r);
+    }
+
+    // Walk all nodes, dispatching on type
+    let accum: i64 = 0;
+    for i: i32 in range(0, n) {
+        let ntype: i32 = ptr_read_i32(node_type, i);
+        let left_idx: i32 = ptr_read_i32(node_left, i);
+        let right_idx: i32 = ptr_read_i32(node_right, i);
+        let left_val: i64 = widen(left_idx);
+        let right_val: i64 = widen(right_idx);
+
+        if ntype == 0 { accum = (accum + process_literal(left_val)) % 1000000007; }
+        if ntype == 1 { accum = (accum + process_binop(left_val, right_val)) % 1000000007; }
+        if ntype == 2 { accum = (accum + process_unaryop(left_val)) % 1000000007; }
+        if ntype == 3 { accum = (accum + process_call(left_val, right_val)) % 1000000007; }
+        if ntype == 4 { accum = (accum + process_if(left_val, right_val)) % 1000000007; }
+        if ntype == 5 { accum = (accum + process_let(left_val, right_val)) % 1000000007; }
+        if ntype == 6 { accum = (accum + process_return(left_val)) % 1000000007; }
+        if ntype == 7 { accum = (accum + process_block(left_val, right_val)) % 1000000007; }
+    }
+
+    print_i64(accum);
+    heap_free(node_type);
+    heap_free(node_left);
+    heap_free(node_right);
+    return 0;
+}

@@ -1,0 +1,161 @@
+@module nbody;
+@intent("N-body planetary simulation: 5 bodies (Sun+4 planets), 50M timesteps");
+@constraint { optimize_for: "performance" };
+
+// Benchmarks Game N-body: simulates the Jovian planets orbiting the Sun.
+// Uses exact initial conditions from the Benchmarks Game specification.
+
+@pure @inline(always)
+fn advance(x: ptr[f64], y: ptr[f64], z: ptr[f64],
+           vx: ptr[f64], vy: ptr[f64], vz: ptr[f64],
+           mass: ptr[f64], dt: f64, n: i32) -> f64 {
+    // Compute pairwise forces and update velocities
+    for i: i32 in range(0, n) {
+        let xi: f64 = ptr_read_f64(x, i);
+        let yi: f64 = ptr_read_f64(y, i);
+        let zi: f64 = ptr_read_f64(z, i);
+        let vxi: f64 = ptr_read_f64(vx, i);
+        let vyi: f64 = ptr_read_f64(vy, i);
+        let vzi: f64 = ptr_read_f64(vz, i);
+
+        for j: i32 in range(i + 1, n) {
+            let dx: f64 = xi - ptr_read_f64(x, j);
+            let dy: f64 = yi - ptr_read_f64(y, j);
+            let dz: f64 = zi - ptr_read_f64(z, j);
+            let dist2: f64 = dx * dx + dy * dy + dz * dz;
+            let dist: f64 = sqrt(dist2);
+            let mag: f64 = dt / (dist2 * dist);
+
+            let mj: f64 = ptr_read_f64(mass, j);
+            vxi = vxi - dx * mj * mag;
+            vyi = vyi - dy * mj * mag;
+            vzi = vzi - dz * mj * mag;
+
+            let mi: f64 = ptr_read_f64(mass, i);
+            ptr_write_f64(vx, j, ptr_read_f64(vx, j) + dx * mi * mag);
+            ptr_write_f64(vy, j, ptr_read_f64(vy, j) + dy * mi * mag);
+            ptr_write_f64(vz, j, ptr_read_f64(vz, j) + dz * mi * mag);
+        }
+
+        ptr_write_f64(vx, i, vxi);
+        ptr_write_f64(vy, i, vyi);
+        ptr_write_f64(vz, i, vzi);
+    }
+
+    // Update positions
+    for i: i32 in range(0, n) {
+        ptr_write_f64(x, i, ptr_read_f64(x, i) + dt * ptr_read_f64(vx, i));
+        ptr_write_f64(y, i, ptr_read_f64(y, i) + dt * ptr_read_f64(vy, i));
+        ptr_write_f64(z, i, ptr_read_f64(z, i) + dt * ptr_read_f64(vz, i));
+    }
+    return 0.0;
+}
+
+@pure
+fn energy(x: ptr[f64], y: ptr[f64], z: ptr[f64],
+          vx: ptr[f64], vy: ptr[f64], vz: ptr[f64],
+          mass: ptr[f64], n: i32) -> f64 {
+    let e: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let mi: f64 = ptr_read_f64(mass, i);
+        let vxi: f64 = ptr_read_f64(vx, i);
+        let vyi: f64 = ptr_read_f64(vy, i);
+        let vzi: f64 = ptr_read_f64(vz, i);
+        e = e + 0.5 * mi * (vxi * vxi + vyi * vyi + vzi * vzi);
+
+        for j: i32 in range(i + 1, n) {
+            let dx: f64 = ptr_read_f64(x, i) - ptr_read_f64(x, j);
+            let dy: f64 = ptr_read_f64(y, i) - ptr_read_f64(y, j);
+            let dz: f64 = ptr_read_f64(z, i) - ptr_read_f64(z, j);
+            let dist: f64 = sqrt(dx * dx + dy * dy + dz * dz);
+            e = e - mi * ptr_read_f64(mass, j) / dist;
+        }
+    }
+    return e;
+}
+
+fn main() -> i32 {
+    let n: i32 = 5;
+    let pi: f64 = 3.14159265358979323;
+    let solar_mass: f64 = 4.0 * pi * pi;
+    let days_per_year: f64 = 365.24;
+
+    let x: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let y: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let z: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let vx: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let vy: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let vz: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let mass: ptr[f64] = heap_alloc_zeroed(n, 8);
+
+    // Sun
+    ptr_write_f64(x, 0, 0.0); ptr_write_f64(y, 0, 0.0); ptr_write_f64(z, 0, 0.0);
+    ptr_write_f64(vx, 0, 0.0); ptr_write_f64(vy, 0, 0.0); ptr_write_f64(vz, 0, 0.0);
+    ptr_write_f64(mass, 0, solar_mass);
+
+    // Jupiter
+    ptr_write_f64(x, 1, 4.84143144246472090);
+    ptr_write_f64(y, 1, -1.16032004402742839);
+    ptr_write_f64(z, 1, -0.103622044471123109);
+    ptr_write_f64(vx, 1, 0.00166007664274403694 * days_per_year);
+    ptr_write_f64(vy, 1, 0.00769901118419740425 * days_per_year);
+    ptr_write_f64(vz, 1, -0.0000690460016972063023 * days_per_year);
+    ptr_write_f64(mass, 1, 0.000954791938424326609 * solar_mass);
+
+    // Saturn
+    ptr_write_f64(x, 2, 8.34336671824457987);
+    ptr_write_f64(y, 2, 4.12479856412430479);
+    ptr_write_f64(z, 2, -0.403523417114321381);
+    ptr_write_f64(vx, 2, -0.00276742510726862411 * days_per_year);
+    ptr_write_f64(vy, 2, 0.00499852801234917238 * days_per_year);
+    ptr_write_f64(vz, 2, 0.0000230417297573763929 * days_per_year);
+    ptr_write_f64(mass, 2, 0.000285885980666130812 * solar_mass);
+
+    // Uranus
+    ptr_write_f64(x, 3, 12.8943695621391310);
+    ptr_write_f64(y, 3, -15.1111514016986312);
+    ptr_write_f64(z, 3, -0.223307578892655734);
+    ptr_write_f64(vx, 3, 0.00296460137564761618 * days_per_year);
+    ptr_write_f64(vy, 3, 0.00237847173959480950 * days_per_year);
+    ptr_write_f64(vz, 3, -0.0000296589568540237556 * days_per_year);
+    ptr_write_f64(mass, 3, 0.0000436624404335156298 * solar_mass);
+
+    // Neptune
+    ptr_write_f64(x, 4, 15.3796971148509165);
+    ptr_write_f64(y, 4, -25.9193146099879641);
+    ptr_write_f64(z, 4, 0.179258772950371181);
+    ptr_write_f64(vx, 4, 0.00268067772490389322 * days_per_year);
+    ptr_write_f64(vy, 4, 0.00162824170038242295 * days_per_year);
+    ptr_write_f64(vz, 4, -0.0000951592254519715870 * days_per_year);
+    ptr_write_f64(mass, 4, 0.0000515138902046611451 * solar_mass);
+
+    // Offset momentum of Sun
+    let px: f64 = 0.0;
+    let py: f64 = 0.0;
+    let pz: f64 = 0.0;
+    for i: i32 in range(1, n) {
+        px = px + ptr_read_f64(vx, i) * ptr_read_f64(mass, i);
+        py = py + ptr_read_f64(vy, i) * ptr_read_f64(mass, i);
+        pz = pz + ptr_read_f64(vz, i) * ptr_read_f64(mass, i);
+    }
+    ptr_write_f64(vx, 0, 0.0 - px / solar_mass);
+    ptr_write_f64(vy, 0, 0.0 - py / solar_mass);
+    ptr_write_f64(vz, 0, 0.0 - pz / solar_mass);
+
+    let e0: f64 = energy(x, y, z, vx, vy, vz, mass, n);
+    print_f64(e0);
+
+    let steps: i32 = 50000000;
+    let dt: f64 = 0.01;
+    for step: i32 in range(0, steps) {
+        let _d: f64 = advance(x, y, z, vx, vy, vz, mass, dt, n);
+    }
+
+    let e1: f64 = energy(x, y, z, vx, vy, vz, mass, n);
+    print_f64(e1);
+
+    heap_free(x); heap_free(y); heap_free(z);
+    heap_free(vx); heap_free(vy); heap_free(vz);
+    heap_free(mass);
+    return 0;
+}

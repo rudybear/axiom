@@ -1,0 +1,82 @@
+@module spectral_norm;
+@intent("Spectral norm: eigenvalue approximation via power method on 5500x5500 matrix, 10 iterations");
+@constraint { optimize_for: "performance" };
+
+// Benchmarks Game spectral-norm: compute the spectral norm of an infinite matrix
+// A(i,j) = 1 / ((i+j)*(i+j+1)/2 + i + 1)
+// using 10 iterations of the power method (multiply by A then A^T).
+
+@pure @inline(always)
+fn matrix_a(i: i32, j: i32) -> f64 {
+    let ij: i32 = i + j;
+    let denom: i32 = ij * (ij + 1) / 2 + i + 1;
+    return 1.0 / to_f64(denom);
+}
+
+@pure
+fn mult_av(n: i32, v: ptr[f64], av: ptr[f64]) -> f64 {
+    for i: i32 in range(0, n) {
+        let sum: f64 = 0.0;
+        for j: i32 in range(0, n) {
+            sum = sum + matrix_a(i, j) * ptr_read_f64(v, j);
+        }
+        ptr_write_f64(av, i, sum);
+    }
+    return 0.0;
+}
+
+@pure
+fn mult_atv(n: i32, v: ptr[f64], atv: ptr[f64]) -> f64 {
+    for i: i32 in range(0, n) {
+        let sum: f64 = 0.0;
+        for j: i32 in range(0, n) {
+            sum = sum + matrix_a(j, i) * ptr_read_f64(v, j);
+        }
+        ptr_write_f64(atv, i, sum);
+    }
+    return 0.0;
+}
+
+@pure
+fn mult_atav(n: i32, v: ptr[f64], atav: ptr[f64], tmp: ptr[f64]) -> f64 {
+    let _d1: f64 = mult_av(n, v, tmp);
+    let _d2: f64 = mult_atv(n, tmp, atav);
+    return 0.0;
+}
+
+fn main() -> i32 {
+    let n: i32 = 5500;
+
+    let u: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let v: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let tmp: ptr[f64] = heap_alloc_zeroed(n, 8);
+
+    // Initialize u to all 1.0
+    for i: i32 in range(0, n) {
+        ptr_write_f64(u, i, 1.0);
+    }
+
+    // 10 iterations of power method
+    for iter: i32 in range(0, 10) {
+        let _d1: f64 = mult_atav(n, u, v, tmp);
+        let _d2: f64 = mult_atav(n, v, u, tmp);
+    }
+
+    // Compute spectral norm = sqrt(vBv / vv)
+    let vbv: f64 = 0.0;
+    let vv: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let ui: f64 = ptr_read_f64(u, i);
+        let vi: f64 = ptr_read_f64(v, i);
+        vbv = vbv + ui * vi;
+        vv = vv + vi * vi;
+    }
+
+    let result: f64 = sqrt(vbv / vv);
+    print_f64(result);
+
+    heap_free(u);
+    heap_free(v);
+    heap_free(tmp);
+    return 0;
+}

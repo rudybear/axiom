@@ -1,0 +1,145 @@
+@module nbody_tiled;
+@intent("N-body simulation with tunable force batch size: 4096 particles, 100 steps");
+@constraint { optimize_for: "performance" };
+
+// N-body with configurable batching for force computation.
+// Particles are processed in batches to improve cache locality.
+// The optimizer tunes batch_size and physics_substeps.
+
+@pure
+fn compute_forces_batched(x: ptr[f64], y: ptr[f64], z: ptr[f64],
+                          fx: ptr[f64], fy: ptr[f64], fz: ptr[f64],
+                          mass: ptr[f64], n: i32, batch: i32,
+                          softening: f64) -> f64 {
+    // Zero forces
+    for i: i32 in range(0, n) {
+        ptr_write_f64(fx, i, 0.0);
+        ptr_write_f64(fy, i, 0.0);
+        ptr_write_f64(fz, i, 0.0);
+    }
+
+    // Compute forces in batched tiles for cache efficiency
+    let n_batches: i32 = (n + batch - 1) / batch;
+    for bi: i32 in range(0, n_batches) {
+        let i_start: i32 = bi * batch;
+        let i_end: i32 = i_start + batch;
+        if i_end > n { i_end = n; }
+
+        for bj: i32 in range(bi, n_batches) {
+            let j_start: i32 = bj * batch;
+            let j_end: i32 = j_start + batch;
+            if j_end > n { j_end = n; }
+
+            for i: i32 in range(i_start, i_end) {
+                let xi: f64 = ptr_read_f64(x, i);
+                let yi: f64 = ptr_read_f64(y, i);
+                let zi: f64 = ptr_read_f64(z, i);
+                let fxi: f64 = ptr_read_f64(fx, i);
+                let fyi: f64 = ptr_read_f64(fy, i);
+                let fzi: f64 = ptr_read_f64(fz, i);
+
+                let j_lo: i32 = j_start;
+                if bi == bj { j_lo = i + 1; }
+
+                for j: i32 in range(j_lo, j_end) {
+                    let dx: f64 = ptr_read_f64(x, j) - xi;
+                    let dy: f64 = ptr_read_f64(y, j) - yi;
+                    let dz: f64 = ptr_read_f64(z, j) - zi;
+                    let dist2: f64 = dx * dx + dy * dy + dz * dz + softening;
+                    let inv_dist: f64 = 1.0 / sqrt(dist2);
+                    let inv_dist3: f64 = inv_dist * inv_dist * inv_dist;
+
+                    let mj: f64 = ptr_read_f64(mass, j);
+                    let mi: f64 = ptr_read_f64(mass, i);
+
+                    fxi = fxi + dx * mj * inv_dist3;
+                    fyi = fyi + dy * mj * inv_dist3;
+                    fzi = fzi + dz * mj * inv_dist3;
+
+                    ptr_write_f64(fx, j, ptr_read_f64(fx, j) - dx * mi * inv_dist3);
+                    ptr_write_f64(fy, j, ptr_read_f64(fy, j) - dy * mi * inv_dist3);
+                    ptr_write_f64(fz, j, ptr_read_f64(fz, j) - dz * mi * inv_dist3);
+                }
+
+                ptr_write_f64(fx, i, fxi);
+                ptr_write_f64(fy, i, fyi);
+                ptr_write_f64(fz, i, fzi);
+            }
+        }
+    }
+    return 0.0;
+}
+
+@pure
+fn integrate(x: ptr[f64], y: ptr[f64], z: ptr[f64],
+             vx: ptr[f64], vy: ptr[f64], vz: ptr[f64],
+             fx: ptr[f64], fy: ptr[f64], fz: ptr[f64],
+             mass: ptr[f64], n: i32, dt: f64) -> f64 {
+    for i: i32 in range(0, n) {
+        let mi: f64 = ptr_read_f64(mass, i);
+        let ax: f64 = ptr_read_f64(fx, i) / mi;
+        let ay: f64 = ptr_read_f64(fy, i) / mi;
+        let az: f64 = ptr_read_f64(fz, i) / mi;
+
+        ptr_write_f64(vx, i, ptr_read_f64(vx, i) + ax * dt);
+        ptr_write_f64(vy, i, ptr_read_f64(vy, i) + ay * dt);
+        ptr_write_f64(vz, i, ptr_read_f64(vz, i) + az * dt);
+
+        ptr_write_f64(x, i, ptr_read_f64(x, i) + ptr_read_f64(vx, i) * dt);
+        ptr_write_f64(y, i, ptr_read_f64(y, i) + ptr_read_f64(vy, i) * dt);
+        ptr_write_f64(z, i, ptr_read_f64(z, i) + ptr_read_f64(vz, i) * dt);
+    }
+    return 0.0;
+}
+
+fn main() -> i32 {
+    @strategy { batch_size: ?force_batch, substeps: ?physics_substeps };
+    let n: i32 = 4096;
+    let steps: i32 = 100;
+    let batch: i32 = 128;  // Default batch size; optimizer can tune
+    let dt: f64 = 0.001;
+    let softening: f64 = 0.01;
+
+    let x: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let y: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let z: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let vx: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let vy: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let vz: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let fx: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let fy: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let fz: ptr[f64] = heap_alloc_zeroed(n, 8);
+    let mass: ptr[f64] = heap_alloc_zeroed(n, 8);
+
+    // Initialize particles in a random distribution
+    let seed: i64 = 42;
+    for i: i32 in range(0, n) {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        ptr_write_f64(x, i, to_f64_i64(seed % 1000) / 100.0 - 5.0);
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        ptr_write_f64(y, i, to_f64_i64(seed % 1000) / 100.0 - 5.0);
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        ptr_write_f64(z, i, to_f64_i64(seed % 1000) / 100.0 - 5.0);
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        ptr_write_f64(mass, i, to_f64_i64(seed % 100) / 10.0 + 0.1);
+    }
+
+    for step: i32 in range(0, steps) {
+        let _d1: f64 = compute_forces_batched(x, y, z, fx, fy, fz, mass, n, batch, softening);
+        let _d2: f64 = integrate(x, y, z, vx, vy, vz, fx, fy, fz, mass, n, dt);
+    }
+
+    // Compute checksum: sum of all positions
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        checksum = checksum + ptr_read_f64(x, i) + ptr_read_f64(y, i) + ptr_read_f64(z, i);
+    }
+
+    print_f64(checksum);
+
+    heap_free(x); heap_free(y); heap_free(z);
+    heap_free(vx); heap_free(vy); heap_free(vz);
+    heap_free(fx); heap_free(fy); heap_free(fz);
+    heap_free(mass);
+    return 0;
+}

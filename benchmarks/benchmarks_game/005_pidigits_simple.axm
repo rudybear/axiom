@@ -1,0 +1,95 @@
+@module pidigits_simple;
+@intent("Pi digit extraction using Machin-like formula with f64 arithmetic, 1000 iterations");
+@constraint { optimize_for: "performance" };
+
+// Computes pi using the Machin-like formula:
+//   pi/4 = 4*arctan(1/5) - arctan(1/239)
+// where arctan(x) = x - x^3/3 + x^5/5 - x^7/7 + ...
+// Not arbitrary precision - uses f64 to get ~15 digits,
+// then checksums the iterative convergence process.
+
+@pure @inline(always)
+fn arctan_inv(d: i64, n_terms: i32) -> f64 {
+    // Compute arctan(1/d) using Taylor series with n_terms terms
+    let x: f64 = 1.0 / to_f64_i64(d);
+    let x2: f64 = x * x;
+    let result: f64 = x;
+    let term: f64 = x;
+    let sign: f64 = -1.0;
+
+    for i: i32 in range(1, n_terms) {
+        term = term * x2;
+        let denom: f64 = to_f64(2 * i + 1);
+        result = result + sign * term / denom;
+        sign = 0.0 - sign;
+    }
+    return result;
+}
+
+@pure
+fn compute_pi_machin(n_terms: i32) -> f64 {
+    let a1: f64 = arctan_inv(5, n_terms);
+    let a2: f64 = arctan_inv(239, n_terms);
+    return 4.0 * (4.0 * a1 - a2);
+}
+
+// Also compute pi via Leibniz series for extra work:
+// pi/4 = 1 - 1/3 + 1/5 - 1/7 + ...
+@pure
+fn compute_pi_leibniz(n_terms: i32) -> f64 {
+    let result: f64 = 0.0;
+    let sign: f64 = 1.0;
+    for i: i32 in range(0, n_terms) {
+        let denom: f64 = to_f64(2 * i + 1);
+        result = result + sign / denom;
+        sign = 0.0 - sign;
+    }
+    return result * 4.0;
+}
+
+// Compute pi via Nilakantha series:
+// pi = 3 + 4/(2*3*4) - 4/(4*5*6) + 4/(6*7*8) - ...
+@pure
+fn compute_pi_nilakantha(n_terms: i32) -> f64 {
+    let result: f64 = 3.0;
+    let sign: f64 = 1.0;
+    for i: i32 in range(1, n_terms + 1) {
+        let k: f64 = to_f64(2 * i);
+        let denom: f64 = k * (k + 1.0) * (k + 2.0);
+        result = result + sign * 4.0 / denom;
+        sign = 0.0 - sign;
+    }
+    return result;
+}
+
+fn main() -> i32 {
+    let n_iters: i32 = 1000;
+    let n_terms_base: i32 = 500;
+
+    // Run multiple pi computation methods at varying precision
+    // and accumulate a convergence checksum
+    let checksum: f64 = 0.0;
+    let pi_ref: f64 = 3.14159265358979323;
+
+    for iter: i32 in range(0, n_iters) {
+        let n_terms: i32 = n_terms_base + iter;
+
+        // Machin formula (converges fast)
+        let pi_machin: f64 = compute_pi_machin(n_terms / 10 + 5);
+        let err_machin: f64 = abs_f64(pi_machin - pi_ref);
+
+        // Leibniz series (converges slowly)
+        let pi_leibniz: f64 = compute_pi_leibniz(n_terms);
+        let err_leibniz: f64 = abs_f64(pi_leibniz - pi_ref);
+
+        // Nilakantha series (converges moderately)
+        let pi_nilakantha: f64 = compute_pi_nilakantha(n_terms / 2);
+        let err_nilakantha: f64 = abs_f64(pi_nilakantha - pi_ref);
+
+        // Accumulate weighted error checksum
+        checksum = checksum + err_machin * 1000000.0 + err_leibniz + err_nilakantha * 1000.0;
+    }
+
+    print_f64(checksum);
+    return 0;
+}

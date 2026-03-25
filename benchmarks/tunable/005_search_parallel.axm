@@ -1,0 +1,103 @@
+@module search_parallel;
+@intent("Parallel-style chunked search: find all matches in 20M element array with tunable chunk size");
+@constraint { optimize_for: "performance" };
+
+// Simulates a parallel search by processing data in configurable chunks.
+// Each chunk is searched independently and results are merged.
+// The optimizer tunes the chunk size for optimal cache/branch behavior.
+
+@pure @inline(always)
+fn hash_value(val: i32) -> i32 {
+    // Simple hash for match predicate
+    let h: i32 = val;
+    h = bxor(h, shr(h, 16));
+    h = h * 73244475;
+    h = bxor(h, shr(h, 16));
+    h = h * 73244475;
+    h = bxor(h, shr(h, 16));
+    return h;
+}
+
+@pure
+fn search_chunk(data: ptr[i32], start: i32, end: i32, target_hash_mod: i32) -> i64 {
+    // Search for elements whose hash mod 1000 equals target_hash_mod
+    // Returns: (count << 32) | first_match_index (packed into i64)
+    let count: i64 = 0;
+    let first_match: i64 = -1;
+
+    for i: i32 in range(start, end) {
+        let val: i32 = ptr_read_i32(data, i);
+        let h: i32 = hash_value(val);
+        // Use band to get mod-1024 (power of 2 for speed)
+        let hmod: i32 = band(h, 1023);
+        if hmod == target_hash_mod {
+            count = count + 1;
+            if first_match < 0 {
+                first_match = widen(i);
+            }
+        }
+    }
+
+    return count * 1000000000 + first_match + 1;
+}
+
+@pure
+fn merge_results(chunk_results: ptr[i64], n_chunks: i32) -> i64 {
+    // Merge chunk results: sum counts and find global first match
+    let total_count: i64 = 0;
+    let global_first: i64 = 999999999;
+
+    for i: i32 in range(0, n_chunks) {
+        let result: i64 = ptr_read_i64(chunk_results, i);
+        let count: i64 = result / 1000000000;
+        let first: i64 = result % 1000000000 - 1;
+
+        total_count = total_count + count;
+        if first >= 0 and first < global_first {
+            global_first = first;
+        }
+    }
+
+    return total_count * 1000000 + global_first;
+}
+
+fn main() -> i32 {
+    @strategy { chunk_size: ?search_chunk };
+    let n: i32 = 20000000;
+    let chunk_size: i32 = 65536;  // Default chunk size; optimizer can tune
+
+    let data: ptr[i32] = heap_alloc_zeroed(n, 4);
+
+    // Fill with pseudo-random data
+    let seed: i64 = 42;
+    for i: i32 in range(0, n) {
+        seed = (1103515245 * seed + 12345) % 2147483648;
+        ptr_write_i32(data, i, narrow(seed));
+    }
+
+    // Perform multiple searches with different targets
+    let total_checksum: i64 = 0;
+    let n_chunks: i32 = (n + chunk_size - 1) / chunk_size;
+    let chunk_results: ptr[i64] = heap_alloc_zeroed(n_chunks, 8);
+
+    for target: i32 in range(0, 16) {
+        // Search each chunk
+        for ci: i32 in range(0, n_chunks) {
+            let start: i32 = ci * chunk_size;
+            let end: i32 = start + chunk_size;
+            if end > n { end = n; }
+            let result: i64 = search_chunk(data, start, end, target);
+            ptr_write_i64(chunk_results, ci, result);
+        }
+
+        // Merge results
+        let merged: i64 = merge_results(chunk_results, n_chunks);
+        total_checksum = (total_checksum + merged) % 1000000007;
+    }
+
+    print_i64(total_checksum);
+
+    heap_free(data);
+    heap_free(chunk_results);
+    return 0;
+}
