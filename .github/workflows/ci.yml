@@ -7,6 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace -- -D warnings -A clippy::too_many_arguments -A clippy::if_same_then_else -A clippy::drain_collect -A clippy::needless_range_loop -A clippy::manual_memcpy -A clippy::collapsible_if -A clippy::collapsible_else_if

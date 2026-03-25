@@ -6,7 +6,7 @@
 // to insertion sort below a configurable threshold. The optimizer discovers
 // the optimal crossover point for the target CPU cache hierarchy.
 
-@pure
+@pure @inline(always)
 fn insertion_sort(arr: ptr[i32], lo: i32, hi: i32) -> i32 {
     for i: i32 in range(lo + 1, hi + 1) {
         let key: i32 = ptr_read_i32(arr, i);
@@ -40,7 +40,7 @@ fn median_of_three(arr: ptr[i32], a: i32, b: i32, c: i32) -> i32 {
     return c;
 }
 
-@pure
+@pure @inline(always)
 fn partition(arr: ptr[i32], lo: i32, hi: i32) -> i32 {
     let mid: i32 = lo + (hi - lo) / 2;
     let pivot_idx: i32 = median_of_three(arr, lo, mid, hi);
@@ -70,6 +70,7 @@ fn partition(arr: ptr[i32], lo: i32, hi: i32) -> i32 {
 }
 
 // Iterative quicksort using an explicit stack to avoid deep recursion
+@pure
 fn quicksort_hybrid(arr: ptr[i32], n: i32, threshold: i32) -> i32 {
     // Explicit stack for iterative quicksort (max depth ~64 for 5M elements)
     let stack_lo: ptr[i32] = heap_alloc_zeroed(128, 4);

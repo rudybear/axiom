@@ -72,12 +72,10 @@ fn emit_register(buf: ptr[i32], pos: i32, reg_num: i32) -> i32 {
     return 5;
 }
 
-fn main() -> i32 {
-    let n_instructions: i32 = 2000000;
-    // Buffer large enough for all emitted text (max ~13 chars per instruction)
-    let buf_size: i32 = n_instructions * 16;
-    let buf: ptr[i32] = heap_alloc_zeroed(buf_size, 4);
-
+// Extract hot codegen loop into @pure function (Rule 1, Rule 14)
+// Returns the final position (number of chars written)
+@pure
+fn codegen_emit_all(buf: ptr[i32], n_instructions: i32) -> i32 {
     let seed: i64 = 42;
     let pos: i32 = 0;
 
@@ -115,11 +113,28 @@ fn main() -> i32 {
         pos = pos + 1;
     }
 
-    // Compute checksum over emitted buffer
+    return pos;
+}
+
+// Extract checksum computation into @pure function (Rule 1, Rule 14)
+@pure
+fn compute_checksum(buf: ptr[i32], len: i32) -> i64 {
     let checksum: i64 = 0;
-    for i: i32 in range(0, pos) {
+    for i: i32 in range(0, len) {
         checksum = (checksum * 31 + widen(ptr_read_i32(buf, i))) % 1000000007;
     }
+    return checksum;
+}
+
+fn main() -> i32 {
+    let n_instructions: i32 = 2000000;
+    // Buffer large enough for all emitted text (max ~13 chars per instruction)
+    let buf_size: i32 = n_instructions * 16;
+    let buf: ptr[i32] = heap_alloc_zeroed(buf_size, 4);
+
+    let pos: i32 = codegen_emit_all(buf, n_instructions);
+
+    let checksum: i64 = compute_checksum(buf, pos);
 
     print_i64(checksum);
     heap_free(buf);

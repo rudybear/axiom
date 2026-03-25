@@ -16,20 +16,35 @@ fn classify_char(c: i32) -> i32 {
     return 9;
 }
 
-fn main() -> i32 {
-    let n: i32 = 10000000;
-    let counts: array[i32, 10] = array_zeros[i32, 10];
+// Extract hot lexer loop into @pure function (Rule 1, Rule 14)
+@pure
+fn lexer_scan(counts: ptr[i32], n: i32) -> i32 {
     let seed: i64 = 42;
     for i: i32 in range(0, n) {
         seed = (1103515245 * seed + 12345) % 2147483648;
         let c: i32 = narrow(seed % 128);
         let cls: i32 = classify_char(c);
-        counts[cls] = counts[cls] + 1;
+        ptr_write_i32(counts, cls, ptr_read_i32(counts, cls) + 1);
     }
+    return 0;
+}
+
+// Extract checksum into @pure function (Rule 1, Rule 14)
+@pure
+fn lexer_checksum(counts: ptr[i32]) -> i64 {
     let checksum: i64 = 0;
     for i: i32 in range(0, 10) {
-        checksum = checksum + widen(counts[i]) * widen(i);
+        checksum = checksum + widen(ptr_read_i32(counts, i)) * widen(i);
     }
+    return checksum;
+}
+
+fn main() -> i32 {
+    let n: i32 = 10000000;
+    let counts: ptr[i32] = heap_alloc_zeroed(10, 4);
+    let _d: i32 = lexer_scan(counts, n);
+    let checksum: i64 = lexer_checksum(counts);
     print_i64(checksum);
+    heap_free(counts);
     return 0;
 }

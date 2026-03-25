@@ -49,15 +49,9 @@ fn process_block(first: i64, last: i64) -> i64 {
     return (first * 41 + last * 43) % 1000000007;
 }
 
-fn main() -> i32 {
-    let n: i32 = 2000000;
-
-    // Allocate node arrays on heap: type, left_child, right_child
-    let node_type: ptr[i32] = heap_alloc_zeroed(n, 4);
-    let node_left: ptr[i32] = heap_alloc_zeroed(n, 4);
-    let node_right: ptr[i32] = heap_alloc_zeroed(n, 4);
-
-    // Generate pseudo-random HIR nodes
+// Extract node generation into @pure function (Rule 1, Rule 14)
+@pure
+fn generate_nodes(node_type: ptr[i32], node_left: ptr[i32], node_right: ptr[i32], n: i32) -> i32 {
     let seed: i64 = 42;
     for i: i32 in range(0, n) {
         seed = (1103515245 * seed + 12345) % 2147483648;
@@ -69,8 +63,14 @@ fn main() -> i32 {
         let r: i32 = narrow(seed % widen(n));
         ptr_write_i32(node_right, i, r);
     }
+    return 0;
+}
 
-    // Walk all nodes, dispatching on type
+// Extract hot walk loop into @pure function (Rule 1, Rule 14)
+// This is the critical optimization - the walk loop does heavy integer
+// arithmetic and modular operations that benefit from @pure optimization.
+@pure
+fn walk_nodes(node_type: ptr[i32], node_left: ptr[i32], node_right: ptr[i32], n: i32) -> i64 {
     let accum: i64 = 0;
     for i: i32 in range(0, n) {
         let ntype: i32 = ptr_read_i32(node_type, i);
@@ -88,6 +88,22 @@ fn main() -> i32 {
         if ntype == 6 { accum = (accum + process_return(left_val)) % 1000000007; }
         if ntype == 7 { accum = (accum + process_block(left_val, right_val)) % 1000000007; }
     }
+    return accum;
+}
+
+fn main() -> i32 {
+    let n: i32 = 2000000;
+
+    // Allocate node arrays on heap: type, left_child, right_child
+    let node_type: ptr[i32] = heap_alloc_zeroed(n, 4);
+    let node_left: ptr[i32] = heap_alloc_zeroed(n, 4);
+    let node_right: ptr[i32] = heap_alloc_zeroed(n, 4);
+
+    // Generate pseudo-random HIR nodes
+    let _d: i32 = generate_nodes(node_type, node_left, node_right, n);
+
+    // Walk all nodes, dispatching on type
+    let accum: i64 = walk_nodes(node_type, node_left, node_right, n);
 
     print_i64(accum);
     heap_free(node_type);

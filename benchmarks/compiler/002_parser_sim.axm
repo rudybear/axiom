@@ -10,7 +10,7 @@ fn hash_combine(h: i64, val: i64) -> i64 {
     return ((h * 31) + val) % 1000000007;
 }
 
-@pure
+@pure @inline(always)
 fn parse_atom(tokens: ptr[i32], pos: i32, limit: i32) -> i64 {
     if pos >= limit { return 0; }
     let tok: i32 = ptr_read_i32(tokens, pos);
@@ -26,7 +26,7 @@ fn parse_atom(tokens: ptr[i32], pos: i32, limit: i32) -> i64 {
     return widen(tok);
 }
 
-@pure
+@pure @inline(always)
 fn parse_term(tokens: ptr[i32], pos: i32, limit: i32) -> i64 {
     let left: i64 = parse_atom(tokens, pos, limit);
     let p: i32 = pos + 1;
@@ -41,7 +41,7 @@ fn parse_term(tokens: ptr[i32], pos: i32, limit: i32) -> i64 {
     return left;
 }
 
-@pure
+@pure @inline(always)
 fn parse_expr(tokens: ptr[i32], pos: i32, limit: i32) -> i64 {
     let result: i64 = parse_term(tokens, pos, limit);
     let p: i32 = pos + 2;
@@ -59,23 +59,22 @@ fn parse_expr(tokens: ptr[i32], pos: i32, limit: i32) -> i64 {
     return result;
 }
 
-fn main() -> i32 {
-    let n: i32 = 1000000;
-    // Allocate token array on heap
-    let tokens: ptr[i32] = heap_alloc_zeroed(n, 4);
-
-    // Generate pseudo-random token stream
-    // Token types: 1=number, 2=operator, 3=open_paren, 4=close_paren, 5=semicolon
+// Extract token generation into @pure function (Rule 1, Rule 14)
+@pure
+fn generate_tokens(tokens: ptr[i32], n: i32) -> i32 {
     let seed: i64 = 42;
     for i: i32 in range(0, n) {
         seed = (1103515245 * seed + 12345) % 2147483648;
         let tok: i32 = narrow(seed % 5) + 1;
         ptr_write_i32(tokens, i, tok);
     }
+    return 0;
+}
 
-    // Parse expressions across the token stream in windows
+// Extract hot parsing loop into @pure function (Rule 1, Rule 14)
+@pure
+fn parse_all_windows(tokens: ptr[i32], n: i32, window: i32) -> i64 {
     let checksum: i64 = 0;
-    let window: i32 = 20;
     let num_windows: i32 = n / window;
 
     for w: i32 in range(0, num_windows) {
@@ -83,6 +82,20 @@ fn main() -> i32 {
         let result: i64 = parse_expr(tokens, start, start + window);
         checksum = hash_combine(checksum, result);
     }
+    return checksum;
+}
+
+fn main() -> i32 {
+    let n: i32 = 1000000;
+    // Allocate token array on heap
+    let tokens: ptr[i32] = heap_alloc_zeroed(n, 4);
+
+    // Generate pseudo-random token stream
+    let _d: i32 = generate_tokens(tokens, n);
+
+    // Parse expressions across the token stream in windows
+    let window: i32 = 20;
+    let checksum: i64 = parse_all_windows(tokens, n, window);
 
     print_i64(checksum);
     heap_free(tokens);

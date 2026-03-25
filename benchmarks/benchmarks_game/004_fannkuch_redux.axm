@@ -35,14 +35,11 @@ fn flip_count(perm: ptr[i32], n: i32, tmp: ptr[i32]) -> i32 {
     return flips;
 }
 
-fn main() -> i32 {
-    let n: i32 = 10;
-
-    // Allocate arrays on heap
-    let perm: ptr[i32] = heap_alloc_zeroed(n, 4);
-    let count: ptr[i32] = heap_alloc_zeroed(n, 4);
-    let tmp: ptr[i32] = heap_alloc_zeroed(n, 4);
-
+// Extract the hot permutation enumeration loop into @pure function (Rule 1, Rule 14)
+// This enables fast-math flags, FMA, and better optimization on the hot path.
+// Returns max_flips in result[0] and checksum in result[1].
+@pure
+fn fannkuch_run(perm: ptr[i32], count: ptr[i32], tmp: ptr[i32], n: i32, result: ptr[i32]) -> i32 {
     // Initialize identity permutation
     for i: i32 in range(0, n) {
         ptr_write_i32(perm, i, i);
@@ -105,11 +102,31 @@ fn main() -> i32 {
         }
     }
 
+    ptr_write_i32(result, 0, max_flips);
+    ptr_write_i32(result, 1, checksum);
+    return 0;
+}
+
+fn main() -> i32 {
+    let n: i32 = 10;
+
+    // Allocate arrays on heap (Rule 5)
+    let perm: ptr[i32] = heap_alloc_zeroed(n, 4);
+    let count: ptr[i32] = heap_alloc_zeroed(n, 4);
+    let tmp: ptr[i32] = heap_alloc_zeroed(n, 4);
+    let result: ptr[i32] = heap_alloc_zeroed(2, 4);
+
+    let _d: i32 = fannkuch_run(perm, count, tmp, n, result);
+
+    let max_flips: i32 = ptr_read_i32(result, 0);
+    let checksum: i32 = ptr_read_i32(result, 1);
+
     print_i32(checksum);
     print_i32(max_flips);
 
     heap_free(perm);
     heap_free(count);
     heap_free(tmp);
+    heap_free(result);
     return 0;
 }
