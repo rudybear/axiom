@@ -9,6 +9,9 @@ use wgpu::util::DeviceExt;
 use crate::camera::CameraUniform;
 use crate::gltf_load::PbrVertex;
 
+/// Maximum number of point lights supported.
+pub const MAX_LIGHTS: usize = 8;
+
 /// Embedded PBR WGSL shader source.
 const PBR_SHADER_SRC: &str = r#"
 // ---- Camera uniform (bind group 0, binding 0) ----
@@ -19,6 +22,22 @@ struct CameraUniform {
     eye_pos: vec3<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
+
+// ---- Light uniform (bind group 0, binding 1) ----
+struct PointLight {
+    position: vec3<f32>,
+    intensity: f32,
+    color: vec3<f32>,
+    _pad: f32,
+};
+struct LightUniform {
+    lights: array<PointLight, 8>,
+    count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+};
+@group(0) @binding(1) var<uniform> light_data: LightUniform;
 
 // ---- Material uniform (bind group 1, binding 0) ----
 struct MaterialParams {
@@ -75,7 +94,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 // ---- PBR Fragment Shader ----
 const PI: f32 = 3.14159265359;
 
-// Directional light
+// Fallback directional light (used when no point lights are added)
 const LIGHT_DIR: vec3<f32> = vec3<f32>(0.5, 1.0, 0.8);
 const LIGHT_COLOR: vec3<f32> = vec3<f32>(1.0, 0.98, 0.95);
 const LIGHT_INTENSITY: f32 = 3.0;
@@ -102,6 +121,32 @@ fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+// Compute PBR contribution from a single light direction
+fn compute_brdf(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, albedo: vec3<f32>,
+                metallic: f32, roughness: f32, light_color: vec3<f32>,
+                light_intensity: f32) -> vec3<f32> {
+    let H = normalize(V + L);
+    let n_dot_v = max(dot(N, V), 0.0001);
+    let n_dot_l = max(dot(N, L), 0.0);
+    let n_dot_h = max(dot(N, H), 0.0);
+    let v_dot_h = max(dot(V, H), 0.0);
+
+    let f0 = mix(vec3<f32>(0.04, 0.04, 0.04), albedo, metallic);
+
+    let D = distribution_ggx(n_dot_h, roughness);
+    let G = geometry_smith(n_dot_v, n_dot_l, roughness);
+    let F = fresnel_schlick(v_dot_h, f0);
+
+    let numerator = D * G * F;
+    let denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
+    let specular = numerator / denominator;
+
+    let kS = F;
+    let kD = (vec3<f32>(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
+
+    return (kD * albedo / PI + specular) * light_color * light_intensity * n_dot_l;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- Sample textures ---
@@ -121,30 +166,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let TBN = mat3x3<f32>(T, B, N_geom);
     let N = normalize(TBN * normal_sample);
 
-    // --- PBR Cook-Torrance BRDF ---
+    // --- PBR Cook-Torrance BRDF with multi-light support ---
     let V = normalize(camera.eye_pos - in.world_pos);
-    let L = normalize(LIGHT_DIR);
-    let H = normalize(V + L);
 
-    let n_dot_v = max(dot(N, V), 0.0001);
-    let n_dot_l = max(dot(N, L), 0.0);
-    let n_dot_h = max(dot(N, H), 0.0);
-    let v_dot_h = max(dot(V, H), 0.0);
+    var Lo = vec3<f32>(0.0, 0.0, 0.0);
 
-    let f0 = mix(vec3<f32>(0.04, 0.04, 0.04), albedo, metallic);
-
-    let D = distribution_ggx(n_dot_h, roughness);
-    let G = geometry_smith(n_dot_v, n_dot_l, roughness);
-    let F = fresnel_schlick(v_dot_h, f0);
-
-    let numerator = D * G * F;
-    let denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
-    let specular = numerator / denominator;
-
-    let kS = F;
-    let kD = (vec3<f32>(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
-
-    let Lo = (kD * albedo / PI + specular) * LIGHT_COLOR * LIGHT_INTENSITY * n_dot_l;
+    if light_data.count == 0u {
+        // Fallback: use the hardcoded directional light
+        let L = normalize(LIGHT_DIR);
+        Lo = compute_brdf(N, V, L, albedo, metallic, roughness, LIGHT_COLOR, LIGHT_INTENSITY);
+    } else {
+        // Loop over active point lights
+        for (var i = 0u; i < light_data.count; i = i + 1u) {
+            if i >= 8u { break; }
+            let light = light_data.lights[i];
+            let light_vec = light.position - in.world_pos;
+            let distance = length(light_vec);
+            let L = normalize(light_vec);
+            // Inverse-square attenuation
+            let attenuation = 1.0 / (distance * distance + 0.01);
+            let effective_intensity = light.intensity * attenuation;
+            Lo = Lo + compute_brdf(N, V, L, albedo, metallic, roughness,
+                                    light.color, effective_intensity);
+        }
+    }
 
     // Emissive: sample texture and multiply by factor
     let emissive_sample = textureSample(emissive_tex, emissive_samp, in.uv).rgb;
@@ -164,12 +209,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// GPU-side representation of a single point light (32 bytes, matches WGSL).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PointLightGpu {
+    pub position: [f32; 3],
+    pub intensity: f32,
+    pub color: [f32; 3],
+    pub _pad: f32,
+}
+
+/// GPU-side light uniform buffer (matches WGSL LightUniform).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LightUniformGpu {
+    pub lights: [PointLightGpu; MAX_LIGHTS],
+    pub count: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
+}
+
 /// The PBR render pipeline and associated GPU resources.
 pub struct PbrPipeline {
     pub pipeline: wgpu::RenderPipeline,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     pub material_bind_group_layout: wgpu::BindGroupLayout,
     pub camera_buffer: wgpu::Buffer,
+    pub light_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
     pub default_sampler: wgpu::Sampler,
     // Fallback textures for materials missing images
@@ -190,20 +257,32 @@ impl PbrPipeline {
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
-        // --- Camera bind group layout (group 0) ---
+        // --- Camera + Light bind group layout (group 0) ---
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("PBR camera bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                label: Some("PBR camera+light bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
 
         // --- Material bind group layout (group 1) ---
@@ -308,13 +387,38 @@ impl PbrPipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // --- Light uniform buffer (R5: Multi-light support) ---
+        let light_uniform = LightUniformGpu {
+            lights: [PointLightGpu {
+                position: [0.0; 3],
+                intensity: 0.0,
+                color: [0.0; 3],
+                _pad: 0.0,
+            }; MAX_LIGHTS],
+            count: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("PBR light uniform"),
+            contents: bytemuck::bytes_of(&light_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("PBR camera bind group"),
+            label: Some("PBR camera+light bind group"),
             layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: light_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         // --- Default sampler ---
@@ -404,6 +508,7 @@ impl PbrPipeline {
             camera_bind_group_layout,
             material_bind_group_layout,
             camera_buffer,
+            light_buffer,
             camera_bind_group,
             default_sampler,
             fallback_white_tex,
@@ -420,6 +525,11 @@ impl PbrPipeline {
     /// Update the camera uniform buffer.
     pub fn update_camera(&self, queue: &wgpu::Queue, uniform: &CameraUniform) {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(uniform));
+    }
+
+    /// Update the light uniform buffer (R5: Multi-light support).
+    pub fn update_lights(&self, queue: &wgpu::Queue, uniform: &LightUniformGpu) {
+        queue.write_buffer(&self.light_buffer, 0, bytemuck::bytes_of(uniform));
     }
 }
 

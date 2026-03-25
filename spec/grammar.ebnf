@@ -154,9 +154,21 @@ ReturnStmt      = "return" Expr ";" ;
 
 IfStmt          = "if" Expr Block [ "else" Block ] ;
 
+(* DEFERRED: if-let sugar — requires pattern matching infrastructure.              *)
+(*   IfLetStmt  = "if" "let" Pattern "=" Expr Block [ "else" Block ] ;             *)
+(* Desugars to: match Expr { Pattern => Block, _ => else_block_or_unit }           *)
+(* Blocked on: pattern matching, sum types, exhaustiveness checking.               *)
+(* Status: planned, not yet implemented.                                           *)
+
 ForStmt         = "for" IDENT ":" TypeExpr "in" Expr Block ;
 
 WhileStmt       = "while" Expr Block ;
+
+(* DEFERRED: while-let sugar — requires pattern matching infrastructure.           *)
+(*   WhileLetStmt = "while" "let" Pattern "=" Expr Block ;                         *)
+(* Desugars to: loop { match Expr { Pattern => Block, _ => break } }               *)
+(* Blocked on: pattern matching, sum types, exhaustiveness checking.               *)
+(* Status: planned, not yet implemented.                                           *)
 
 AssignOrExprStmt = Expr [ "=" Expr ] ";" ;
 

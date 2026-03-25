@@ -1,0 +1,495 @@
+@module mini_parser;
+@intent("Self-hosted parser PoC: parse a tiny subset of AXIOM (let, return) written in AXIOM");
+
+// =============================================================================
+// Mini Parser — Self-Hosted Proof of Concept
+// =============================================================================
+//
+// Parses a TINY subset of AXIOM syntax using only AXIOM:
+//   - `let x: i32 = 42;`
+//   - `return x;`
+//
+// Uses integer arrays as token buffers, character-by-character parsing.
+// Proves AXIOM can parse its own syntax.
+//
+// Token types:
+//   0 = EOF           5 = EQUALS (=)
+//   1 = IDENT         6 = SEMICOLON (;)
+//   2 = NUMBER        7 = COLON (:)
+//   3 = KW_LET        8 = KW_RETURN
+//   4 = KW_I32        9 = UNKNOWN
+//
+// AST node types:
+//   1 = LET_STMT (has: name_start, name_len, type_id, value)
+//   2 = RETURN_STMT (has: ident_start, ident_len)
+//
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Character classification
+// ---------------------------------------------------------------------------
+
+@pure
+fn is_alpha(c: i32) -> i32 {
+    if c >= 65 and c <= 90 { return 1; }   // A-Z
+    if c >= 97 and c <= 122 { return 1; }  // a-z
+    if c == 95 { return 1; }               // underscore
+    return 0;
+}
+
+@pure
+fn is_digit(c: i32) -> i32 {
+    if c >= 48 and c <= 57 { return 1; }
+    return 0;
+}
+
+@pure
+fn is_alnum(c: i32) -> i32 {
+    if is_alpha(c) == 1 { return 1; }
+    if is_digit(c) == 1 { return 1; }
+    return 0;
+}
+
+@pure
+fn is_whitespace(c: i32) -> i32 {
+    if c == 32 { return 1; }   // space
+    if c == 10 { return 1; }   // newline
+    if c == 13 { return 1; }   // carriage return
+    if c == 9 { return 1; }    // tab
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Keyword matching (character by character)
+// ---------------------------------------------------------------------------
+
+// Check if src[start..start+3] == "let"
+@pure
+fn match_let(src: ptr[i32], start: i32, len: i32) -> i32 {
+    if len != 3 { return 0; }
+    if ptr_read_i32(src, start) != 108 { return 0; }       // 'l'
+    if ptr_read_i32(src, start + 1) != 101 { return 0; }   // 'e'
+    if ptr_read_i32(src, start + 2) != 116 { return 0; }   // 't'
+    return 1;
+}
+
+// Check if src[start..start+3] == "i32"
+@pure
+fn match_i32_kw(src: ptr[i32], start: i32, len: i32) -> i32 {
+    if len != 3 { return 0; }
+    if ptr_read_i32(src, start) != 105 { return 0; }       // 'i'
+    if ptr_read_i32(src, start + 1) != 51 { return 0; }    // '3'
+    if ptr_read_i32(src, start + 2) != 50 { return 0; }    // '2'
+    return 1;
+}
+
+// Check if src[start..start+6] == "return"
+@pure
+fn match_return(src: ptr[i32], start: i32, len: i32) -> i32 {
+    if len != 6 { return 0; }
+    if ptr_read_i32(src, start) != 114 { return 0; }       // 'r'
+    if ptr_read_i32(src, start + 1) != 101 { return 0; }   // 'e'
+    if ptr_read_i32(src, start + 2) != 116 { return 0; }   // 't'
+    if ptr_read_i32(src, start + 3) != 117 { return 0; }   // 'u'
+    if ptr_read_i32(src, start + 4) != 114 { return 0; }   // 'r'
+    if ptr_read_i32(src, start + 5) != 110 { return 0; }   // 'n'
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Lexer: tokenize source characters into token arrays
+// ---------------------------------------------------------------------------
+// Token storage layout:
+//   tok_types[i]  : token type (0-9)
+//   tok_starts[i] : start index in source
+//   tok_lens[i]   : length in characters
+//   tok_values[i] : numeric value (for NUMBER tokens)
+
+fn tokenize(src: ptr[i32], src_len: i32,
+            tok_types: ptr[i32], tok_starts: ptr[i32],
+            tok_lens: ptr[i32], tok_values: ptr[i32]) -> i32 {
+    let pos: i32 = 0;
+    let tok_count: i32 = 0;
+
+    while pos < src_len {
+        let c: i32 = ptr_read_i32(src, pos);
+
+        // Skip whitespace
+        if is_whitespace(c) == 1 {
+            pos = pos + 1;
+        } else if is_alpha(c) == 1 {
+            // Identifier or keyword
+            let start: i32 = pos;
+            while pos < src_len and is_alnum(ptr_read_i32(src, pos)) == 1 {
+                pos = pos + 1;
+            }
+            let len: i32 = pos - start;
+
+            // Check for keywords
+            let tok_type: i32 = 1;  // IDENT by default
+            if match_let(src, start, len) == 1 {
+                tok_type = 3;  // KW_LET
+            }
+            if match_i32_kw(src, start, len) == 1 {
+                tok_type = 4;  // KW_I32
+            }
+            if match_return(src, start, len) == 1 {
+                tok_type = 8;  // KW_RETURN
+            }
+
+            ptr_write_i32(tok_types, tok_count, tok_type);
+            ptr_write_i32(tok_starts, tok_count, start);
+            ptr_write_i32(tok_lens, tok_count, len);
+            ptr_write_i32(tok_values, tok_count, 0);
+            tok_count = tok_count + 1;
+        } else if is_digit(c) == 1 {
+            // Number literal
+            let start: i32 = pos;
+            let value: i32 = 0;
+            while pos < src_len and is_digit(ptr_read_i32(src, pos)) == 1 {
+                value = value * 10 + (ptr_read_i32(src, pos) - 48);
+                pos = pos + 1;
+            }
+            let len: i32 = pos - start;
+
+            ptr_write_i32(tok_types, tok_count, 2);    // NUMBER
+            ptr_write_i32(tok_starts, tok_count, start);
+            ptr_write_i32(tok_lens, tok_count, len);
+            ptr_write_i32(tok_values, tok_count, value);
+            tok_count = tok_count + 1;
+        } else if c == 61 {
+            // '='
+            ptr_write_i32(tok_types, tok_count, 5);
+            ptr_write_i32(tok_starts, tok_count, pos);
+            ptr_write_i32(tok_lens, tok_count, 1);
+            ptr_write_i32(tok_values, tok_count, 0);
+            tok_count = tok_count + 1;
+            pos = pos + 1;
+        } else if c == 59 {
+            // ';'
+            ptr_write_i32(tok_types, tok_count, 6);
+            ptr_write_i32(tok_starts, tok_count, pos);
+            ptr_write_i32(tok_lens, tok_count, 1);
+            ptr_write_i32(tok_values, tok_count, 0);
+            tok_count = tok_count + 1;
+            pos = pos + 1;
+        } else if c == 58 {
+            // ':'
+            ptr_write_i32(tok_types, tok_count, 7);
+            ptr_write_i32(tok_starts, tok_count, pos);
+            ptr_write_i32(tok_lens, tok_count, 1);
+            ptr_write_i32(tok_values, tok_count, 0);
+            tok_count = tok_count + 1;
+            pos = pos + 1;
+        } else {
+            // Unknown character
+            ptr_write_i32(tok_types, tok_count, 9);
+            ptr_write_i32(tok_starts, tok_count, pos);
+            ptr_write_i32(tok_lens, tok_count, 1);
+            ptr_write_i32(tok_values, tok_count, 0);
+            tok_count = tok_count + 1;
+            pos = pos + 1;
+        }
+    }
+
+    // Append EOF token
+    ptr_write_i32(tok_types, tok_count, 0);
+    ptr_write_i32(tok_starts, tok_count, pos);
+    ptr_write_i32(tok_lens, tok_count, 0);
+    ptr_write_i32(tok_values, tok_count, 0);
+    tok_count = tok_count + 1;
+
+    return tok_count;
+}
+
+// ---------------------------------------------------------------------------
+// Parser: parse token stream into AST nodes
+// ---------------------------------------------------------------------------
+// AST storage layout:
+//   ast_types[i]   : node type (1=LET_STMT, 2=RETURN_STMT)
+//   ast_data[i*4]  : slot0 (e.g., name_start / ident_start)
+//   ast_data[i*4+1]: slot1 (e.g., name_len / ident_len)
+//   ast_data[i*4+2]: slot2 (e.g., type_id for LET)
+//   ast_data[i*4+3]: slot3 (e.g., value for LET)
+
+// Parse a let statement: `let IDENT : TYPE = NUMBER ;`
+// Returns the new token position, or -1 on error.
+fn parse_let(tok_types: ptr[i32], tok_starts: ptr[i32],
+             tok_lens: ptr[i32], tok_values: ptr[i32],
+             pos: i32, tok_count: i32,
+             ast_types: ptr[i32], ast_data: ptr[i32], ast_idx: i32) -> i32 {
+    // Already consumed KW_LET at pos; advance past it
+    let p: i32 = pos + 1;
+
+    // Expect IDENT
+    if p >= tok_count { return 0 - 1; }
+    if ptr_read_i32(tok_types, p) != 1 { return 0 - 1; }
+    let name_start: i32 = ptr_read_i32(tok_starts, p);
+    let name_len: i32 = ptr_read_i32(tok_lens, p);
+    p = p + 1;
+
+    // Expect COLON
+    if p >= tok_count { return 0 - 1; }
+    if ptr_read_i32(tok_types, p) != 7 { return 0 - 1; }
+    p = p + 1;
+
+    // Expect type keyword (KW_I32 = 4)
+    if p >= tok_count { return 0 - 1; }
+    let type_id: i32 = 0;
+    if ptr_read_i32(tok_types, p) == 4 {
+        type_id = 32;  // i32 type
+    }
+    p = p + 1;
+
+    // Expect EQUALS
+    if p >= tok_count { return 0 - 1; }
+    if ptr_read_i32(tok_types, p) != 5 { return 0 - 1; }
+    p = p + 1;
+
+    // Expect NUMBER
+    if p >= tok_count { return 0 - 1; }
+    if ptr_read_i32(tok_types, p) != 2 { return 0 - 1; }
+    let value: i32 = ptr_read_i32(tok_values, p);
+    p = p + 1;
+
+    // Expect SEMICOLON
+    if p >= tok_count { return 0 - 1; }
+    if ptr_read_i32(tok_types, p) != 6 { return 0 - 1; }
+    p = p + 1;
+
+    // Store AST node
+    ptr_write_i32(ast_types, ast_idx, 1);  // LET_STMT
+    ptr_write_i32(ast_data, ast_idx * 4, name_start);
+    ptr_write_i32(ast_data, ast_idx * 4 + 1, name_len);
+    ptr_write_i32(ast_data, ast_idx * 4 + 2, type_id);
+    ptr_write_i32(ast_data, ast_idx * 4 + 3, value);
+
+    return p;
+}
+
+// Parse a return statement: `return IDENT ;`
+// Returns the new token position, or -1 on error.
+fn parse_return(tok_types: ptr[i32], tok_starts: ptr[i32],
+                tok_lens: ptr[i32], tok_values: ptr[i32],
+                pos: i32, tok_count: i32,
+                ast_types: ptr[i32], ast_data: ptr[i32], ast_idx: i32) -> i32 {
+    // Already consumed KW_RETURN at pos; advance past it
+    let p: i32 = pos + 1;
+
+    // Expect IDENT or NUMBER
+    if p >= tok_count { return 0 - 1; }
+    let ret_type: i32 = ptr_read_i32(tok_types, p);
+    if ret_type != 1 and ret_type != 2 { return 0 - 1; }
+    let ident_start: i32 = ptr_read_i32(tok_starts, p);
+    let ident_len: i32 = ptr_read_i32(tok_lens, p);
+    p = p + 1;
+
+    // Expect SEMICOLON
+    if p >= tok_count { return 0 - 1; }
+    if ptr_read_i32(tok_types, p) != 6 { return 0 - 1; }
+    p = p + 1;
+
+    // Store AST node
+    ptr_write_i32(ast_types, ast_idx, 2);  // RETURN_STMT
+    ptr_write_i32(ast_data, ast_idx * 4, ident_start);
+    ptr_write_i32(ast_data, ast_idx * 4 + 1, ident_len);
+    ptr_write_i32(ast_data, ast_idx * 4 + 2, 0);
+    ptr_write_i32(ast_data, ast_idx * 4 + 3, 0);
+
+    return p;
+}
+
+// Parse a sequence of statements.
+fn parse_program(tok_types: ptr[i32], tok_starts: ptr[i32],
+                 tok_lens: ptr[i32], tok_values: ptr[i32],
+                 tok_count: i32,
+                 ast_types: ptr[i32], ast_data: ptr[i32]) -> i32 {
+    let pos: i32 = 0;
+    let ast_count: i32 = 0;
+
+    while pos < tok_count {
+        let tok_type: i32 = ptr_read_i32(tok_types, pos);
+
+        if tok_type == 0 {
+            // EOF
+            pos = tok_count;
+        } else if tok_type == 3 {
+            // KW_LET
+            let new_pos: i32 = parse_let(tok_types, tok_starts, tok_lens, tok_values,
+                                          pos, tok_count, ast_types, ast_data, ast_count);
+            if new_pos < 0 {
+                print("Parse error in let statement");
+                return ast_count;
+            }
+            pos = new_pos;
+            ast_count = ast_count + 1;
+        } else if tok_type == 8 {
+            // KW_RETURN
+            let new_pos: i32 = parse_return(tok_types, tok_starts, tok_lens, tok_values,
+                                             pos, tok_count, ast_types, ast_data, ast_count);
+            if new_pos < 0 {
+                print("Parse error in return statement");
+                return ast_count;
+            }
+            pos = new_pos;
+            ast_count = ast_count + 1;
+        } else {
+            // Skip unknown tokens
+            pos = pos + 1;
+        }
+    }
+
+    return ast_count;
+}
+
+// ---------------------------------------------------------------------------
+// Main: parse "let x: i32 = 42; return x;"
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    print("=== AXIOM Self-Hosted Mini Parser ===");
+    print("Parsing: let x: i32 = 42; return x;");
+
+    // Encode source as character codes in an i32 array
+    // "let x: i32 = 42; return x;"
+    let src_len: i32 = 28;
+    let src: ptr[i32] = heap_alloc(src_len, 4);
+
+    // l=108 e=101 t=116  =32 x=120 :=58  =32 i=105 3=51 2=50
+    //  =32  ==61  =32  4=52 2=50 ;=59  =32
+    // r=114 e=101 t=116 u=117 r=114 n=110  =32 x=120 ;=59
+
+    ptr_write_i32(src, 0, 108);   // l
+    ptr_write_i32(src, 1, 101);   // e
+    ptr_write_i32(src, 2, 116);   // t
+    ptr_write_i32(src, 3, 32);    // ' '
+    ptr_write_i32(src, 4, 120);   // x
+    ptr_write_i32(src, 5, 58);    // :
+    ptr_write_i32(src, 6, 32);    // ' '
+    ptr_write_i32(src, 7, 105);   // i
+    ptr_write_i32(src, 8, 51);    // 3
+    ptr_write_i32(src, 9, 50);    // 2
+    ptr_write_i32(src, 10, 32);   // ' '
+    ptr_write_i32(src, 11, 61);   // =
+    ptr_write_i32(src, 12, 32);   // ' '
+    ptr_write_i32(src, 13, 52);   // 4
+    ptr_write_i32(src, 14, 50);   // 2
+    ptr_write_i32(src, 15, 59);   // ;
+    ptr_write_i32(src, 16, 32);   // ' '
+    ptr_write_i32(src, 17, 114);  // r
+    ptr_write_i32(src, 18, 101);  // e
+    ptr_write_i32(src, 19, 116);  // t
+    ptr_write_i32(src, 20, 117);  // u
+    ptr_write_i32(src, 21, 114);  // r
+    ptr_write_i32(src, 22, 110);  // n
+    ptr_write_i32(src, 23, 32);   // ' '
+    ptr_write_i32(src, 24, 120);  // x
+    ptr_write_i32(src, 25, 59);   // ;
+    // src_len=26 (actual)
+    let actual_len: i32 = 26;
+
+    // Allocate token arrays (max 64 tokens)
+    let max_tokens: i32 = 64;
+    let tok_types: ptr[i32] = heap_alloc(max_tokens, 4);
+    let tok_starts: ptr[i32] = heap_alloc(max_tokens, 4);
+    let tok_lens: ptr[i32] = heap_alloc(max_tokens, 4);
+    let tok_values: ptr[i32] = heap_alloc(max_tokens, 4);
+
+    // --- Lexer phase ---
+    print("--- Lexer ---");
+    let tok_count: i32 = tokenize(src, actual_len, tok_types, tok_starts, tok_lens, tok_values);
+    print("Token count:");
+    print_i32(tok_count);
+
+    // Print tokens
+    for i: i32 in range(0, tok_count) {
+        let tt: i32 = ptr_read_i32(tok_types, i);
+        let ts: i32 = ptr_read_i32(tok_starts, i);
+        let tl: i32 = ptr_read_i32(tok_lens, i);
+        let tv: i32 = ptr_read_i32(tok_values, i);
+
+        if tt == 0 { print("  EOF"); }
+        if tt == 1 { print("  IDENT"); }
+        if tt == 2 {
+            print("  NUMBER =");
+            print_i32(tv);
+        }
+        if tt == 3 { print("  KW_LET"); }
+        if tt == 4 { print("  KW_I32"); }
+        if tt == 5 { print("  EQUALS"); }
+        if tt == 6 { print("  SEMICOLON"); }
+        if tt == 7 { print("  COLON"); }
+        if tt == 8 { print("  KW_RETURN"); }
+    }
+
+    // Allocate AST arrays (max 16 nodes)
+    let max_nodes: i32 = 16;
+    let ast_types: ptr[i32] = heap_alloc(max_nodes, 4);
+    let ast_data: ptr[i32] = heap_alloc(max_nodes * 4, 4);
+
+    // --- Parser phase ---
+    print("--- Parser ---");
+    let ast_count: i32 = parse_program(tok_types, tok_starts, tok_lens, tok_values,
+                                        tok_count, ast_types, ast_data);
+    print("AST node count:");
+    print_i32(ast_count);
+
+    // Print AST nodes
+    for i: i32 in range(0, ast_count) {
+        let node_type: i32 = ptr_read_i32(ast_types, i);
+        if node_type == 1 {
+            let name_start: i32 = ptr_read_i32(ast_data, i * 4);
+            let name_len: i32 = ptr_read_i32(ast_data, i * 4 + 1);
+            let type_id: i32 = ptr_read_i32(ast_data, i * 4 + 2);
+            let value: i32 = ptr_read_i32(ast_data, i * 4 + 3);
+            print("  LET_STMT:");
+            print("    name starts at char:");
+            print_i32(name_start);
+            print("    name length:");
+            print_i32(name_len);
+            print("    type_id (32=i32):");
+            print_i32(type_id);
+            print("    value:");
+            print_i32(value);
+        }
+        if node_type == 2 {
+            let ident_start: i32 = ptr_read_i32(ast_data, i * 4);
+            let ident_len: i32 = ptr_read_i32(ast_data, i * 4 + 1);
+            print("  RETURN_STMT:");
+            print("    ident starts at char:");
+            print_i32(ident_start);
+            print("    ident length:");
+            print_i32(ident_len);
+        }
+    }
+
+    // Verify: we expect 2 AST nodes (1 let + 1 return)
+    if ast_count == 2 {
+        print("PASS: Parsed 2 statements (let + return) successfully!");
+    } else {
+        print("FAIL: Expected 2 AST nodes");
+    }
+
+    // Verify the let statement parsed value=42
+    if ast_count >= 1 {
+        let let_value: i32 = ptr_read_i32(ast_data, 3);
+        if let_value == 42 {
+            print("PASS: let value = 42");
+        } else {
+            print("FAIL: let value mismatch");
+            print_i32(let_value);
+        }
+    }
+
+    // --- Cleanup ---
+    heap_free(ast_data);
+    heap_free(ast_types);
+    heap_free(tok_values);
+    heap_free(tok_lens);
+    heap_free(tok_starts);
+    heap_free(tok_types);
+    heap_free(src);
+
+    print("=== Self-hosted parser complete ===");
+    return 0;
+}

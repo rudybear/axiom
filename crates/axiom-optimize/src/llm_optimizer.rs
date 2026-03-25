@@ -1022,6 +1022,227 @@ fn truncate_ir(ir: &str, max_lines: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Source-to-source rewrite prompt (S3)
+// ---------------------------------------------------------------------------
+
+/// Build a source-to-source rewrite prompt for the `axiom rewrite` command.
+///
+/// Unlike the optimization prompt (which focuses on `?param` tuning), the
+/// rewrite prompt asks the LLM for **code-level** improvements: extracting
+/// `@pure` functions, using `heap_alloc_zeroed`, adding `@inline(always)` to
+/// hot helpers, restructuring loops for vectorization, etc.
+pub fn build_rewrite_prompt(source: &str) -> String {
+    let mut p = String::with_capacity(4096);
+
+    p.push_str("# AXIOM Source-to-Source Rewrite Request\n\n");
+
+    p.push_str("You are an expert AXIOM performance engineer. Analyze the following AXIOM ");
+    p.push_str("source code and suggest **code-level improvements** (not parameter tuning). ");
+    p.push_str("Your goal is to produce a rewritten, optimized version of the source.\n\n");
+
+    // Optimization Knowledge Base
+    p.push_str("## Optimization Knowledge Base\n\n");
+    p.push_str("Apply these rules when rewriting:\n\n");
+    p.push_str("1. **Extract `@pure` functions**: Any function that only reads/writes through its parameters\n");
+    p.push_str("   and has no side effects should be marked `@pure`. This enables LLVM `readnone`/`readonly`.\n\n");
+    p.push_str("2. **Use `heap_alloc_zeroed` for large arrays**: When allocating arrays that need zero-\n");
+    p.push_str("   initialization, prefer `heap_alloc_zeroed` over `heap_alloc` + manual zeroing loop.\n\n");
+    p.push_str("3. **`@inline(always)` on hot helpers**: Small functions called in tight loops should be\n");
+    p.push_str("   marked `@inline(always)` to avoid call overhead.\n\n");
+    p.push_str("4. **SOA over AOS**: Prefer Struct-of-Arrays layout for cache-friendly iteration.\n");
+    p.push_str("   Separate component arrays iterate faster than interleaved struct arrays.\n\n");
+    p.push_str("5. **Arena allocation**: Use `arena_create`/`arena_alloc` for groups of related allocations\n");
+    p.push_str("   to reduce per-allocation overhead and improve locality.\n\n");
+    p.push_str("6. **Loop strength reduction**: Replace `x * constant` with accumulating additions\n");
+    p.push_str("   when the constant is a power of 2 or simple.\n\n");
+    p.push_str("7. **Minimize pointer reads in loops**: Hoist `ptr_read_*` calls out of inner loops\n");
+    p.push_str("   when the value doesn't change between iterations.\n\n");
+
+    // Include constraints if present
+    let constraints = extract_constraints_from_source(source);
+    if !constraints.is_empty() {
+        p.push_str("## Source Constraints\n\n");
+        for c in &constraints {
+            p.push_str(&format!("- {}: \"{}\"\n", c.key, c.value));
+        }
+        p.push('\n');
+    }
+
+    // Source code
+    p.push_str("## Source Code\n\n```axiom\n");
+    p.push_str(source);
+    if !source.ends_with('\n') {
+        p.push('\n');
+    }
+    p.push_str("```\n\n");
+
+    // Task instructions
+    p.push_str("## Task\n\n");
+    p.push_str("Rewrite the source code above applying the optimization rules. Focus on:\n\n");
+    p.push_str("1. Adding `@pure` annotations to all qualifying functions\n");
+    p.push_str("2. Adding `@inline(always)` to small hot helpers\n");
+    p.push_str("3. Replacing `heap_alloc` + zero loops with `heap_alloc_zeroed`\n");
+    p.push_str("4. Hoisting invariant `ptr_read_*` calls out of inner loops\n");
+    p.push_str("5. Any other code-level improvements from the knowledge base\n\n");
+
+    // Response format
+    p.push_str("## Required Response Format\n\n");
+    p.push_str("Respond with EXACTLY ONE JSON block:\n\n");
+    p.push_str("```json\n");
+    p.push_str("{\n");
+    p.push_str("  \"rewritten_source\": \"... the full rewritten AXIOM source ...\",\n");
+    p.push_str("  \"changes\": [\n");
+    p.push_str("    { \"description\": \"Added @pure to function X\", \"line\": 10 },\n");
+    p.push_str("    { \"description\": \"Replaced heap_alloc + loop with heap_alloc_zeroed\", \"line\": 25 }\n");
+    p.push_str("  ],\n");
+    p.push_str("  \"reasoning\": \"Explain the performance impact of each change.\",\n");
+    p.push_str("  \"confidence\": 0.8\n");
+    p.push_str("}\n");
+    p.push_str("```\n");
+
+    p
+}
+
+/// A rewrite suggestion from the LLM.
+#[derive(Debug, Clone)]
+pub struct RewriteSuggestion {
+    /// The rewritten AXIOM source code.
+    pub rewritten_source: String,
+    /// List of changes made.
+    pub changes: Vec<CodeChange>,
+    /// Reasoning for the changes.
+    pub reasoning: String,
+    /// Confidence score.
+    pub confidence: f64,
+}
+
+/// Parse the LLM's response for a rewrite request.
+pub fn parse_rewrite_response(response: &str) -> Result<RewriteSuggestion, String> {
+    let json_str = extract_json_block(response)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&json_str).map_err(|e| format!("invalid JSON: {e}"))?;
+
+    let rewritten_source = value
+        .get("rewritten_source")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing \"rewritten_source\" field".to_string())?
+        .to_string();
+
+    let reasoning = value
+        .get("reasoning")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no reasoning provided)")
+        .to_string();
+
+    let changes = match value.get("changes") {
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|item| {
+                let desc = item.get("description")?.as_str()?.to_string();
+                let line = item.get("line").and_then(|v| v.as_u64()).map(|v| v as usize);
+                Some(CodeChange {
+                    description: desc,
+                    line,
+                })
+            })
+            .collect(),
+        _ => vec![],
+    };
+
+    let confidence = value
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+
+    Ok(RewriteSuggestion {
+        rewritten_source,
+        changes,
+        reasoning,
+        confidence,
+    })
+}
+
+/// Run the source-to-source rewrite pipeline.
+///
+/// In dry-run mode, prints the prompt. Otherwise, calls the LLM and returns
+/// the rewrite suggestion.
+pub fn run_rewrite(
+    source: &str,
+    api_key: Option<&str>,
+    dry_run: bool,
+) -> LlmResult {
+    let prompt = build_rewrite_prompt(source);
+
+    if dry_run {
+        let prompt_path = write_prompt_to_temp(&prompt, 0);
+        return LlmResult::DryRun {
+            prompt_path,
+            prompt,
+        };
+    }
+
+    // Try API key
+    if let Some(key) = api_key {
+        match call_claude_api(&prompt, key) {
+            Ok(response) => {
+                // For rewrite, we still return the raw suggestion as an LlmSuggestion
+                // with the rewritten source in the reasoning field for simplicity.
+                match parse_rewrite_response(&response) {
+                    Ok(rewrite) => {
+                        let suggestion = LlmSuggestion {
+                            param_values: std::collections::HashMap::new(),
+                            reasoning: rewrite.rewritten_source,
+                            code_changes: rewrite.changes,
+                            confidence: rewrite.confidence,
+                        };
+                        return LlmResult::Suggestion(suggestion);
+                    }
+                    Err(e) => {
+                        return LlmResult::Error(format!(
+                            "failed to parse rewrite response: {e}\n\nRaw response:\n{response}"
+                        ));
+                    }
+                }
+            }
+            Err(e) => return LlmResult::Error(format!("API call failed: {e}")),
+        }
+    }
+
+    // Try claude CLI
+    if is_claude_cli_available() {
+        match call_claude_cli(&prompt) {
+            Ok(response) => {
+                match parse_rewrite_response(&response) {
+                    Ok(rewrite) => {
+                        let suggestion = LlmSuggestion {
+                            param_values: std::collections::HashMap::new(),
+                            reasoning: rewrite.rewritten_source,
+                            code_changes: rewrite.changes,
+                            confidence: rewrite.confidence,
+                        };
+                        return LlmResult::Suggestion(suggestion);
+                    }
+                    Err(e) => {
+                        return LlmResult::Error(format!(
+                            "failed to parse claude CLI rewrite response: {e}\n\nRaw response:\n{response}"
+                        ));
+                    }
+                }
+            }
+            Err(e) => return LlmResult::Error(format!("claude CLI failed: {e}")),
+        }
+    }
+
+    // Fallback: dry-run
+    let prompt_path = write_prompt_to_temp(&prompt, 0);
+    LlmResult::DryRun {
+        prompt_path,
+        prompt,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1516,5 +1737,63 @@ fn small_func() -> i32 { return 0; }
         }];
         let prompt = build_optimization_prompt(&ctx);
         assert!(prompt.contains("minimize worst-case paths and avoid allocations"));
+    }
+
+    // -----------------------------------------------------------------------
+    // S3: Rewrite prompt tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_rewrite_prompt_contains_key_sections() {
+        let source = r#"fn add(a: i32, b: i32) -> i32 { return a + b; }"#;
+        let prompt = build_rewrite_prompt(source);
+
+        assert!(prompt.contains("AXIOM Source-to-Source Rewrite Request"));
+        assert!(prompt.contains("## Optimization Knowledge Base"));
+        assert!(prompt.contains("@pure"));
+        assert!(prompt.contains("heap_alloc_zeroed"));
+        assert!(prompt.contains("@inline(always)"));
+        assert!(prompt.contains("## Source Code"));
+        assert!(prompt.contains("fn add"));
+        assert!(prompt.contains("## Task"));
+        assert!(prompt.contains("## Required Response Format"));
+        assert!(prompt.contains("rewritten_source"));
+    }
+
+    #[test]
+    fn test_build_rewrite_prompt_includes_constraints() {
+        let source = r#"@constraint { optimize_for: "performance" }
+fn fast() -> i32 { return 0; }"#;
+        let prompt = build_rewrite_prompt(source);
+        assert!(prompt.contains("## Source Constraints"));
+        assert!(prompt.contains("optimize_for"));
+        assert!(prompt.contains("performance"));
+    }
+
+    #[test]
+    fn test_parse_rewrite_response_valid() {
+        let response = r#"```json
+{
+  "rewritten_source": "@pure\nfn add(a: i32, b: i32) -> i32 { return a + b; }",
+  "changes": [
+    { "description": "Added @pure annotation", "line": 1 }
+  ],
+  "reasoning": "The function has no side effects.",
+  "confidence": 0.95
+}
+```"#;
+        let result = parse_rewrite_response(response).expect("should parse");
+        assert!(result.rewritten_source.contains("@pure"));
+        assert_eq!(result.changes.len(), 1);
+        assert!(result.reasoning.contains("no side effects"));
+        assert!((result.confidence - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_rewrite_response_missing_source() {
+        let response = r#"{ "reasoning": "no source" }"#;
+        let result = parse_rewrite_response(response);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("rewritten_source"));
     }
 }

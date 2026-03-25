@@ -1080,12 +1080,26 @@ static LRESULT CALLBACK axiom_wnd_proc(HWND hwnd, UINT msg,
         }
         return 0;
     case WM_KEYDOWN:
+        axiom_key_state[wParam & 0xFF] = 1;
         if (wParam == VK_ESCAPE) {
             if (axiom_renderer_global) {
                 axiom_renderer_global->should_close = 1;
             }
         }
         return 0;
+    case WM_KEYUP:
+        axiom_key_state[wParam & 0xFF] = 0;
+        return 0;
+    case WM_MOUSEMOVE:
+        axiom_mouse_x = (int)(short)LOWORD(lParam);
+        axiom_mouse_y = (int)(short)HIWORD(lParam);
+        return 0;
+    case WM_LBUTTONDOWN: axiom_mouse_buttons[0] = 1; return 0;
+    case WM_LBUTTONUP:   axiom_mouse_buttons[0] = 0; return 0;
+    case WM_RBUTTONDOWN: axiom_mouse_buttons[1] = 1; return 0;
+    case WM_RBUTTONUP:   axiom_mouse_buttons[1] = 0; return 0;
+    case WM_MBUTTONDOWN: axiom_mouse_buttons[2] = 1; return 0;
+    case WM_MBUTTONUP:   axiom_mouse_buttons[2] = 0; return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -1798,6 +1812,74 @@ void axiom_string_print(long long s) {
     fwrite(axiom_string_table[idx], 1, (size_t)len, stdout);
     fputc('\n', stdout);
 }
+
+/* ── Input System ────────────────────────────────────────────────── */
+/*
+ * Tracks keyboard and mouse state. Updated by the Win32 WndProc
+ * (or headless stubs on other platforms).
+ *
+ * API:
+ *   axiom_is_key_down(key_code)   -> i32 (1 = pressed, 0 = released)
+ *   axiom_get_mouse_x()           -> i32 (cursor x in client coordinates)
+ *   axiom_get_mouse_y()           -> i32 (cursor y in client coordinates)
+ *   axiom_is_mouse_down(button)   -> i32 (0=left, 1=right, 2=middle)
+ */
+
+static int axiom_key_state[256] = {0};  /* 1 = pressed, 0 = released */
+static int axiom_mouse_x = 0;
+static int axiom_mouse_y = 0;
+static int axiom_mouse_buttons[3] = {0}; /* left, right, middle */
+
+int axiom_is_key_down(int key_code) {
+    return axiom_key_state[key_code & 0xFF];
+}
+
+int axiom_get_mouse_x(void) {
+    return axiom_mouse_x;
+}
+
+int axiom_get_mouse_y(void) {
+    return axiom_mouse_y;
+}
+
+int axiom_is_mouse_down(int button) {
+    if (button < 0 || button > 2) return 0;
+    return axiom_mouse_buttons[button];
+}
+
+/* ── Audio (Minimal) ─────────────────────────────────────────────── */
+/*
+ * Minimal audio builtins using platform-specific APIs.
+ *
+ * API:
+ *   axiom_play_beep(freq, duration_ms)   -> void (Windows Beep)
+ *   axiom_play_sound(path)               -> void (Windows PlaySound)
+ */
+
+#if defined(_WIN32)
+/* windows.h already included above */
+#pragma comment(lib, "winmm.lib")
+
+void axiom_play_beep(int freq, int duration_ms) {
+    Beep((DWORD)freq, (DWORD)duration_ms);
+}
+
+void axiom_play_sound(const char *path) {
+    if (!path) return;
+    PlaySoundA(path, NULL, SND_FILENAME | SND_ASYNC);
+}
+#else
+/* POSIX stub — no audio support yet */
+void axiom_play_beep(int freq, int duration_ms) {
+    (void)freq; (void)duration_ms;
+    /* printf("[AXIOM Audio] beep(%d, %d) — not supported on this platform\n", freq, duration_ms); */
+}
+
+void axiom_play_sound(const char *path) {
+    (void)path;
+    /* printf("[AXIOM Audio] play_sound — not supported on this platform\n"); */
+}
+#endif
 
 /* ── CPUID Feature Detection ─────────────────────────────────────── */
 /*

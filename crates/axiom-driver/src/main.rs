@@ -1,9 +1,12 @@
 //! AXIOM compiler CLI driver.
 
 mod compile;
+mod lsp;
 mod mcp;
 
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "axiom", about = "AXIOM — AI eXchange Intermediate Optimization Medium")]
@@ -97,6 +100,243 @@ enum Commands {
         /// Input .axm file
         input: String,
     },
+
+    /// Generate documentation from AXIOM source
+    Doc {
+        /// Input .axm file
+        input: String,
+    },
+
+    /// Start a minimal LSP server over stdio (E4)
+    Lsp {},
+
+    /// Profile-Guided Optimization: instrument, train, recompile (L4)
+    Pgo {
+        /// Input .axm file
+        input: String,
+
+        /// Output file path
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Arguments to pass to the training run
+        #[arg(long, num_args = 0..)]
+        training_args: Vec<String>,
+    },
+
+    /// Watch a file for changes and recompile on save (G4)
+    Watch {
+        /// Input .axm file to watch
+        input: String,
+
+        /// Output file path
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
+    /// Build project from axiom.toml manifest (E5)
+    Build {
+        /// Path to axiom.toml (defaults to ./axiom.toml)
+        #[arg(long)]
+        manifest: Option<String>,
+    },
+
+    /// AI-driven source-to-source rewrite (S3)
+    Rewrite {
+        /// Input .axm file
+        input: String,
+
+        /// Just print the LLM prompt without calling the API
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Anthropic API key (or set ANTHROPIC_API_KEY env var)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Write rewritten source to this output file
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+}
+
+/// Process `@include "path.axm"` directives in source code.
+///
+/// Scans the source for lines matching `@include "path"` and replaces them
+/// with the contents of the referenced file. Supports recursive includes up
+/// to a depth of 10. Paths are resolved relative to `base_dir`.
+fn process_includes(source: &str, base_dir: &Path, depth: usize, visited: &mut HashSet<String>) -> miette::Result<String> {
+    if depth > 10 {
+        return Err(miette::miette!("@include depth exceeds 10 — possible circular include"));
+    }
+
+    let mut output = String::with_capacity(source.len());
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("@include") {
+            let rest = rest.trim();
+            // Extract the path from quotes
+            if let Some(path_str) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+                let include_path = base_dir.join(path_str);
+                let canonical = include_path.display().to_string();
+                if visited.contains(&canonical) {
+                    // Already included — skip to avoid infinite recursion
+                    output.push_str(&format!("// [already included: {path_str}]\n"));
+                    continue;
+                }
+                visited.insert(canonical.clone());
+                let included_source = std::fs::read_to_string(&include_path)
+                    .map_err(|e| miette::miette!("@include failed for \"{}\": {}", include_path.display(), e))?;
+                let included_dir = include_path.parent().unwrap_or(base_dir);
+                let processed = process_includes(&included_source, included_dir, depth + 1, visited)?;
+                output.push_str(&processed);
+                output.push('\n');
+            } else {
+                // Not a valid include — pass through as-is
+                output.push_str(line);
+                output.push('\n');
+            }
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    Ok(output)
+}
+
+/// Read a source file and process `@include` directives.
+fn read_source_with_includes(input: &str) -> miette::Result<String> {
+    let source = std::fs::read_to_string(input)
+        .map_err(|e| miette::miette!("Failed to read {}: {}", input, e))?;
+    let base_dir = Path::new(input).parent().unwrap_or(Path::new("."));
+    let mut visited = HashSet::new();
+    visited.insert(
+        std::fs::canonicalize(input)
+            .unwrap_or_else(|_| Path::new(input).to_path_buf())
+            .display()
+            .to_string(),
+    );
+    process_includes(&source, base_dir, 0, &mut visited)
+}
+
+/// Generate markdown documentation from an AXIOM source file.
+///
+/// Parses the source, extracts `@intent` and `@module` annotations, lists all
+/// function signatures, and prints a markdown document to stdout.
+fn run_doc(input: &str) -> miette::Result<()> {
+    let source = read_source_with_includes(input)?;
+
+    let result = axiom_parser::parse(&source);
+    if result.has_errors() {
+        eprintln!("--- Parse Errors ---");
+        for err in &result.errors {
+            eprintln!("  {err}");
+        }
+        return Err(miette::miette!("parsing failed with {} error(s)", result.errors.len()));
+    }
+
+    let module = &result.module;
+
+    // Header
+    let module_name = module.name.as_ref().map(|s| s.node.as_str()).unwrap_or("(unnamed)");
+    println!("# Module: {module_name}");
+    println!();
+
+    // Module-level annotations
+    let mut has_module_annotations = false;
+    for ann in &module.annotations {
+        match &ann.node {
+            axiom_parser::ast::Annotation::Intent(text) => {
+                if !has_module_annotations {
+                    println!("## Module Annotations");
+                    println!();
+                    has_module_annotations = true;
+                }
+                println!("- **Intent**: {text}");
+            }
+            axiom_parser::ast::Annotation::Module(name) => {
+                if !has_module_annotations {
+                    println!("## Module Annotations");
+                    println!();
+                    has_module_annotations = true;
+                }
+                println!("- **Module**: {name}");
+            }
+            _ => {}
+        }
+    }
+    if has_module_annotations {
+        println!();
+    }
+
+    // Functions
+    println!("## Functions");
+    println!();
+
+    for item in &module.items {
+        match &item.node {
+            axiom_parser::ast::Item::Function(f) => {
+                let name = &f.name.node;
+                let params: Vec<String> = f.params.iter().map(|p| {
+                    format!("{}: {:?}", p.name.node, p.ty)
+                }).collect();
+                let ret = format!("{:?}", f.return_type);
+                println!("### `fn {name}({})`", params.join(", "));
+                println!();
+                println!("- **Returns**: `{ret}`");
+
+                // Extract annotations
+                for ann in &f.annotations {
+                    match &ann.node {
+                        axiom_parser::ast::Annotation::Intent(text) => {
+                            println!("- **Intent**: {text}");
+                        }
+                        axiom_parser::ast::Annotation::Pure => {
+                            println!("- **Pure**: yes");
+                        }
+                        axiom_parser::ast::Annotation::Const => {
+                            println!("- **Const**: yes (compile-time evaluable)");
+                        }
+                        axiom_parser::ast::Annotation::Complexity(c) => {
+                            println!("- **Complexity**: {c}");
+                        }
+                        axiom_parser::ast::Annotation::Export => {
+                            println!("- **Exported**: yes");
+                        }
+                        axiom_parser::ast::Annotation::Inline(hint) => {
+                            println!("- **Inline**: {hint:?}");
+                        }
+                        _ => {}
+                    }
+                }
+                println!();
+            }
+            axiom_parser::ast::Item::ExternFunction(f) => {
+                let name = &f.name.node;
+                let params: Vec<String> = f.params.iter().map(|p| {
+                    format!("{}: {:?}", p.name.node, p.ty)
+                }).collect();
+                let ret = format!("{:?}", f.return_type);
+                println!("### `extern fn {name}({})`", params.join(", "));
+                println!();
+                println!("- **Returns**: `{ret}`");
+                println!("- **External**: yes");
+                println!();
+            }
+            axiom_parser::ast::Item::Struct(s) => {
+                let name = &s.name.node;
+                println!("### `struct {name}`");
+                println!();
+                for field in &s.fields {
+                    println!("- `{}`: `{:?}`", field.name.node, field.ty);
+                }
+                println!();
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 fn main() -> miette::Result<()> {
@@ -199,8 +439,7 @@ fn main() -> miette::Result<()> {
         }
 
         Commands::Compile { input, output, emit, target } => {
-            let source = std::fs::read_to_string(&input)
-                .map_err(|e| miette::miette!("Failed to read {}: {}", input, e))?;
+            let source = read_source_with_includes(&input)?;
 
             match emit.as_deref() {
                 Some("tokens") => {
@@ -327,7 +566,346 @@ fn main() -> miette::Result<()> {
 
             Ok(())
         }
+
+        Commands::Doc { input } => run_doc(&input),
+
+        // E4: LSP Server
+        Commands::Lsp {} => {
+            lsp::run_lsp_server()
+                .map_err(|e| miette::miette!("LSP server error: {e}"))?;
+            Ok(())
+        }
+
+        // L4: PGO Bootstrap
+        Commands::Pgo { input, output, training_args } => {
+            let source = read_source_with_includes(&input)?;
+            let result = axiom_parser::parse(&source);
+            if result.has_errors() {
+                for err in &result.errors {
+                    eprintln!("  {err}");
+                }
+                return Err(miette::miette!("parsing failed with {} error(s)", result.errors.len()));
+            }
+            let hir_module = axiom_hir::lower(&result.module).map_err(|errors| {
+                for err in &errors { eprintln!("  {err}"); }
+                miette::miette!("HIR lowering failed with {} error(s)", errors.len())
+            })?;
+            let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| {
+                for err in &errors { eprintln!("  {err}"); }
+                miette::miette!("codegen failed with {} error(s)", errors.len())
+            })?;
+
+            let output_path = output.unwrap_or_else(|| {
+                if cfg!(windows) { "a.exe".into() } else { "a.out".into() }
+            });
+
+            let message = compile::compile_with_pgo(&llvm_ir, &output_path, &training_args)?;
+            eprintln!("{message}");
+            Ok(())
+        }
+
+        // G4: Watch (Hot Reload concept)
+        Commands::Watch { input, output } => {
+            run_watch(&input, output.as_deref())
+        }
+
+        // E5: Build from axiom.toml
+        Commands::Build { manifest } => {
+            let manifest_path = manifest.unwrap_or_else(|| "axiom.toml".to_string());
+            run_build(&manifest_path)
+        }
+
+        // S3: Source-to-Source AI Rewrite
+        Commands::Rewrite { input, dry_run, api_key, output } => {
+            run_rewrite(&input, dry_run, api_key.as_deref(), output.as_deref())
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// G4: Watch — poll file mtime and recompile on change
+// ---------------------------------------------------------------------------
+
+fn run_watch(input: &str, output: Option<&str>) -> miette::Result<()> {
+    use std::time::{Duration, SystemTime};
+
+    let output_path = output.map(|s| s.to_string()).unwrap_or_else(|| {
+        if cfg!(windows) { "a.exe".into() } else { "a.out".into() }
+    });
+
+    eprintln!("[AXIOM Watch] Watching {} -> {}", input, output_path);
+    eprintln!("[AXIOM Watch] Press Ctrl+C to stop\n");
+
+    let mut last_mtime: Option<SystemTime> = None;
+
+    loop {
+        // Check file modification time
+        let metadata = match std::fs::metadata(input) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[AXIOM Watch] Error reading {}: {}", input, e);
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        };
+
+        let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+        let changed = match last_mtime {
+            Some(prev) => mtime != prev,
+            None => true, // First iteration — always compile
+        };
+
+        if changed {
+            last_mtime = Some(mtime);
+            let start = std::time::Instant::now();
+
+            // Attempt compilation
+            match try_compile(input, &output_path) {
+                Ok(()) => {
+                    let elapsed = start.elapsed();
+                    eprintln!(
+                        "[AXIOM Watch] Compiled OK in {:.3}ms -> {}",
+                        elapsed.as_secs_f64() * 1000.0,
+                        output_path
+                    );
+                }
+                Err(e) => {
+                    let elapsed = start.elapsed();
+                    eprintln!(
+                        "[AXIOM Watch] Error after {:.3}ms: {}",
+                        elapsed.as_secs_f64() * 1000.0,
+                        e
+                    );
+                }
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Try to compile a single .axm file to a binary. Returns Ok on success.
+fn try_compile(input: &str, output_path: &str) -> miette::Result<()> {
+    let source = read_source_with_includes(input)?;
+    let result = axiom_parser::parse(&source);
+    if result.has_errors() {
+        let msgs: Vec<String> = result.errors.iter().map(|e| format!("{e}")).collect();
+        return Err(miette::miette!("parse errors:\n  {}", msgs.join("\n  ")));
+    }
+    let hir_module = axiom_hir::lower(&result.module).map_err(|errors| {
+        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+        miette::miette!("HIR errors:\n  {}", msgs.join("\n  "))
+    })?;
+    let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| {
+        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+        miette::miette!("codegen errors:\n  {}", msgs.join("\n  "))
+    })?;
+
+    let constraints = axiom_optimize::llm_optimizer::extract_constraints_from_source(&source);
+    let optimize_for = constraints.iter()
+        .find(|c| c.key == "optimize_for")
+        .map(|c| c.value.clone());
+    let compile_opts = compile::CompileOptions {
+        target_arch: None,
+        optimize_for,
+        ir_text: Some(llvm_ir.clone()),
+    };
+
+    compile::compile_to_binary_with_options(&llvm_ir, output_path, &compile_opts)
+}
+
+// ---------------------------------------------------------------------------
+// E5: Package Manager — build from axiom.toml manifest
+// ---------------------------------------------------------------------------
+
+/// Minimal axiom.toml manifest format.
+#[derive(Debug)]
+struct AxiomManifest {
+    package: PackageInfo,
+    dependencies: std::collections::HashMap<String, DependencySpec>,
+}
+
+#[derive(Debug)]
+struct PackageInfo {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug)]
+struct DependencySpec {
+    path: String,
+}
+
+fn run_build(manifest_path: &str) -> miette::Result<()> {
+    let manifest_str = std::fs::read_to_string(manifest_path)
+        .map_err(|e| miette::miette!("Failed to read {}: {}", manifest_path, e))?;
+
+    // Parse as TOML manually (minimal — we don't want to add a toml crate dep)
+    let manifest = parse_axiom_toml(&manifest_str)?;
+
+    eprintln!("[AXIOM Build] Building package: {} v{}", manifest.package.name, manifest.package.version);
+
+    let manifest_dir = Path::new(manifest_path).parent().unwrap_or(Path::new("."));
+
+    // Collect dependency sources
+    let mut combined_source = String::new();
+
+    for (dep_name, dep_spec) in &manifest.dependencies {
+        let dep_dir = manifest_dir.join(&dep_spec.path);
+        eprintln!("[AXIOM Build] Including dependency: {dep_name} ({})", dep_dir.display());
+
+        // Find all .axm files in the dependency directory
+        let axm_files = find_axm_files(&dep_dir);
+        if axm_files.is_empty() {
+            eprintln!("[AXIOM Build] Warning: no .axm files found in {}", dep_dir.display());
+        }
+        for file in &axm_files {
+            let source = std::fs::read_to_string(file)
+                .map_err(|e| miette::miette!("Failed to read {}: {}", file.display(), e))?;
+            combined_source.push_str(&format!("// --- dependency: {} ({}) ---\n", dep_name, file.display()));
+            combined_source.push_str(&source);
+            combined_source.push('\n');
+        }
+    }
+
+    // Find the main source file: look for main.axm or src/main.axm
+    let main_candidates = [
+        manifest_dir.join("main.axm"),
+        manifest_dir.join("src").join("main.axm"),
+    ];
+    let main_file = main_candidates.iter().find(|p| p.exists());
+
+    match main_file {
+        Some(main_path) => {
+            let main_source = read_source_with_includes(&main_path.display().to_string())?;
+            combined_source.push_str(&format!("// --- main: {} ---\n", main_path.display()));
+            combined_source.push_str(&main_source);
+
+            // Compile
+            let output_path = if cfg!(windows) {
+                format!("{}.exe", manifest.package.name)
+            } else {
+                manifest.package.name.clone()
+            };
+
+            let result = axiom_parser::parse(&combined_source);
+            if result.has_errors() {
+                for err in &result.errors {
+                    eprintln!("  {err}");
+                }
+                return Err(miette::miette!("parsing failed with {} error(s)", result.errors.len()));
+            }
+            let hir_module = axiom_hir::lower(&result.module).map_err(|errors| {
+                for err in &errors { eprintln!("  {err}"); }
+                miette::miette!("HIR lowering failed with {} error(s)", errors.len())
+            })?;
+            let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| {
+                for err in &errors { eprintln!("  {err}"); }
+                miette::miette!("codegen failed with {} error(s)", errors.len())
+            })?;
+
+            compile::compile_to_binary(&llvm_ir, &output_path)?;
+            eprintln!("[AXIOM Build] Built {} -> {}", manifest.package.name, output_path);
+            Ok(())
+        }
+        None => {
+            eprintln!("[AXIOM Build] No main.axm found (checked main.axm and src/main.axm)");
+            if combined_source.is_empty() {
+                return Err(miette::miette!("No source files to build"));
+            }
+            eprintln!("[AXIOM Build] Dependencies collected ({} bytes of source)", combined_source.len());
+            Ok(())
+        }
+    }
+}
+
+/// Minimal TOML parser for axiom.toml. Uses serde_json as intermediate.
+/// This avoids adding a toml dependency.
+fn parse_axiom_toml(input: &str) -> miette::Result<AxiomManifest> {
+    let mut package_name = String::new();
+    let mut package_version = String::new();
+    let mut deps: std::collections::HashMap<String, DependencySpec> = std::collections::HashMap::new();
+
+    let mut current_section = String::new();
+
+    for line in input.lines() {
+        let trimmed = line.trim();
+
+        // Skip comments and empty lines
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Section header
+        if trimmed.starts_with('[') {
+            current_section = trimmed
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .to_string();
+            continue;
+        }
+
+        // Key = value
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            let unquoted = value.trim_matches('"');
+
+            match current_section.as_str() {
+                "package" => {
+                    match key {
+                        "name" => package_name = unquoted.to_string(),
+                        "version" => package_version = unquoted.to_string(),
+                        _ => {}
+                    }
+                }
+                "dependencies" => {
+                    // Parse: dep_name = { path = "..." }
+                    if let Some(path_start) = value.find("path") {
+                        let rest = &value[path_start..];
+                        if let Some(eq_pos) = rest.find('=') {
+                            let path_val = rest[eq_pos + 1..]
+                                .trim()
+                                .trim_matches(|c: char| c == '"' || c == '\'' || c == '{' || c == '}' || c == ' ');
+                            deps.insert(key.to_string(), DependencySpec {
+                                path: path_val.to_string(),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if package_name.is_empty() {
+        return Err(miette::miette!("axiom.toml missing [package] name"));
+    }
+
+    Ok(AxiomManifest {
+        package: PackageInfo {
+            name: package_name,
+            version: if package_version.is_empty() { "0.0.0".to_string() } else { package_version },
+        },
+        dependencies: deps,
+    })
+}
+
+/// Find all .axm files in a directory (non-recursive).
+fn find_axm_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext == "axm") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
 }
 
 /// Profile an AXIOM program: compile, run multiple times, collect timing data,
@@ -862,5 +1440,217 @@ fn get_timestamp() -> String {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => format!("{}s", d.as_secs()),
         Err(_) => "unknown".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// S3: Source-to-Source AI Rewrite
+// ---------------------------------------------------------------------------
+
+fn run_rewrite(input: &str, dry_run: bool, api_key: Option<&str>, output: Option<&str>) -> miette::Result<()> {
+    use axiom_optimize::llm_optimizer::{self, LlmResult};
+
+    // Resolve API key
+    let resolved_api_key: Option<String> = api_key
+        .map(|k| k.to_string())
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+
+    // Read source
+    let source = read_source_with_includes(input)?;
+
+    eprintln!("=== AXIOM Source-to-Source Rewrite ===\n");
+    eprintln!("Source: {input} ({} bytes)", source.len());
+    eprintln!(
+        "Mode: {}",
+        if dry_run {
+            "dry-run (prompt only)"
+        } else if resolved_api_key.is_some() {
+            "Claude API"
+        } else {
+            "auto-detect (claude CLI or dry-run)"
+        }
+    );
+    eprintln!();
+
+    // Verify source parses correctly
+    let result = axiom_parser::parse(&source);
+    if result.has_errors() {
+        eprintln!("Warning: source has parse errors:");
+        for err in &result.errors {
+            eprintln!("  {err}");
+        }
+        eprintln!();
+    }
+
+    // Extract constraints for reporting
+    let constraints = llm_optimizer::extract_constraints_from_source(&source);
+    if !constraints.is_empty() {
+        eprintln!("Detected constraints:");
+        for c in &constraints {
+            eprintln!("  {}: {}", c.key, c.value);
+        }
+        eprintln!();
+    }
+
+    // Run rewrite
+    let rewrite_result = llm_optimizer::run_rewrite(
+        &source,
+        resolved_api_key.as_deref(),
+        dry_run,
+    );
+
+    match rewrite_result {
+        LlmResult::Suggestion(suggestion) => {
+            eprintln!("Rewrite suggestion (confidence: {:.0}%):\n", suggestion.confidence * 100.0);
+
+            if !suggestion.code_changes.is_empty() {
+                eprintln!("Changes applied:");
+                for change in &suggestion.code_changes {
+                    let line_str = change
+                        .line
+                        .map(|l| format!(" (line {l})"))
+                        .unwrap_or_default();
+                    eprintln!("  - {}{}", change.description, line_str);
+                }
+                eprintln!();
+            }
+
+            // The rewritten source is stored in the reasoning field
+            let rewritten = &suggestion.reasoning;
+
+            match output {
+                Some(out_path) => {
+                    std::fs::write(out_path, rewritten)
+                        .map_err(|e| miette::miette!("Failed to write {}: {}", out_path, e))?;
+                    eprintln!("Rewritten source written to: {out_path}");
+                }
+                None => {
+                    println!("{rewritten}");
+                }
+            }
+        }
+
+        LlmResult::DryRun { prompt_path, prompt } => {
+            eprintln!("[DRY RUN] Prompt written to: {prompt_path}");
+            eprintln!("Prompt length: {} chars\n", prompt.len());
+            println!("{prompt}");
+        }
+
+        LlmResult::Error(err) => {
+            return Err(miette::miette!("Rewrite failed: {err}"));
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests for new features (E5: manifest parsing, G4/L4 helpers)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // E5: axiom.toml manifest parsing
+
+    #[test]
+    fn test_parse_axiom_toml_basic() {
+        let input = r#"
+[package]
+name = "my-game"
+version = "0.1.0"
+
+[dependencies]
+math = { path = "lib/math" }
+"#;
+        let manifest = parse_axiom_toml(input).unwrap();
+        assert_eq!(manifest.package.name, "my-game");
+        assert_eq!(manifest.package.version, "0.1.0");
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies["math"].path, "lib/math");
+    }
+
+    #[test]
+    fn test_parse_axiom_toml_no_deps() {
+        let input = r#"
+[package]
+name = "simple"
+version = "1.0.0"
+"#;
+        let manifest = parse_axiom_toml(input).unwrap();
+        assert_eq!(manifest.package.name, "simple");
+        assert!(manifest.dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_parse_axiom_toml_missing_name() {
+        let input = r#"
+[package]
+version = "1.0.0"
+"#;
+        assert!(parse_axiom_toml(input).is_err());
+    }
+
+    #[test]
+    fn test_parse_axiom_toml_multiple_deps() {
+        let input = r#"
+[package]
+name = "game"
+version = "0.2.0"
+
+[dependencies]
+math = { path = "lib/math" }
+physics = { path = "lib/physics" }
+"#;
+        let manifest = parse_axiom_toml(input).unwrap();
+        assert_eq!(manifest.dependencies.len(), 2);
+        assert_eq!(manifest.dependencies["math"].path, "lib/math");
+        assert_eq!(manifest.dependencies["physics"].path, "lib/physics");
+    }
+
+    #[test]
+    fn test_parse_axiom_toml_comments() {
+        let input = r#"
+# This is a comment
+[package]
+name = "test"
+version = "0.1.0"
+
+# Another comment
+[dependencies]
+# dep comment
+"#;
+        let manifest = parse_axiom_toml(input).unwrap();
+        assert_eq!(manifest.package.name, "test");
+    }
+
+    // G4: Watch helper (try_compile)
+
+    #[test]
+    fn test_try_compile_nonexistent_file() {
+        let result = try_compile("nonexistent_file_12345.axm", "out.exe");
+        assert!(result.is_err());
+    }
+
+    // S3: Rewrite command integration
+
+    #[test]
+    fn test_process_includes_basic() {
+        let source = "let x: i32 = 1;\n";
+        let base_dir = Path::new(".");
+        let mut visited = HashSet::new();
+        let result = process_includes(source, base_dir, 0, &mut visited).unwrap();
+        assert_eq!(result, "let x: i32 = 1;\n");
+    }
+
+    #[test]
+    fn test_process_includes_depth_limit() {
+        // Simulate deep include chain — should error at depth > 10
+        let source = "@include \"nonexistent.axm\"\n";
+        let base_dir = Path::new(".");
+        let mut visited = HashSet::new();
+        let result = process_includes(source, base_dir, 11, &mut visited);
+        assert!(result.is_err());
     }
 }

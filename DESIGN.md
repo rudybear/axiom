@@ -1,10 +1,10 @@
-# AXIOM Language Design Document v0.3
+# AXIOM Language Design Document v0.4
 
 This is the living design document for AXIOM. It summarizes the current
 implementation state, references the formal specification files, and tracks
 design decisions and open questions.
 
-**Project stats:** 120 commits, 30,124 LOC, 450 tests, 197 benchmarks, 20 examples, 24 samples.
+**Project stats:** 138 commits, 35,802 LOC, 469 tests, 197 benchmarks, 27 examples, 24 samples. ALL 47 milestones COMPLETE across 8 tracks.
 
 **FINAL benchmark result:** AXIOM beats C turbo (-O3 -march=native -ffast-math) by 3% overall (0.97x total wall clock) across 20 real-world benchmarks. 2 AXIOM wins (JPEG DCT 56% faster, RLE 16% faster), 9 ties, 9 C wins. Optimization Knowledge Base: 10 rules + 5 anti-patterns, grows with each LLM session.
 
@@ -86,10 +86,11 @@ The `spec/` directory contains the formal language specification:
 - HIR-to-LLVM-IR text generation for the full language subset: functions with
   all primitive types, arithmetic (with `nsw`), if/else, for loops, while loops,
   return, function calls, extern function declarations, `@export` functions.
-- 97 builtin functions covering: I/O, math, conversions, bitwise, heap memory,
+- 113 builtin functions covering: I/O, math, conversions, bitwise, heap memory,
   arena allocation, file I/O, system, coroutines, threading, atomics, mutex,
   job system (with dependency graph), renderer/Vulkan FFI, option, string, vec,
-  function pointers, result/error handling, and CPU feature detection.
+  function pointers, result/error handling, CPU feature detection, input system,
+  audio, and GPU operations (multi-light, instancing, screenshot).
 - `@pure` -> `memory(none)` or `memory(argmem: read)`, `readnone`/`readonly`,
   fast-math flags on float operations.
 - `@const` -> `speculatable` + compile-time evaluation (supports recursive
@@ -131,7 +132,7 @@ The `spec/` directory contains the formal language specification:
 
 ### Driver (`axiom-driver`) -- Complete (57 tests)
 
-- CLI frontend with 7 subcommands:
+- CLI frontend with 12 subcommands:
   - `axiom compile` -- full compilation (.axm -> native binary), with `--emit` for
     intermediate stages (tokens, ast, hir, llvm-ir) and `--target` for CPU arch.
   - `axiom lex` -- debug tokenizer output.
@@ -140,9 +141,15 @@ The `spec/` directory contains the formal language specification:
   - `axiom optimize` -- LLM-driven optimization loop (iterations, dry-run, API key).
   - `axiom profile` -- compile, benchmark, extract surfaces, suggest tuning.
   - `axiom fmt` -- format source (parse -> HIR -> pretty-print).
+  - `axiom doc` -- generate documentation from `@intent` and doc comments.
+  - `axiom pgo` -- profile-guided optimization bootstrap.
+  - `axiom watch` -- watch mode, recompile on file changes.
+  - `axiom build` -- build project with dependency resolution.
+  - `axiom rewrite` -- source-to-source AI rewriter.
+  - `axiom lsp` -- LSP server for editor integration.
 - C runtime (`axiom_rt.c`): I/O, nanosecond clock, coroutines (OS fibers/ucontext),
   threads, atomics, mutexes, thread-pool job system with dependency graph,
-  renderer stub API.
+  Vulkan renderer, input system, audio playback.
 
 ## Core Design Decisions
 
@@ -215,6 +222,8 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 - `axiom optimize program.axm --iterations 5` -- full LLM optimization loop
 - `axiom optimize program.axm --dry-run` -- preview the prompt
 - `axiom profile program.axm` -- compile, benchmark, extract surfaces, suggest tuning
+- `axiom pgo program.axm` -- profile-guided optimization bootstrap
+- `axiom rewrite program.axm` -- source-to-source AI rewriter
 
 ## Feature Inventory
 
@@ -223,21 +232,31 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 | Primitive types | 15 | i8-i128, u8-u128, f16, bf16, f32, f64, bool |
 | Compound types | 8 | array, ptr, readonly_ptr, writeonly_ptr, slice, tensor, tuple, fn |
 | Annotations | 19 | pure, const, inline, complexity, intent, module, constraint, target, strategy, vectorizable, parallel, parallel_for, layout, align, lifetime, export, transfer, optimization_log, custom |
-| Builtin functions | 97 | I/O, math, conversions, bitwise, memory, arena, file, system, coroutines, threads, atomics, mutex, jobs, renderer, option, string, vec, fn_ptr, result, cpu |
-| CLI commands | 7 | compile, lex, bench, mcp, optimize, profile, fmt |
+| Builtin functions | 113 | I/O, math, conversions, bitwise, memory, arena, file, system, coroutines, threads, atomics, mutex, jobs, renderer, option, string, vec, fn_ptr, result, cpu, input, audio, gpu |
+| CLI commands | 12 | compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp |
 | Keywords | 21 | fn, let, mut, return, if, else, for, while, in, struct, type, module, import, pub, unsafe, extern, and, or, not, true, false |
 | Type keywords | 22 | i8-i128 (5), u8-u128 (5), f16, bf16, f32, f64, bool, tensor, array, slice, ptr, readonly_ptr, writeonly_ptr |
 | Operators | 16 | +, -, *, /, %, +%, +\|, -%, -\|, *%, ==, !=, <, >, <=, >= |
+| Milestones | 47/47 | ALL COMPLETE across 8 tracks (MT, LLM, Platform, Language, Ecosystem, Renderer, Engine, Self-Improvement) |
+
+## Resolved Questions
+
+- **Pattern matching**: Option/Result use builtin functions. While-let/if-let codegen complete.
+- **Generics**: Parsed with monomorphization codegen implemented.
+- **Module system**: `import` parsed, lowered, and separate compilation implemented.
+- **Real Vulkan**: Production renderer with ash crate, instancing, multi-light, depth buffer.
+- **ECS**: Archetype-based storage in `lib/ecs.axm`.
+- **Input system**: Keyboard/mouse via Win32/Vulkan surface events.
+- **Audio**: WAV playback via C runtime.
+- **Self-hosting**: AXIOM parser written in AXIOM.
+- **PGO**: Compiler self-optimization via profile-guided bootstrap.
+- **Source-to-source optimization**: `axiom rewrite` -- LLM rewrites AXIOM source.
 
 ## Open Questions
 
-- **Pattern matching**: No `match` statement yet. Option/Result use builtin functions.
 - **Generic dimensions**: Tensor named dimensions (`M`, `N`) have no binding system.
 - **MLIR integration**: MIR layer planned but not implemented.
 - **Unsafe blocks**: `unsafe` keyword reserved but not enforced.
-- **Real Vulkan**: Stub renderer needs replacement with ash-based Rust crate (see `docs/GAME_ENGINE_RESEARCH.md`).
-- **Monomorphization**: Generics parsed but no specialization codegen yet.
-- **Module codegen**: `import` parsed and lowered but separate compilation not implemented.
 
 ## Research Documents
 
@@ -249,4 +268,4 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 | `docs/MULTITHREADING_ANALYSIS.md` | 1,513 | LLVM memory model, safe parallelism, 3 correct designs |
 | `docs/LUX_INTEGRATION_RESEARCH.md` | 1,055 | Lux shader language convergence |
 | `docs/AXIOM_Language_Plan.md` | 400 | Original 5-phase language design |
-| `docs/MASTER_TASK_LIST.md` | 110 | 47-milestone task tracker across 8 tracks |
+| `docs/MASTER_TASK_LIST.md` | 110 | 47-milestone task tracker across 8 tracks (ALL COMPLETE) |
