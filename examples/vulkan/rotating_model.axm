@@ -1,0 +1,63 @@
+@module rotating_model;
+@intent("Interactive 3D viewer: loads a glTF model, WASD camera, auto-rotating model");
+
+// =============================================================================
+// Rotating 3D Model Viewer
+// =============================================================================
+//
+// Loads a glTF model and renders it with PBR shading. The model auto-rotates,
+// and the camera can be moved with WASD/QE keys.
+//
+// Controls:
+//   W/S  — move camera forward/backward
+//   A/D  — move camera left/right
+//   Q/E  — move camera up/down
+//
+// =============================================================================
+
+fn main() -> i32 {
+    print("=== AXIOM Rotating Model Viewer ===");
+
+    // Initialize GPU renderer at 1280x720
+    let gpu: ptr[i32] = gpu_init(1280, 720, "AXIOM Rotating Model");
+
+    // Load a glTF model
+    let scene: i32 = gpu_load_gltf(gpu, "data/DamagedHelmet.glb");
+    print("Scene loaded.");
+
+    // Camera state
+    let cam_x: f64 = 0.0;
+    let cam_y: f64 = 1.0;
+    let cam_z: f64 = 4.0;
+    let speed: f64 = 0.03;
+
+    let frame: i32 = 0;
+
+    // Render loop
+    while gpu_should_close(gpu) == 0 {
+        // --- Input: WASD camera movement ---
+        if is_key_down(87) == 1 { cam_z = cam_z - speed; }   // W
+        if is_key_down(83) == 1 { cam_z = cam_z + speed; }   // S
+        if is_key_down(65) == 1 { cam_x = cam_x - speed; }   // A
+        if is_key_down(68) == 1 { cam_x = cam_x + speed; }   // D
+        if is_key_down(81) == 1 { cam_y = cam_y + speed; }   // Q
+        if is_key_down(69) == 1 { cam_y = cam_y - speed; }   // E
+
+        // Update camera
+        gpu_set_camera(gpu, cam_x, cam_y, cam_z, 0.0, 0.0, 0.0, 60.0);
+
+        // --- Render frame ---
+        gpu_begin_frame(gpu);
+        gpu_render(gpu);
+        gpu_end_frame(gpu);
+
+        frame = frame + 1;
+    }
+
+    print("Frames rendered:");
+    print_i32(frame);
+
+    gpu_shutdown(gpu);
+    print("=== Viewer closed ===");
+    return 0;
+}

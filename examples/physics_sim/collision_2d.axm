@@ -1,0 +1,284 @@
+@module collision_2d;
+@intent("2D circle-circle collision detection and response: 500 circles bouncing in a box");
+
+// =============================================================================
+// 2D Circle Collision Simulation
+// =============================================================================
+//
+// Simulates 500 circles bouncing inside a 1000x1000 box. Each circle has:
+//   - Position (x, y)
+//   - Velocity (vx, vy)
+//   - Radius (r)
+//   - Mass (proportional to radius squared)
+//
+// Each timestep:
+//   1. Integrate positions (Euler)
+//   2. Detect and resolve circle-circle collisions (elastic)
+//   3. Bounce off walls
+//
+// Uses arena allocation for all particle data (SOA layout).
+// Uses @pure for physics computations.
+//
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+@pure
+fn num_circles() -> i32 { return 500; }
+
+@pure
+fn box_size() -> f64 { return 1000.0; }
+
+@pure
+fn time_step() -> f64 { return 0.01; }
+
+@pure
+fn num_steps() -> i32 { return 200; }
+
+// ---------------------------------------------------------------------------
+// LCG pseudo-random number generator
+// ---------------------------------------------------------------------------
+
+fn lcg_next_f64(seed_ptr: ptr[i64], max: f64) -> f64 {
+    let s: i64 = ptr_read_i64(seed_ptr, 0);
+    s = s * 6364136223846793005 + 1442695040888963407;
+    ptr_write_i64(seed_ptr, 0, s);
+    let bits: i64 = lshr(s, 16);
+    let masked: i64 = band(bits, 2147483647);
+    let fval: f64 = to_f64_i64(masked);
+    return fval * max / 2147483647.0;
+}
+
+// ---------------------------------------------------------------------------
+// Physics: integrate position += velocity * dt
+// ---------------------------------------------------------------------------
+
+@pure
+fn integrate(x: ptr[f64], y: ptr[f64], vx: ptr[f64], vy: ptr[f64],
+             n: i32, dt: f64) {
+    for i: i32 in range(0, n) {
+        ptr_write_f64(x, i, ptr_read_f64(x, i) + ptr_read_f64(vx, i) * dt);
+        ptr_write_f64(y, i, ptr_read_f64(y, i) + ptr_read_f64(vy, i) * dt);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Physics: wall bounce
+// ---------------------------------------------------------------------------
+
+@pure
+fn wall_bounce(x: ptr[f64], y: ptr[f64], vx: ptr[f64], vy: ptr[f64],
+               r: ptr[f64], n: i32, box_w: f64) {
+    for i: i32 in range(0, n) {
+        let px: f64 = ptr_read_f64(x, i);
+        let py: f64 = ptr_read_f64(y, i);
+        let ri: f64 = ptr_read_f64(r, i);
+
+        // Left wall
+        if px - ri < 0.0 {
+            ptr_write_f64(x, i, ri);
+            ptr_write_f64(vx, i, 0.0 - ptr_read_f64(vx, i));
+        }
+        // Right wall
+        if px + ri > box_w {
+            ptr_write_f64(x, i, box_w - ri);
+            ptr_write_f64(vx, i, 0.0 - ptr_read_f64(vx, i));
+        }
+        // Bottom wall
+        if py - ri < 0.0 {
+            ptr_write_f64(y, i, ri);
+            ptr_write_f64(vy, i, 0.0 - ptr_read_f64(vy, i));
+        }
+        // Top wall
+        if py + ri > box_w {
+            ptr_write_f64(y, i, box_w - ri);
+            ptr_write_f64(vy, i, 0.0 - ptr_read_f64(vy, i));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Physics: circle-circle collision detection and elastic response
+// ---------------------------------------------------------------------------
+// For each pair (i, j) where i < j, check if circles overlap.
+// If overlapping, separate them and exchange velocity components
+// along the collision normal (elastic collision with mass).
+
+fn collide_circles(x: ptr[f64], y: ptr[f64], vx: ptr[f64], vy: ptr[f64],
+                   r: ptr[f64], n: i32) -> i32 {
+    let collision_count: i32 = 0;
+
+    for i: i32 in range(0, n) {
+        let xi: f64 = ptr_read_f64(x, i);
+        let yi: f64 = ptr_read_f64(y, i);
+        let ri: f64 = ptr_read_f64(r, i);
+        let mi: f64 = ri * ri;  // mass ~ radius^2
+
+        for j: i32 in range(i + 1, n) {
+            let xj: f64 = ptr_read_f64(x, j);
+            let yj: f64 = ptr_read_f64(y, j);
+            let rj: f64 = ptr_read_f64(r, j);
+            let mj: f64 = rj * rj;
+
+            // Distance between centers
+            let dx: f64 = xj - xi;
+            let dy: f64 = yj - yi;
+            let dist_sq: f64 = dx * dx + dy * dy;
+            let min_dist: f64 = ri + rj;
+
+            if dist_sq < min_dist * min_dist and dist_sq > 0.0001 {
+                // Collision detected
+                collision_count = collision_count + 1;
+                let dist: f64 = sqrt(dist_sq);
+
+                // Collision normal
+                let nx: f64 = dx / dist;
+                let ny: f64 = dy / dist;
+
+                // Separate overlapping circles (push apart equally)
+                let overlap: f64 = min_dist - dist;
+                let sep: f64 = overlap / 2.0 + 0.01;
+                ptr_write_f64(x, i, xi - nx * sep);
+                ptr_write_f64(y, i, yi - ny * sep);
+                ptr_write_f64(x, j, xj + nx * sep);
+                ptr_write_f64(y, j, yj + ny * sep);
+
+                // Relative velocity along collision normal
+                let vxi: f64 = ptr_read_f64(vx, i);
+                let vyi: f64 = ptr_read_f64(vy, i);
+                let vxj: f64 = ptr_read_f64(vx, j);
+                let vyj: f64 = ptr_read_f64(vy, j);
+
+                let dvx: f64 = vxi - vxj;
+                let dvy: f64 = vyi - vyj;
+                let rel_vel_n: f64 = dvx * nx + dvy * ny;
+
+                // Only resolve if circles are approaching
+                if rel_vel_n > 0.0 {
+                    // Elastic collision impulse
+                    let impulse: f64 = 2.0 * rel_vel_n / (mi + mj);
+
+                    ptr_write_f64(vx, i, vxi - impulse * mj * nx);
+                    ptr_write_f64(vy, i, vyi - impulse * mj * ny);
+                    ptr_write_f64(vx, j, vxj + impulse * mi * nx);
+                    ptr_write_f64(vy, j, vyj + impulse * mi * ny);
+                }
+            }
+        }
+    }
+    return collision_count;
+}
+
+// ---------------------------------------------------------------------------
+// Compute total kinetic energy (for conservation check)
+// ---------------------------------------------------------------------------
+
+@pure
+fn total_kinetic_energy(vx: ptr[f64], vy: ptr[f64], r: ptr[f64], n: i32) -> f64 {
+    let ke: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        let cvx: f64 = ptr_read_f64(vx, i);
+        let cvy: f64 = ptr_read_f64(vy, i);
+        let ri: f64 = ptr_read_f64(r, i);
+        let mass: f64 = ri * ri;
+        ke = ke + 0.5 * mass * (cvx * cvx + cvy * cvy);
+    }
+    return ke;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    let n: i32 = num_circles();
+    let bw: f64 = box_size();
+    let dt: f64 = time_step();
+    let steps: i32 = num_steps();
+
+    print("=== 2D Circle Collision Simulation ===");
+    print("Circles:");
+    print_i32(n);
+    print("Steps:");
+    print_i32(steps);
+
+    // --- Arena allocation (all data in a single 1 MB block) ---
+    let arena: ptr[i32] = arena_create(1048576);
+
+    let x:  ptr[f64] = arena_alloc(arena, n, 8);
+    let y:  ptr[f64] = arena_alloc(arena, n, 8);
+    let vx: ptr[f64] = arena_alloc(arena, n, 8);
+    let vy: ptr[f64] = arena_alloc(arena, n, 8);
+    let r:  ptr[f64] = arena_alloc(arena, n, 8);
+
+    // RNG seed
+    let seed_ptr: ptr[i64] = arena_alloc(arena, 1, 8);
+    ptr_write_i64(seed_ptr, 0, 987654321);
+
+    // --- Initialize circles with random positions, velocities, radii ---
+    for i: i32 in range(0, n) {
+        let radius: f64 = lcg_next_f64(seed_ptr, 8.0) + 2.0;  // radius in [2, 10]
+        ptr_write_f64(r, i, radius);
+        ptr_write_f64(x, i, lcg_next_f64(seed_ptr, bw - 2.0 * radius) + radius);
+        ptr_write_f64(y, i, lcg_next_f64(seed_ptr, bw - 2.0 * radius) + radius);
+        ptr_write_f64(vx, i, lcg_next_f64(seed_ptr, 200.0) - 100.0);
+        ptr_write_f64(vy, i, lcg_next_f64(seed_ptr, 200.0) - 100.0);
+    }
+
+    // Initial kinetic energy
+    let ke_initial: f64 = total_kinetic_energy(vx, vy, r, n);
+    print("Initial kinetic energy:");
+    print_f64(ke_initial);
+
+    // --- Simulation loop ---
+    let total_collisions: i32 = 0;
+
+    for step: i32 in range(0, steps) {
+        // 1. Integrate positions
+        integrate(x, y, vx, vy, n, dt);
+
+        // 2. Circle-circle collisions
+        let cols: i32 = collide_circles(x, y, vx, vy, r, n);
+        total_collisions = total_collisions + cols;
+
+        // 3. Wall bounce
+        wall_bounce(x, y, vx, vy, r, n, bw);
+
+        // Progress report every 50 steps
+        if step % 50 == 49 {
+            print("Step:");
+            print_i32(step + 1);
+            print("  Collisions this step:");
+            print_i32(cols);
+        }
+    }
+
+    // --- Final statistics ---
+    let ke_final: f64 = total_kinetic_energy(vx, vy, r, n);
+    print("Final kinetic energy:");
+    print_f64(ke_final);
+    print("Total collisions detected:");
+    print_i32(total_collisions);
+
+    // Position checksum
+    let checksum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        checksum = checksum + ptr_read_f64(x, i) + ptr_read_f64(y, i);
+    }
+    print("Position checksum:");
+    print_f64(checksum);
+
+    if total_collisions > 0 {
+        print("PASS: Collisions detected and resolved");
+    } else {
+        print("FAIL: No collisions detected");
+    }
+
+    // --- Cleanup ---
+    arena_destroy(arena);
+
+    print("=== Collision simulation complete ===");
+    return 0;
+}

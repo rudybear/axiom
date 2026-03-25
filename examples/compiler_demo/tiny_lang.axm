@@ -1,0 +1,586 @@
+@module tiny_lang;
+@intent("Tiny language interpreter: lexer, parser, and evaluator for let/print/arithmetic expressions");
+
+// =============================================================================
+// Tiny Language Interpreter
+// =============================================================================
+//
+// Interprets a small language:
+//   let x = EXPR;      — variable binding
+//   print EXPR;        — print expression result
+//   Expressions: integers, variables, binary +, -, *, /
+//
+// Program:
+//   let x = 5;
+//   let y = x + 3;
+//   let z = y * 2 - 1;
+//   print x; print y; print z;
+//   let w = z / 3 + x;
+//   print w;
+//
+// Token types:
+//   0=EOF 1=IDENT 2=NUMBER 3=KW_LET 4=EQUALS 5=SEMI
+//   6=PLUS 7=MINUS 8=STAR 9=SLASH 10=KW_PRINT
+//
+// AST node types:
+//   1=LET_STMT  2=PRINT_STMT  3=NUMBER_EXPR  4=VAR_EXPR  5=BINOP_EXPR
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Character classification
+// ---------------------------------------------------------------------------
+
+@pure
+fn is_alpha(c: i32) -> i32 {
+    if c >= 65 and c <= 90 { return 1; }
+    if c >= 97 and c <= 122 { return 1; }
+    if c == 95 { return 1; }
+    return 0;
+}
+
+@pure
+fn is_digit(c: i32) -> i32 {
+    if c >= 48 and c <= 57 { return 1; }
+    return 0;
+}
+
+@pure
+fn is_alnum(c: i32) -> i32 {
+    if is_alpha(c) == 1 { return 1; }
+    if is_digit(c) == 1 { return 1; }
+    return 0;
+}
+
+@pure
+fn is_ws(c: i32) -> i32 {
+    if c == 32 or c == 10 or c == 13 or c == 9 { return 1; }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Keyword matching
+// ---------------------------------------------------------------------------
+
+@pure
+fn match_let(src: ptr[i32], s: i32, l: i32) -> i32 {
+    if l != 3 { return 0; }
+    if ptr_read_i32(src, s) != 108 { return 0; }
+    if ptr_read_i32(src, s + 1) != 101 { return 0; }
+    if ptr_read_i32(src, s + 2) != 116 { return 0; }
+    return 1;
+}
+
+@pure
+fn match_print(src: ptr[i32], s: i32, l: i32) -> i32 {
+    if l != 5 { return 0; }
+    if ptr_read_i32(src, s) != 112 { return 0; }
+    if ptr_read_i32(src, s + 1) != 114 { return 0; }
+    if ptr_read_i32(src, s + 2) != 105 { return 0; }
+    if ptr_read_i32(src, s + 3) != 110 { return 0; }
+    if ptr_read_i32(src, s + 4) != 116 { return 0; }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Operator classifier
+// ---------------------------------------------------------------------------
+
+@pure
+fn op_token(c: i32) -> i32 {
+    if c == 61 { return 4; }   // =
+    if c == 59 { return 5; }   // ;
+    if c == 43 { return 6; }   // +
+    if c == 45 { return 7; }   // -
+    if c == 42 { return 8; }   // *
+    if c == 47 { return 9; }   // /
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Name comparison
+// ---------------------------------------------------------------------------
+
+@pure
+fn names_eq(src: ptr[i32], s1: i32, l1: i32, s2: i32, l2: i32) -> i32 {
+    if l1 != l2 { return 0; }
+    for i: i32 in range(0, l1) {
+        if ptr_read_i32(src, s1 + i) != ptr_read_i32(src, s2 + i) { return 0; }
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Token emit helper
+// ---------------------------------------------------------------------------
+
+fn emit_tok(tt: ptr[i32], ts: ptr[i32], tl: ptr[i32], tv: ptr[i32],
+            idx: i32, kind: i32, start: i32, len: i32, val: i32) {
+    ptr_write_i32(tt, idx, kind);
+    ptr_write_i32(ts, idx, start);
+    ptr_write_i32(tl, idx, len);
+    ptr_write_i32(tv, idx, val);
+}
+
+// ---------------------------------------------------------------------------
+// Lex one token; returns new position, sets kind[0] to 1 if produced a token
+// ---------------------------------------------------------------------------
+
+fn lex_one(src: ptr[i32], src_len: i32, pos: i32,
+           tt: ptr[i32], ts: ptr[i32], tl: ptr[i32], tv: ptr[i32],
+           idx: i32, produced: ptr[i32]) -> i32 {
+    while pos < src_len and is_ws(ptr_read_i32(src, pos)) == 1 { pos = pos + 1; }
+    if pos >= src_len { ptr_write_i32(produced, 0, 0); return pos; }
+
+    let c: i32 = ptr_read_i32(src, pos);
+
+    // Operator / punctuation
+    let ot: i32 = op_token(c);
+    if ot > 0 {
+        emit_tok(tt, ts, tl, tv, idx, ot, pos, 1, 0);
+        ptr_write_i32(produced, 0, 1);
+        return pos + 1;
+    }
+
+    // Identifier or keyword
+    if is_alpha(c) == 1 {
+        let start: i32 = pos;
+        while pos < src_len and is_alnum(ptr_read_i32(src, pos)) == 1 { pos = pos + 1; }
+        let len: i32 = pos - start;
+        let kind: i32 = 1;
+        if match_let(src, start, len) == 1 { kind = 3; }
+        if match_print(src, start, len) == 1 { kind = 10; }
+        emit_tok(tt, ts, tl, tv, idx, kind, start, len, 0);
+        ptr_write_i32(produced, 0, 1);
+        return pos;
+    }
+
+    // Number
+    if is_digit(c) == 1 {
+        let start: i32 = pos;
+        let val: i32 = 0;
+        while pos < src_len and is_digit(ptr_read_i32(src, pos)) == 1 {
+            val = val * 10 + (ptr_read_i32(src, pos) - 48);
+            pos = pos + 1;
+        }
+        emit_tok(tt, ts, tl, tv, idx, 2, start, pos - start, val);
+        ptr_write_i32(produced, 0, 1);
+        return pos;
+    }
+
+    ptr_write_i32(produced, 0, 0);
+    return pos + 1;
+}
+
+// ---------------------------------------------------------------------------
+// Tokenize
+// ---------------------------------------------------------------------------
+
+fn tokenize(src: ptr[i32], src_len: i32,
+            tt: ptr[i32], ts: ptr[i32], tl: ptr[i32], tv: ptr[i32],
+            produced: ptr[i32]) -> i32 {
+    let pos: i32 = 0;
+    let count: i32 = 0;
+    while pos < src_len {
+        pos = lex_one(src, src_len, pos, tt, ts, tl, tv, count, produced);
+        if ptr_read_i32(produced, 0) == 1 { count = count + 1; }
+    }
+    emit_tok(tt, ts, tl, tv, count, 0, pos, 0, 0);
+    count = count + 1;
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
+// ps[0] = token pos, ps[1] = next ast node index
+// ast_t[i] = node type, ast_d[i*4..] = data slots
+
+fn parse_primary(tt: ptr[i32], ts: ptr[i32], tl: ptr[i32], tv: ptr[i32],
+                 ast_t: ptr[i32], ast_d: ptr[i32], ps: ptr[i32]) -> i32 {
+    let pos: i32 = ptr_read_i32(ps, 0);
+    let ai: i32 = ptr_read_i32(ps, 1);
+    let kind: i32 = ptr_read_i32(tt, pos);
+
+    if kind == 2 {
+        // NUMBER
+        ptr_write_i32(ast_t, ai, 3);
+        ptr_write_i32(ast_d, ai * 4, ptr_read_i32(tv, pos));
+        ptr_write_i32(ps, 0, pos + 1);
+        ptr_write_i32(ps, 1, ai + 1);
+        return ai;
+    }
+    if kind == 1 {
+        // IDENT
+        ptr_write_i32(ast_t, ai, 4);
+        ptr_write_i32(ast_d, ai * 4, ptr_read_i32(ts, pos));
+        ptr_write_i32(ast_d, ai * 4 + 1, ptr_read_i32(tl, pos));
+        ptr_write_i32(ps, 0, pos + 1);
+        ptr_write_i32(ps, 1, ai + 1);
+        return ai;
+    }
+    // Fallback: zero
+    ptr_write_i32(ast_t, ai, 3);
+    ptr_write_i32(ast_d, ai * 4, 0);
+    ptr_write_i32(ps, 0, pos + 1);
+    ptr_write_i32(ps, 1, ai + 1);
+    return ai;
+}
+
+fn parse_mult(tt: ptr[i32], ts: ptr[i32], tl: ptr[i32], tv: ptr[i32],
+              ast_t: ptr[i32], ast_d: ptr[i32], ps: ptr[i32]) -> i32 {
+    let left: i32 = parse_primary(tt, ts, tl, tv, ast_t, ast_d, ps);
+    let pos: i32 = ptr_read_i32(ps, 0);
+    let tk: i32 = ptr_read_i32(tt, pos);
+    while tk == 8 or tk == 9 {
+        let op: i32 = tk;
+        ptr_write_i32(ps, 0, pos + 1);
+        let right: i32 = parse_primary(tt, ts, tl, tv, ast_t, ast_d, ps);
+        let ai: i32 = ptr_read_i32(ps, 1);
+        ptr_write_i32(ast_t, ai, 5);
+        ptr_write_i32(ast_d, ai * 4, op);
+        ptr_write_i32(ast_d, ai * 4 + 1, left);
+        ptr_write_i32(ast_d, ai * 4 + 2, right);
+        ptr_write_i32(ps, 1, ai + 1);
+        left = ai;
+        pos = ptr_read_i32(ps, 0);
+        tk = ptr_read_i32(tt, pos);
+    }
+    return left;
+}
+
+fn parse_add(tt: ptr[i32], ts: ptr[i32], tl: ptr[i32], tv: ptr[i32],
+             ast_t: ptr[i32], ast_d: ptr[i32], ps: ptr[i32]) -> i32 {
+    let left: i32 = parse_mult(tt, ts, tl, tv, ast_t, ast_d, ps);
+    let pos: i32 = ptr_read_i32(ps, 0);
+    let tk: i32 = ptr_read_i32(tt, pos);
+    while tk == 6 or tk == 7 {
+        let op: i32 = tk;
+        ptr_write_i32(ps, 0, pos + 1);
+        let right: i32 = parse_mult(tt, ts, tl, tv, ast_t, ast_d, ps);
+        let ai: i32 = ptr_read_i32(ps, 1);
+        ptr_write_i32(ast_t, ai, 5);
+        ptr_write_i32(ast_d, ai * 4, op);
+        ptr_write_i32(ast_d, ai * 4 + 1, left);
+        ptr_write_i32(ast_d, ai * 4 + 2, right);
+        ptr_write_i32(ps, 1, ai + 1);
+        left = ai;
+        pos = ptr_read_i32(ps, 0);
+        tk = ptr_read_i32(tt, pos);
+    }
+    return left;
+}
+
+// Parse a let statement: let IDENT = EXPR ;
+fn parse_let_stmt(tt: ptr[i32], ts: ptr[i32], tl: ptr[i32], tv: ptr[i32],
+                  ast_t: ptr[i32], ast_d: ptr[i32], ps: ptr[i32],
+                  stmts: ptr[i32], sc: ptr[i32]) -> i32 {
+    let pos: i32 = ptr_read_i32(ps, 0);
+    ptr_write_i32(ps, 0, pos + 1);  // skip 'let'
+    let id_pos: i32 = ptr_read_i32(ps, 0);
+    let ns: i32 = ptr_read_i32(ts, id_pos);
+    let nl: i32 = ptr_read_i32(tl, id_pos);
+    ptr_write_i32(ps, 0, id_pos + 1);  // skip ident
+    ptr_write_i32(ps, 0, ptr_read_i32(ps, 0) + 1);  // skip '='
+    let eidx: i32 = parse_add(tt, ts, tl, tv, ast_t, ast_d, ps);
+    // skip ';'
+    let sp: i32 = ptr_read_i32(ps, 0);
+    if ptr_read_i32(tt, sp) == 5 { ptr_write_i32(ps, 0, sp + 1); }
+    // Create LET_STMT node
+    let ai: i32 = ptr_read_i32(ps, 1);
+    ptr_write_i32(ast_t, ai, 1);
+    ptr_write_i32(ast_d, ai * 4, ns);
+    ptr_write_i32(ast_d, ai * 4 + 1, nl);
+    ptr_write_i32(ast_d, ai * 4 + 2, eidx);
+    ptr_write_i32(ps, 1, ai + 1);
+    let s: i32 = ptr_read_i32(sc, 0);
+    ptr_write_i32(stmts, s, ai);
+    ptr_write_i32(sc, 0, s + 1);
+    return 0;
+}
+
+// Parse a print statement: print EXPR ;
+fn parse_print_stmt(tt: ptr[i32], ts: ptr[i32], tl: ptr[i32], tv: ptr[i32],
+                    ast_t: ptr[i32], ast_d: ptr[i32], ps: ptr[i32],
+                    stmts: ptr[i32], sc: ptr[i32]) -> i32 {
+    let pos: i32 = ptr_read_i32(ps, 0);
+    ptr_write_i32(ps, 0, pos + 1);  // skip 'print'
+    let eidx: i32 = parse_add(tt, ts, tl, tv, ast_t, ast_d, ps);
+    let sp: i32 = ptr_read_i32(ps, 0);
+    if ptr_read_i32(tt, sp) == 5 { ptr_write_i32(ps, 0, sp + 1); }
+    let ai: i32 = ptr_read_i32(ps, 1);
+    ptr_write_i32(ast_t, ai, 2);
+    ptr_write_i32(ast_d, ai * 4, eidx);
+    ptr_write_i32(ps, 1, ai + 1);
+    let s: i32 = ptr_read_i32(sc, 0);
+    ptr_write_i32(stmts, s, ai);
+    ptr_write_i32(sc, 0, s + 1);
+    return 0;
+}
+
+// Parse program
+fn parse_prog(tt: ptr[i32], ts: ptr[i32], tl: ptr[i32], tv: ptr[i32],
+              tok_count: i32, ast_t: ptr[i32], ast_d: ptr[i32],
+              ps: ptr[i32], stmts: ptr[i32], sc: ptr[i32]) -> i32 {
+    while ptr_read_i32(ps, 0) < tok_count {
+        let pos: i32 = ptr_read_i32(ps, 0);
+        let tk: i32 = ptr_read_i32(tt, pos);
+        if tk == 0 { ptr_write_i32(ps, 0, tok_count); }
+        if tk == 3 {
+            let ign: i32 = parse_let_stmt(tt, ts, tl, tv, ast_t, ast_d, ps, stmts, sc);
+        }
+        if tk == 10 {
+            let ign: i32 = parse_print_stmt(tt, ts, tl, tv, ast_t, ast_d, ps, stmts, sc);
+        }
+        if tk != 0 and tk != 3 and tk != 10 {
+            ptr_write_i32(ps, 0, pos + 1);
+        }
+    }
+    return ptr_read_i32(sc, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Evaluator
+// ---------------------------------------------------------------------------
+
+fn eval_expr(ast_t: ptr[i32], ast_d: ptr[i32], src: ptr[i32],
+             env_s: ptr[i32], env_l: ptr[i32], env_v: ptr[i32],
+             env_count: i32, node: i32) -> i32 {
+    let nt: i32 = ptr_read_i32(ast_t, node);
+
+    if nt == 3 { return ptr_read_i32(ast_d, node * 4); }
+
+    if nt == 4 {
+        let vs: i32 = ptr_read_i32(ast_d, node * 4);
+        let vl: i32 = ptr_read_i32(ast_d, node * 4 + 1);
+        for i: i32 in range(0, env_count) {
+            if names_eq(src, vs, vl, ptr_read_i32(env_s, i), ptr_read_i32(env_l, i)) == 1 {
+                return ptr_read_i32(env_v, i);
+            }
+        }
+        return 0;
+    }
+
+    if nt == 5 {
+        let op: i32 = ptr_read_i32(ast_d, node * 4);
+        let li: i32 = ptr_read_i32(ast_d, node * 4 + 1);
+        let ri: i32 = ptr_read_i32(ast_d, node * 4 + 2);
+        let lv: i32 = eval_expr(ast_t, ast_d, src, env_s, env_l, env_v, env_count, li);
+        let rv: i32 = eval_expr(ast_t, ast_d, src, env_s, env_l, env_v, env_count, ri);
+        if op == 6 { return lv + rv; }
+        if op == 7 { return lv - rv; }
+        if op == 8 { return lv * rv; }
+        if op == 9 and rv != 0 { return lv / rv; }
+        return 0;
+    }
+    return 0;
+}
+
+fn execute(ast_t: ptr[i32], ast_d: ptr[i32], src: ptr[i32],
+           stmts: ptr[i32], stmt_count: i32,
+           env_s: ptr[i32], env_l: ptr[i32], env_v: ptr[i32]) -> i32 {
+    let ec: i32 = 0;
+    for s: i32 in range(0, stmt_count) {
+        let ni: i32 = ptr_read_i32(stmts, s);
+        let nt: i32 = ptr_read_i32(ast_t, ni);
+        if nt == 1 {
+            let ns: i32 = ptr_read_i32(ast_d, ni * 4);
+            let nl: i32 = ptr_read_i32(ast_d, ni * 4 + 1);
+            let ei: i32 = ptr_read_i32(ast_d, ni * 4 + 2);
+            let val: i32 = eval_expr(ast_t, ast_d, src, env_s, env_l, env_v, ec, ei);
+            ptr_write_i32(env_s, ec, ns);
+            ptr_write_i32(env_l, ec, nl);
+            ptr_write_i32(env_v, ec, val);
+            ec = ec + 1;
+        }
+        if nt == 2 {
+            let ei: i32 = ptr_read_i32(ast_d, ni * 4);
+            let val: i32 = eval_expr(ast_t, ast_d, src, env_s, env_l, env_v, ec, ei);
+            print("Output:");
+            print_i32(val);
+        }
+    }
+    return ec;
+}
+
+// ---------------------------------------------------------------------------
+// Source encoding
+// ---------------------------------------------------------------------------
+// "let x = 5;\nlet y = x + 3;\nlet z = y * 2 - 1;\nprint x;\nprint y;\nprint z;\nlet w = z / 3 + x;\nprint w;\n"
+
+fn write_str(dst: ptr[i32], off: i32, c0: i32, c1: i32, c2: i32, c3: i32) -> i32 {
+    ptr_write_i32(dst, off, c0);
+    ptr_write_i32(dst, off + 1, c1);
+    ptr_write_i32(dst, off + 2, c2);
+    ptr_write_i32(dst, off + 3, c3);
+    return off + 4;
+}
+
+fn fill_source(s: ptr[i32]) -> i32 {
+    let i: i32 = 0;
+    // "let x = 5;\n"  (l=108 e=101 t=116 ' '=32 x=120 ' '=32 ==61 ' '=32 5=53 ;=59 \n=10)
+    i = write_str(s, i, 108, 101, 116, 32);  // let_
+    i = write_str(s, i, 120, 32, 61, 32);    // x =
+    ptr_write_i32(s, i, 53); i = i + 1;      // 5
+    ptr_write_i32(s, i, 59); i = i + 1;      // ;
+    ptr_write_i32(s, i, 10); i = i + 1;      // \n
+
+    // "let y = x + 3;\n"
+    i = write_str(s, i, 108, 101, 116, 32);  // let_
+    i = write_str(s, i, 121, 32, 61, 32);    // y =
+    i = write_str(s, i, 120, 32, 43, 32);    // x +
+    ptr_write_i32(s, i, 51); i = i + 1;      // 3
+    ptr_write_i32(s, i, 59); i = i + 1;      // ;
+    ptr_write_i32(s, i, 10); i = i + 1;      // \n
+
+    // "let z = y * 2 - 1;\n"
+    i = write_str(s, i, 108, 101, 116, 32);  // let_
+    i = write_str(s, i, 122, 32, 61, 32);    // z =
+    i = write_str(s, i, 121, 32, 42, 32);    // y *
+    i = write_str(s, i, 50, 32, 45, 32);     // 2 -
+    ptr_write_i32(s, i, 49); i = i + 1;      // 1
+    ptr_write_i32(s, i, 59); i = i + 1;      // ;
+    ptr_write_i32(s, i, 10); i = i + 1;      // \n
+
+    // "print x;\n"
+    i = write_str(s, i, 112, 114, 105, 110); // prin
+    ptr_write_i32(s, i, 116); i = i + 1;     // t
+    ptr_write_i32(s, i, 32); i = i + 1;      // ' '
+    ptr_write_i32(s, i, 120); i = i + 1;     // x
+    ptr_write_i32(s, i, 59); i = i + 1;      // ;
+    ptr_write_i32(s, i, 10); i = i + 1;      // \n
+
+    // "print y;\n"
+    i = write_str(s, i, 112, 114, 105, 110);
+    ptr_write_i32(s, i, 116); i = i + 1;
+    ptr_write_i32(s, i, 32); i = i + 1;
+    ptr_write_i32(s, i, 121); i = i + 1;     // y
+    ptr_write_i32(s, i, 59); i = i + 1;
+    ptr_write_i32(s, i, 10); i = i + 1;
+
+    // "print z;\n"
+    i = write_str(s, i, 112, 114, 105, 110);
+    ptr_write_i32(s, i, 116); i = i + 1;
+    ptr_write_i32(s, i, 32); i = i + 1;
+    ptr_write_i32(s, i, 122); i = i + 1;     // z
+    ptr_write_i32(s, i, 59); i = i + 1;
+    ptr_write_i32(s, i, 10); i = i + 1;
+
+    // "let w = z / 3 + x;\n"
+    i = write_str(s, i, 108, 101, 116, 32);  // let_
+    i = write_str(s, i, 119, 32, 61, 32);    // w =
+    i = write_str(s, i, 122, 32, 47, 32);    // z /
+    i = write_str(s, i, 51, 32, 43, 32);     // 3 +
+    ptr_write_i32(s, i, 120); i = i + 1;     // x
+    ptr_write_i32(s, i, 59); i = i + 1;      // ;
+    ptr_write_i32(s, i, 10); i = i + 1;      // \n
+
+    // "print w;\n"
+    i = write_str(s, i, 112, 114, 105, 110);
+    ptr_write_i32(s, i, 116); i = i + 1;
+    ptr_write_i32(s, i, 32); i = i + 1;
+    ptr_write_i32(s, i, 119); i = i + 1;     // w
+    ptr_write_i32(s, i, 59); i = i + 1;
+    ptr_write_i32(s, i, 10); i = i + 1;
+
+    return i;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    print("=== Tiny Language Interpreter ===");
+    print("Program:");
+    print("  let x = 5;");
+    print("  let y = x + 3;");
+    print("  let z = y * 2 - 1;");
+    print("  print x; print y; print z;");
+    print("  let w = z / 3 + x;");
+    print("  print w;");
+
+    let src: ptr[i32] = heap_alloc(512, 4);
+    let src_len: i32 = fill_source(src);
+    print("Source chars:");
+    print_i32(src_len);
+
+    let tt: ptr[i32] = heap_alloc(256, 4);
+    let ts: ptr[i32] = heap_alloc(256, 4);
+    let tl: ptr[i32] = heap_alloc(256, 4);
+    let tv: ptr[i32] = heap_alloc(256, 4);
+    let produced: ptr[i32] = heap_alloc(1, 4);
+
+    // Lexer
+    print("--- Lexer ---");
+    let tok_count: i32 = tokenize(src, src_len, tt, ts, tl, tv, produced);
+    print("Tokens:");
+    print_i32(tok_count);
+
+    // Parser
+    print("--- Parser ---");
+    let ast_t: ptr[i32] = heap_alloc(256, 4);
+    let ast_d: ptr[i32] = heap_alloc(1024, 4);
+    let stmts: ptr[i32] = heap_alloc(64, 4);
+    let sc: ptr[i32] = heap_alloc(1, 4);
+    ptr_write_i32(sc, 0, 0);
+    let ps: ptr[i32] = heap_alloc(2, 4);
+    ptr_write_i32(ps, 0, 0);
+    ptr_write_i32(ps, 1, 0);
+
+    let stmt_count: i32 = parse_prog(tt, ts, tl, tv, tok_count, ast_t, ast_d, ps, stmts, sc);
+    print("Statements:");
+    print_i32(stmt_count);
+    print("AST nodes:");
+    print_i32(ptr_read_i32(ps, 1));
+
+    // Evaluator
+    print("--- Evaluator ---");
+    let env_s: ptr[i32] = heap_alloc(32, 4);
+    let env_l: ptr[i32] = heap_alloc(32, 4);
+    let env_v: ptr[i32] = heap_alloc(32, 4);
+
+    let var_count: i32 = execute(ast_t, ast_d, src, stmts, stmt_count, env_s, env_l, env_v);
+    print("Variables:");
+    print_i32(var_count);
+
+    // Verification: x=5, y=8, z=15, w=10
+    print("--- Verify ---");
+    let pass: i32 = 1;
+    if var_count >= 4 {
+        let v0: i32 = ptr_read_i32(env_v, 0);
+        let v1: i32 = ptr_read_i32(env_v, 1);
+        let v2: i32 = ptr_read_i32(env_v, 2);
+        let v3: i32 = ptr_read_i32(env_v, 3);
+        print("x ="); print_i32(v0);
+        print("y ="); print_i32(v1);
+        print("z ="); print_i32(v2);
+        print("w ="); print_i32(v3);
+        if v0 != 5 { pass = 0; }
+        if v1 != 8 { pass = 0; }
+        if v2 != 15 { pass = 0; }
+        if v3 != 10 { pass = 0; }
+    }
+    if var_count < 4 { pass = 0; }
+
+    if pass == 1 { print("PASS: All values correct!"); }
+    if pass == 0 { print("FAIL: Values do not match"); }
+
+    // Cleanup
+    heap_free(env_v);
+    heap_free(env_l);
+    heap_free(env_s);
+    heap_free(ps);
+    heap_free(sc);
+    heap_free(stmts);
+    heap_free(ast_d);
+    heap_free(ast_t);
+    heap_free(produced);
+    heap_free(tv);
+    heap_free(tl);
+    heap_free(ts);
+    heap_free(tt);
+    heap_free(src);
+
+    print("=== Interpreter complete ===");
+    return 0;
+}
