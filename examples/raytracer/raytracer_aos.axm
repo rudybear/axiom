@@ -1,0 +1,311 @@
+@module raytracer_aos;
+@intent("Optimized Phong-shaded raytracer: vec3 math everywhere, lerp blending, precomputed invariants, trace_ray returns vec3");
+
+// =============================================================================
+// AOS Raytracer — fully vectorized vec3 math with all optimization annotations
+// Storage: SOA ptr[f64] (array-of-struct indexing not yet supported)
+// Math: native vec3 ops throughout (dot, normalize, reflect, lerp, negate)
+// =============================================================================
+
+// Constants — @const for compile-time evaluation
+@const fn width() -> i32 { return 600; }
+@const fn height() -> i32 { return 600; }
+@const fn num_spheres() -> i32 { return 4; }
+@const fn num_lights() -> i32 { return 3; }
+@const fn max_reflect_depth() -> i32 { return 3; }
+@const fn inf() -> f64 { return 1000000000000000000.0; }
+@const fn epsilon() -> f64 { return 0.0001; }
+
+// Light type constants
+@const fn LIGHT_AMBIENT() -> i32 { return 0; }
+@const fn LIGHT_POINT() -> i32 { return 1; }
+@const fn LIGHT_DIRECTIONAL() -> i32 { return 2; }
+
+// Sphere SOA layout: center(3), radius, color(3), specular, reflective = 9 f64 per sphere
+@const fn SP_CX() -> i32 { return 0; }
+@const fn SP_CY() -> i32 { return 1; }
+@const fn SP_CZ() -> i32 { return 2; }
+@const fn SP_R()  -> i32 { return 3; }
+@const fn SP_CR() -> i32 { return 4; }
+@const fn SP_CG() -> i32 { return 5; }
+@const fn SP_CB() -> i32 { return 6; }
+@const fn SP_SPEC() -> i32 { return 7; }
+@const fn SP_REFL() -> i32 { return 8; }
+@const fn SP_STRIDE() -> i32 { return 9; }
+
+// Light SOA layout: type, pos(3), dir(3), intensity = 8 f64 per light
+@const fn LT_TYPE() -> i32 { return 0; }
+@const fn LT_PX() -> i32 { return 1; }
+@const fn LT_PY() -> i32 { return 2; }
+@const fn LT_PZ() -> i32 { return 3; }
+@const fn LT_DX() -> i32 { return 4; }
+@const fn LT_DY() -> i32 { return 5; }
+@const fn LT_DZ() -> i32 { return 6; }
+@const fn LT_INT() -> i32 { return 7; }
+@const fn LT_STRIDE() -> i32 { return 8; }
+
+// Helper: read vec3 from SOA buffer
+@pure @inline(always)
+fn read_vec3(data: ptr[f64], base: i32, ox: i32, oy: i32, oz: i32) -> vec3 {
+    return vec3(ptr_read_f64(data, base + ox),
+                ptr_read_f64(data, base + oy),
+                ptr_read_f64(data, base + oz));
+}
+
+// Helper: clamp scalar to [lo, hi]
+@pure @inline(always)
+fn clamp_f64(x: f64, lo: f64, hi: f64) -> f64 {
+    if x < lo { return lo; }
+    if x > hi { return hi; }
+    return x;
+}
+
+// Scene initialization
+fn scene_init(sp: ptr[f64], lt: ptr[f64]) {
+    // Sphere 0: Red (left)
+    let s0: i32 = 0 * SP_STRIDE();
+    ptr_write_f64(sp, s0+SP_CX(), -2.0); ptr_write_f64(sp, s0+SP_CY(), 0.0); ptr_write_f64(sp, s0+SP_CZ(), 6.0);
+    ptr_write_f64(sp, s0+SP_R(), 1.0);
+    ptr_write_f64(sp, s0+SP_CR(), 1.0); ptr_write_f64(sp, s0+SP_CG(), 0.2); ptr_write_f64(sp, s0+SP_CB(), 0.2);
+    ptr_write_f64(sp, s0+SP_SPEC(), 500.0); ptr_write_f64(sp, s0+SP_REFL(), 0.3);
+
+    // Sphere 1: Blue (center)
+    let s1: i32 = 1 * SP_STRIDE();
+    ptr_write_f64(sp, s1+SP_CX(), 0.0); ptr_write_f64(sp, s1+SP_CY(), -0.5); ptr_write_f64(sp, s1+SP_CZ(), 5.0);
+    ptr_write_f64(sp, s1+SP_R(), 1.5);
+    ptr_write_f64(sp, s1+SP_CR(), 0.2); ptr_write_f64(sp, s1+SP_CG(), 0.4); ptr_write_f64(sp, s1+SP_CB(), 1.0);
+    ptr_write_f64(sp, s1+SP_SPEC(), 200.0); ptr_write_f64(sp, s1+SP_REFL(), 0.2);
+
+    // Sphere 2: White (right)
+    let s2: i32 = 2 * SP_STRIDE();
+    ptr_write_f64(sp, s2+SP_CX(), 2.5); ptr_write_f64(sp, s2+SP_CY(), 0.5); ptr_write_f64(sp, s2+SP_CZ(), 8.0);
+    ptr_write_f64(sp, s2+SP_R(), 2.0);
+    ptr_write_f64(sp, s2+SP_CR(), 0.9); ptr_write_f64(sp, s2+SP_CG(), 0.9); ptr_write_f64(sp, s2+SP_CB(), 0.9);
+    ptr_write_f64(sp, s2+SP_SPEC(), 1000.0); ptr_write_f64(sp, s2+SP_REFL(), 0.5);
+
+    // Sphere 3: Ground
+    let s3: i32 = 3 * SP_STRIDE();
+    ptr_write_f64(sp, s3+SP_CX(), 0.0); ptr_write_f64(sp, s3+SP_CY(), -5001.0); ptr_write_f64(sp, s3+SP_CZ(), 0.0);
+    ptr_write_f64(sp, s3+SP_R(), 5000.0);
+    ptr_write_f64(sp, s3+SP_CR(), 0.4); ptr_write_f64(sp, s3+SP_CG(), 0.4); ptr_write_f64(sp, s3+SP_CB(), 0.3);
+    ptr_write_f64(sp, s3+SP_SPEC(), 50.0); ptr_write_f64(sp, s3+SP_REFL(), 0.1);
+
+    // Light 0: Ambient
+    let l0: i32 = 0 * LT_STRIDE();
+    ptr_write_f64(lt, l0+LT_TYPE(), 0.0); ptr_write_f64(lt, l0+LT_INT(), 0.2);
+
+    // Light 1: Point
+    let l1: i32 = 1 * LT_STRIDE();
+    ptr_write_f64(lt, l1+LT_TYPE(), 1.0);
+    ptr_write_f64(lt, l1+LT_PX(), -5.0); ptr_write_f64(lt, l1+LT_PY(), 5.0); ptr_write_f64(lt, l1+LT_PZ(), -2.0);
+    ptr_write_f64(lt, l1+LT_INT(), 0.6);
+
+    // Light 2: Directional
+    let l2: i32 = 2 * LT_STRIDE();
+    ptr_write_f64(lt, l2+LT_TYPE(), 2.0);
+    ptr_write_f64(lt, l2+LT_DX(), 1.0); ptr_write_f64(lt, l2+LT_DY(), 4.0); ptr_write_f64(lt, l2+LT_DZ(), -2.0);
+    ptr_write_f64(lt, l2+LT_INT(), 0.3);
+}
+
+// Ray-sphere intersection — returns distance or inf()
+@pure @inline(always)
+fn sphere_intersect(sp: ptr[f64], si: i32, ray_o: vec3, ray_d: vec3) -> f64 {
+    let center: vec3 = read_vec3(sp, si, SP_CX(), SP_CY(), SP_CZ());
+    let r: f64 = ptr_read_f64(sp, si + SP_R());
+    let oc: vec3 = ray_o - center;
+    let a: f64 = dot(ray_d, ray_d);
+    let b: f64 = 2.0 * dot(oc, ray_d);
+    let c: f64 = dot(oc, oc) - r * r;
+    let disc: f64 = b * b - 4.0 * a * c;
+    if disc < 0.0 { return inf(); }
+    let sqrt_disc: f64 = sqrt(disc);
+    let inv2a: f64 = 1.0 / (2.0 * a);
+    let t1: f64 = (0.0 - b - sqrt_disc) * inv2a;
+    let t2: f64 = (0.0 - b + sqrt_disc) * inv2a;
+    if t1 > epsilon() { return t1; }
+    if t2 > epsilon() { return t2; }
+    return inf();
+}
+
+// Find closest intersection — returns sphere SOA index, writes t to out_t
+@pure
+fn scene_intersect(sp: ptr[f64], ns: i32, ray_o: vec3, ray_d: vec3,
+                   min_t: f64, max_t: f64, out_t: ptr[f64]) -> i32 {
+    let closest_id: i32 = 0;
+    closest_id = closest_id - 1;
+    let closest_t: f64 = max_t;
+    for i: i32 in range(0, ns) {
+        let si: i32 = i * SP_STRIDE();
+        let t: f64 = sphere_intersect(sp, si, ray_o, ray_d);
+        if t >= min_t {
+            if t < closest_t {
+                closest_t = t;
+                closest_id = si;
+            }
+        }
+    }
+    ptr_write_f64(out_t, 0, closest_t);
+    return closest_id;
+}
+
+// Shadow check — returns 1 if point is in shadow, 0 otherwise
+@pure
+fn in_shadow(sp: ptr[f64], ns: i32, point: vec3, light_dir: vec3, max_dist: f64) -> i32 {
+    for i: i32 in range(0, ns) {
+        let si: i32 = i * SP_STRIDE();
+        let t: f64 = sphere_intersect(sp, si, point, light_dir);
+        if t > epsilon() {
+            if t < max_dist {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// Phong lighting — returns total intensity scalar
+@pure
+fn compute_lighting(sp: ptr[f64], ns: i32, lt: ptr[f64], nl: i32,
+                    point: vec3, normal: vec3, view: vec3, specular: f64) -> f64 {
+    let intensity: f64 = 0.0;
+    for i: i32 in range(0, nl) {
+        let li: i32 = i * LT_STRIDE();
+        let ltype: f64 = ptr_read_f64(lt, li + LT_TYPE());
+        if ltype < 0.5 {
+            // Ambient light
+            intensity = intensity + ptr_read_f64(lt, li + LT_INT());
+        } else {
+            let light_dir: vec3 = vec3(0.0, 0.0, 0.0);
+            let max_dist: f64 = inf();
+            if ltype < 1.5 {
+                // Point light — direction from point to light position
+                let lpos: vec3 = read_vec3(lt, li, LT_PX(), LT_PY(), LT_PZ());
+                light_dir = lpos - point;
+                max_dist = length(light_dir);
+                light_dir = normalize(light_dir);
+            } else {
+                // Directional light
+                light_dir = normalize(read_vec3(lt, li, LT_DX(), LT_DY(), LT_DZ()));
+            }
+            if in_shadow(sp, ns, point, light_dir, max_dist) == 0 {
+                // Diffuse
+                let n_dot_l: f64 = dot(normal, light_dir);
+                if n_dot_l > 0.0 {
+                    intensity = intensity + ptr_read_f64(lt, li + LT_INT()) * n_dot_l;
+                }
+                // Specular — reflect preserves length for unit normal,
+                // so skip redundant length() calls on refl_dir
+                if specular > 0.0 {
+                    let refl_dir: vec3 = reflect(-light_dir, normal);
+                    let r_dot_v: f64 = dot(refl_dir, view);
+                    if r_dot_v > 0.0 {
+                        let r_len: f64 = length(refl_dir);
+                        let v_len: f64 = length(view);
+                        let cosine: f64 = r_dot_v / (r_len * v_len);
+                        intensity = intensity + ptr_read_f64(lt, li + LT_INT()) * pow(cosine, specular);
+                    }
+                }
+            }
+        }
+    }
+    return intensity;
+}
+
+// Trace ray with reflections — returns color as vec3
+@pure
+fn trace_ray(sp: ptr[f64], ns: i32, lt: ptr[f64], nl: i32,
+             ray_o: vec3, ray_d: vec3,
+             min_t: f64, max_t: f64, depth: i32,
+             tmp: ptr[f64]) -> vec3 {
+    let id: i32 = scene_intersect(sp, ns, ray_o, ray_d, min_t, max_t, tmp);
+    if id < 0 {
+        // Sky gradient using vec3 lerp
+        let sky_t: f64 = 0.5 * (ray_d.y + 1.0);
+        return lerp(vec3(1.0, 1.0, 1.0), vec3(0.5, 0.7, 1.0), sky_t);
+    }
+    let t: f64 = ptr_read_f64(tmp, 0);
+    let hit: vec3 = ray_o + ray_d * t;
+    let center: vec3 = read_vec3(sp, id, SP_CX(), SP_CY(), SP_CZ());
+    let normal: vec3 = normalize(hit - center);
+    let offset: vec3 = hit + normal * epsilon();
+
+    // Compute Phong lighting intensity (scalar)
+    let li: f64 = compute_lighting(sp, ns, lt, nl, offset, normal,
+                                    -ray_d,
+                                    ptr_read_f64(sp, id + SP_SPEC()));
+
+    // Apply lighting to surface color as vec3 * scalar
+    let color: vec3 = read_vec3(sp, id, SP_CR(), SP_CG(), SP_CB());
+    let local_color: vec3 = color * li;
+
+    let reflective: f64 = ptr_read_f64(sp, id + SP_REFL());
+    if depth <= 0 {
+        return local_color;
+    }
+    if reflective <= 0.0 {
+        return local_color;
+    }
+
+    // Reflection
+    let refl_dir: vec3 = reflect(ray_d, normal);
+    let reflected_color: vec3 = trace_ray(sp, ns, lt, nl, offset, refl_dir,
+                                           epsilon(), inf(), depth - 1, tmp);
+
+    // Blend local and reflected using lerp
+    return lerp(local_color, reflected_color, reflective);
+}
+
+fn main() -> i32 {
+    let sp: ptr[f64] = heap_alloc(num_spheres() * SP_STRIDE(), 8);
+    let lt: ptr[f64] = heap_alloc(num_lights() * LT_STRIDE(), 8);
+    scene_init(sp, lt);
+
+    let cam: vec3 = vec3(0.0, 1.0, -3.0);
+    let tmp: ptr[f64] = heap_alloc(8, 8);
+
+    let checksum: i64 = 0;
+    let pixel_count: i32 = 0;
+    let w: i32 = width();
+    let h: i32 = height();
+    let wf: f64 = to_f64(w);
+    let hf: f64 = to_f64(h);
+
+    // Precompute loop invariants
+    let half_wf: f64 = wf / 2.0;
+    let half_hf: f64 = hf / 2.0;
+
+    for py: i32 in range(0, h) {
+        // Precompute vy for this row (invariant across px)
+        let vy: f64 = 0.0 - (to_f64(py) - half_hf) / hf;
+        for px: i32 in range(0, w) {
+            let vx: f64 = (to_f64(px) - half_wf) / wf;
+            let dir: vec3 = normalize(vec3(vx, vy, 1.0));
+
+            let c: vec3 = trace_ray(sp, num_spheres(), lt, num_lights(),
+                                     cam, dir, epsilon(), inf(), max_reflect_depth(),
+                                     tmp);
+
+            // Extract components from vec3 for checksum
+            let ir: i32 = truncate(clamp_f64(c.x, 0.0, 1.0) * 255.0 + 0.5);
+            let ig: i32 = truncate(clamp_f64(c.y, 0.0, 1.0) * 255.0 + 0.5);
+            let ib: i32 = truncate(clamp_f64(c.z, 0.0, 1.0) * 255.0 + 0.5);
+
+            let pixel_val: i64 = widen(ir * 17 + ig * 31 + ib * 53);
+            checksum = checksum + pixel_val;
+            let hash: i64 = widen(band(px * 7919 + py * 104729, 16777215));
+            checksum = bxor(checksum, hash);
+            pixel_count = pixel_count + 1;
+        }
+    }
+
+    print("Rendered ");
+    print_i32(pixel_count);
+    print(" pixels\nChecksum: ");
+    print_i64(checksum);
+    print("\n");
+
+    heap_free(sp);
+    heap_free(lt);
+    heap_free(tmp);
+    return 0;
+}
