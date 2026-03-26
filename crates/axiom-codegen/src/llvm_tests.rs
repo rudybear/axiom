@@ -6700,3 +6700,177 @@ fn main() -> i32 {
     let ir = codegen(&hir).expect("codegen should succeed");
     assert!(ir.contains("shufflevector"), "should emit shufflevector for rgba swizzle: {ir}");
 }
+
+// ======================================================================
+// BSP binary format builtins: ptr_read_f32, ptr_write_f32, ptr_read_i16, ptr_read_u8
+// ======================================================================
+
+#[test]
+fn test_ptr_read_write_f32() {
+    // ptr_write_f32(p, 0, 3.14) should emit fptrunc + GEP float + store float
+    // ptr_read_f32(p, 0) should emit GEP float + load float + fpext to double
+    let m = module(
+        Some("test"),
+        vec![func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "p".to_string(),
+                    name_span: span(),
+                    ty: HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::F64)),
+                    },
+                    value: Some(call("heap_alloc", vec![int_lit(10), int_lit(4)])),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Expr {
+                    expr: call(
+                        "ptr_write_f32",
+                        vec![ident("p"), int_lit(0), float_lit(3.14)],
+                    ),
+                }),
+                stmt(HirStmtKind::Let {
+                    name: "val".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::F64),
+                    value: Some(call("ptr_read_f32", vec![ident("p"), int_lit(0)])),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Expr {
+                    expr: call("heap_free", vec![ident("p")]),
+                }),
+                stmt(HirStmtKind::Return {
+                    value: Some(int_lit(0)),
+                }),
+            ]),
+        )],
+    );
+
+    let ir = codegen(&m).expect("codegen should succeed");
+    // ptr_write_f32: fptrunc + GEP float + store float
+    assert!(
+        ir.contains("fptrunc double"),
+        "ptr_write_f32 should emit fptrunc: {ir}"
+    );
+    assert!(
+        ir.contains("getelementptr float, ptr"),
+        "ptr_write_f32 should emit GEP float: {ir}"
+    );
+    assert!(
+        ir.contains("store float"),
+        "ptr_write_f32 should emit store float: {ir}"
+    );
+    // ptr_read_f32: load float + fpext
+    assert!(
+        ir.contains("load float, ptr"),
+        "ptr_read_f32 should emit load float: {ir}"
+    );
+    assert!(
+        ir.contains("fpext float"),
+        "ptr_read_f32 should emit fpext float to double: {ir}"
+    );
+}
+
+#[test]
+fn test_ptr_read_i16() {
+    // ptr_read_i16(p, 0) should emit GEP i16 + load i16 + sext i16 to i32
+    let m = module(
+        Some("test"),
+        vec![func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "p".to_string(),
+                    name_span: span(),
+                    ty: HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                    value: Some(call("heap_alloc", vec![int_lit(10), int_lit(2)])),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Let {
+                    name: "val".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::I32),
+                    value: Some(call("ptr_read_i16", vec![ident("p"), int_lit(0)])),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Expr {
+                    expr: call("heap_free", vec![ident("p")]),
+                }),
+                stmt(HirStmtKind::Return {
+                    value: Some(ident("val")),
+                }),
+            ]),
+        )],
+    );
+
+    let ir = codegen(&m).expect("codegen should succeed");
+    assert!(
+        ir.contains("getelementptr i16, ptr"),
+        "ptr_read_i16 should emit GEP i16: {ir}"
+    );
+    assert!(
+        ir.contains("load i16, ptr"),
+        "ptr_read_i16 should emit load i16: {ir}"
+    );
+    assert!(
+        ir.contains("sext i16"),
+        "ptr_read_i16 should emit sext i16 to i32: {ir}"
+    );
+}
+
+#[test]
+fn test_ptr_read_u8() {
+    // ptr_read_u8(p, 0) should emit GEP i8 + load i8 + zext i8 to i32
+    let m = module(
+        Some("test"),
+        vec![func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "p".to_string(),
+                    name_span: span(),
+                    ty: HirType::Ptr {
+                        element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                    },
+                    value: Some(call("heap_alloc", vec![int_lit(10), int_lit(1)])),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Let {
+                    name: "val".to_string(),
+                    name_span: span(),
+                    ty: HirType::Primitive(PrimitiveType::I32),
+                    value: Some(call("ptr_read_u8", vec![ident("p"), int_lit(0)])),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Expr {
+                    expr: call("heap_free", vec![ident("p")]),
+                }),
+                stmt(HirStmtKind::Return {
+                    value: Some(ident("val")),
+                }),
+            ]),
+        )],
+    );
+
+    let ir = codegen(&m).expect("codegen should succeed");
+    assert!(
+        ir.contains("getelementptr i8, ptr"),
+        "ptr_read_u8 should emit GEP i8: {ir}"
+    );
+    assert!(
+        ir.contains("load i8, ptr"),
+        "ptr_read_u8 should emit load i8: {ir}"
+    );
+    assert!(
+        ir.contains("zext i8"),
+        "ptr_read_u8 should emit zext i8 to i32: {ir}"
+    );
+}
