@@ -163,6 +163,11 @@ pub enum Expr {
         element_type: TypeExpr,
         size: Box<Expr>,
     },
+    /// Struct literal: `Point { x: 1.0, y: 2.0 }`.
+    StructLiteral {
+        type_name: String,
+        fields: Vec<(String, Expr)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]

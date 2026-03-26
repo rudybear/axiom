@@ -134,6 +134,8 @@ struct CodegenContext {
     needs_fabs_f64: bool,
     /// Whether the `@llvm.memset.p0.i64` intrinsic is needed.
     needs_memset: bool,
+    /// Whether the `@llvm.memcpy.p0.p0.i64` intrinsic is needed.
+    needs_memcpy: bool,
     /// Whether the `@llvm.fshl.i32` intrinsic is needed (rotate left).
     needs_fshl_i32: bool,
     /// Whether the `@llvm.fshr.i32` intrinsic is needed (rotate right).
@@ -236,6 +238,7 @@ impl CodegenContext {
             needs_abs_i32: false,
             needs_fabs_f64: false,
             needs_memset: false,
+            needs_memcpy: false,
             needs_fshl_i32: false,
             needs_fshr_i32: false,
             needs_malloc: false,
@@ -515,6 +518,12 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
         let _ = writeln!(
             ctx.output,
             "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"
+        );
+    }
+    if ctx.needs_memcpy {
+        let _ = writeln!(
+            ctx.output,
+            "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)"
         );
     }
     if ctx.needs_fshl_i32 {
@@ -954,11 +963,9 @@ pub fn needs_runtime(ir: &str) -> bool {
 fn register_struct(ctx: &mut CodegenContext, s: &HirStruct) {
     let llvm_name = format!("%struct.{}", s.name);
     let mut fields = Vec::new();
-    let mut total_size: u64 = 0;
     for field in &s.fields {
         match hir_type_to_llvm(&field.ty) {
             Ok(llvm_ty) => {
-                total_size += llvm_type_size(&llvm_ty);
                 fields.push((field.name.clone(), llvm_ty));
             }
             Err(e) => {
@@ -966,6 +973,7 @@ fn register_struct(ctx: &mut CodegenContext, s: &HirStruct) {
             }
         }
     }
+    let total_size = compute_struct_size_with_padding(&fields);
     ctx.struct_registry.insert(
         s.name.clone(),
         StructInfo {
@@ -1013,6 +1021,9 @@ fn function_writes_through_ptrs(body: &HirBlock) -> bool {
             HirExprKind::FieldAccess { expr, .. } => expr_has_ptr_write(expr),
             HirExprKind::MethodCall { expr, args, .. } => {
                 expr_has_ptr_write(expr) || args.iter().any(expr_has_ptr_write)
+            }
+            HirExprKind::StructLiteral { fields, .. } => {
+                fields.iter().any(|(_, e)| expr_has_ptr_write(e))
             }
             _ => false,
         }
@@ -1580,7 +1591,10 @@ fn emit_let(
         let uid = ctx.next_reg;
         ctx.next_reg += 1;
         let alloca_name = format!("%{name}.{uid}");
-        ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
+        let struct_align = struct_max_align(ctx, struct_name);
+        ctx.emit(&format!(
+            "{alloca_name} = alloca {llvm_type}, align {struct_align}"
+        ));
 
         // Zero-initialize the struct via memset.
         ctx.needs_memset = true;
@@ -1592,19 +1606,24 @@ fn emit_let(
         ctx.variables.insert(
             name.to_string(),
             VarInfo {
-                alloca_name,
+                alloca_name: alloca_name.clone(),
                 llvm_type,
                 array_info: None,
             },
         );
 
-        // If there is an explicit initializer, emit the store (though struct
-        // literals are not yet supported, this handles future expansion).
+        // If there is an explicit initializer (e.g., a struct literal), memcpy
+        // from the temporary alloca into the variable's alloca.
         if let Some(value) = value {
             let val = emit_expr(ctx, value, Some(&struct_info.llvm_name));
-            // For now we ignore the value for struct types since we don't have
-            // struct literal expressions yet. The struct is already zero-initialized.
-            let _ = val;
+            if val.ty == struct_info.llvm_name {
+                // The struct literal emitted an alloca; memcpy from it.
+                ctx.needs_memcpy = true;
+                ctx.emit(&format!(
+                    "call void @llvm.memcpy.p0.p0.i64(ptr {alloca_name}, ptr {}, i64 {}, i1 false)",
+                    val.reg, struct_info.total_size
+                ));
+            }
         }
 
         return;
@@ -1877,8 +1896,13 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
 
             // Emit the value and store it.
             let rhs_val = emit_expr(ctx, value, Some(&field_type));
+            let store_align = if is_vector_type(&field_type) {
+                format!(", align {}", vector_align(&field_type))
+            } else {
+                String::new()
+            };
             ctx.emit(&format!(
-                "store {field_type} {}, ptr {gep_reg}",
+                "store {field_type} {}, ptr {gep_reg}{store_align}",
                 rhs_val.reg
             ));
         } else {
@@ -2336,6 +2360,9 @@ fn emit_expr(ctx: &mut CodegenContext, expr: &HirExpr, expected_type: Option<&st
             expr: base_expr,
             field,
         } => emit_field_access(ctx, base_expr, field),
+        HirExprKind::StructLiteral { type_name, fields } => {
+            emit_struct_literal(ctx, type_name, fields)
+        }
         HirExprKind::ArrayZeros {
             element_type,
             size,
@@ -2547,6 +2574,135 @@ fn get_struct_base_ptr(ctx: &mut CodegenContext, var_info: &VarInfo) -> String {
     } else {
         // Generic ptr (shouldn't happen for well-typed code, but handle gracefully).
         var_info.alloca_name.clone()
+    }
+}
+
+/// Compute the maximum alignment required by a struct's fields.
+fn struct_max_align(ctx: &CodegenContext, type_name: &str) -> u64 {
+    if let Some(info) = ctx.struct_registry.get(type_name) {
+        info.fields
+            .iter()
+            .map(|(_, ty)| {
+                if is_vector_type(ty) {
+                    vector_align(ty) as u64
+                } else {
+                    8
+                }
+            })
+            .max()
+            .unwrap_or(8)
+    } else {
+        8
+    }
+}
+
+/// Compute struct total size including alignment padding (matching LLVM layout).
+fn compute_struct_size_with_padding(fields: &[(String, String)]) -> u64 {
+    let mut offset: u64 = 0;
+    for (_, ty) in fields {
+        let field_align = if is_vector_type(ty) {
+            vector_align(ty) as u64
+        } else if ty == "double" || ty == "i64" || ty == "ptr" {
+            8
+        } else if ty == "float" || ty == "i32" {
+            4
+        } else {
+            8
+        };
+        let field_size = llvm_type_size(ty);
+        // Align offset to field alignment
+        offset = (offset + field_align - 1) & !(field_align - 1);
+        offset += field_size;
+    }
+    // Align total to max field alignment
+    let max_align = fields
+        .iter()
+        .map(|(_, ty)| {
+            if is_vector_type(ty) {
+                vector_align(ty) as u64
+            } else {
+                8
+            }
+        })
+        .max()
+        .unwrap_or(8);
+    offset = (offset + max_align - 1) & !(max_align - 1);
+    offset
+}
+
+/// Emit a struct literal expression: `Point { x: 1.0, y: 2.0 }`.
+///
+/// Allocates a temporary struct on the stack, zero-initializes it, then stores
+/// each field value via GEP. Returns the alloca pointer.
+fn emit_struct_literal(
+    ctx: &mut CodegenContext,
+    type_name: &str,
+    fields: &[(String, HirExpr)],
+) -> LlvmValue {
+    let struct_info = match ctx.struct_registry.get(type_name) {
+        Some(info) => info.clone(),
+        None => {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: format!("unknown struct type '{type_name}'"),
+                context: "struct literal".to_string(),
+            });
+            return LlvmValue {
+                reg: "undef".to_string(),
+                ty: format!("%struct.{type_name}"),
+            };
+        }
+    };
+
+    // Alloca a temporary struct
+    let tmp = ctx.fresh_reg();
+    let align = struct_max_align(ctx, type_name);
+    ctx.emit(&format!(
+        "{tmp} = alloca {}, align {align}",
+        struct_info.llvm_name
+    ));
+
+    // Zero-initialize
+    ctx.needs_memset = true;
+    let total = struct_info.total_size;
+    ctx.emit(&format!(
+        "call void @llvm.memset.p0.i64(ptr {tmp}, i8 0, i64 {total}, i1 false)"
+    ));
+
+    // Store each field via GEP
+    for (field_name, field_expr) in fields {
+        let field_idx = struct_info.fields.iter().position(|(n, _)| n == field_name);
+        let (idx, field_type) = match field_idx {
+            Some(i) => (i, struct_info.fields[i].1.clone()),
+            None => {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: format!("unknown field '{field_name}' in struct '{type_name}'"),
+                    context: "struct literal".to_string(),
+                });
+                continue;
+            }
+        };
+
+        let val = emit_expr(ctx, field_expr, Some(&field_type));
+        let gep = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{gep} = getelementptr inbounds {}, ptr {tmp}, i32 0, i32 {idx}",
+            struct_info.llvm_name
+        ));
+
+        let field_align = if is_vector_type(&field_type) {
+            format!(", align {}", vector_align(&field_type))
+        } else {
+            String::new()
+        };
+        ctx.emit(&format!(
+            "store {field_type} {}, ptr {gep}{field_align}",
+            val.reg
+        ));
+    }
+
+    LlvmValue {
+        reg: tmp,
+        ty: struct_info.llvm_name.clone(),
     }
 }
 
@@ -2784,14 +2940,61 @@ fn emit_field_access(
 
         // Load the field value.
         let load_reg = ctx.fresh_reg();
+        let field_align = if is_vector_type(&field_type) {
+            format!(", align {}", vector_align(&field_type))
+        } else {
+            String::new()
+        };
         ctx.emit(&format!(
-            "{load_reg} = load {field_type}, ptr {gep_reg}"
+            "{load_reg} = load {field_type}, ptr {gep_reg}{field_align}"
         ));
 
         return LlvmValue {
             reg: load_reg,
             ty: field_type,
         };
+    }
+
+    // Handle nested field access: s.center.x  (FieldAccess on FieldAccess)
+    if let HirExprKind::FieldAccess {
+        expr: inner_expr,
+        field: inner_field,
+    } = &base_expr.kind
+    {
+        // First, emit the inner field access to get a pointer to the sub-struct/vector.
+        let inner_val = emit_field_access(ctx, inner_expr, inner_field);
+
+        // If the result is a vector, handle component access (e.g., .x, .y, .z)
+        if is_vector_type(&inner_val.ty) {
+            let idx = match field {
+                "x" | "r" => 0i32,
+                "y" | "g" => 1,
+                "z" | "b" => 2,
+                "w" | "a" => 3,
+                _ => {
+                    ctx.errors.push(CodegenError::UnsupportedExpression {
+                        expr: format!("unknown vector field `{field}`"),
+                        context: "nested field access".to_string(),
+                    });
+                    return LlvmValue {
+                        reg: "0.0".to_string(),
+                        ty: "double".to_string(),
+                    };
+                }
+            };
+            let result = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{result} = extractelement {} {}, i32 {idx}",
+                inner_val.ty, inner_val.reg
+            ));
+            return LlvmValue {
+                reg: result,
+                ty: "double".to_string(),
+            };
+        }
+
+        // Otherwise it's a scalar field on a nested struct, just return it.
+        return inner_val;
     }
 
     ctx.errors.push(CodegenError::UnsupportedExpression {

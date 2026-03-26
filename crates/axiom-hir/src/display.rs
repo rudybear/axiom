@@ -321,6 +321,16 @@ impl fmt::Display for HirExpr {
             } => {
                 write!(f, "array_zeros[{element_type}, {size}]")
             }
+            HirExprKind::StructLiteral { type_name, fields } => {
+                write!(f, "{type_name} {{ ")?;
+                for (i, (name, expr)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{name}: {expr}")?;
+                }
+                write!(f, " }}")
+            }
         }
     }
 }

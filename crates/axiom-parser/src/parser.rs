@@ -1911,6 +1911,39 @@ impl<'src> Parser<'src> {
             TokenKind::Ident(ref name) => {
                 let name = name.clone();
                 self.advance();
+                // Check for struct literal: Name { field: expr, ... }
+                if matches!(self.peek(), TokenKind::LBrace)
+                    && matches!(self.peek_nth(1), TokenKind::Ident(_))
+                    && matches!(self.peek_nth(2), TokenKind::Colon)
+                {
+                    self.advance(); // consume {
+                    let mut fields = Vec::new();
+                    while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+                        let field_name = match self.peek().clone() {
+                            TokenKind::Ident(ref n) => n.clone(),
+                            _ => {
+                                self.errors.push(ParseError::UnexpectedToken {
+                                    expected: "field name in struct literal".to_string(),
+                                    found: format!("{:?}", self.peek()),
+                                    span: span_to_source_span(self.current_span()),
+                                });
+                                break;
+                            }
+                        };
+                        self.advance(); // consume field name
+                        self.expect(&TokenKind::Colon, "':'");
+                        let value = self.parse_expr();
+                        fields.push((field_name, value));
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&TokenKind::RBrace, "'}'");
+                    return Expr::StructLiteral {
+                        type_name: name,
+                        fields,
+                    };
+                }
                 Expr::Ident(name)
             }
             TokenKind::OptHole(ref name) => {
@@ -3400,6 +3433,59 @@ fn foo() -> i32 {
         assert!(
             !result.has_errors(),
             "empty parallel_for should parse: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_struct_literal_parsing() {
+        let source = r#"
+struct Point { x: f64, y: f64, z: f64 }
+fn main() -> i32 {
+    let p: Point = Point { x: 1.0, y: 2.0, z: 3.0 };
+    return 0;
+}
+"#;
+        let result = parse(source);
+        assert!(
+            !result.has_errors(),
+            "struct literal should parse without errors: {:?}",
+            result.errors
+        );
+        // Find the let statement and verify it has a StructLiteral value
+        let main_fn = result.module.items.iter().find_map(|item| {
+            if let Item::Function(f) = &item.node {
+                if f.name.node == "main" {
+                    return Some(f);
+                }
+            }
+            None
+        });
+        assert!(main_fn.is_some(), "should have a main function");
+        let main_fn = main_fn.unwrap();
+        let let_stmt = main_fn.body.stmts.iter().find_map(|s| {
+            if let Stmt::Let { value: Some(Expr::StructLiteral { type_name, fields }), .. } = &s.node {
+                Some((type_name.clone(), fields.len()))
+            } else {
+                None
+            }
+        });
+        assert_eq!(let_stmt, Some(("Point".to_string(), 3)), "should parse struct literal with 3 fields");
+    }
+
+    #[test]
+    fn test_struct_literal_with_nested_expr() {
+        let source = r#"
+struct Sphere { center: vec3, radius: f64 }
+fn main() -> i32 {
+    let s: Sphere = Sphere { center: vec3(1.0, 2.0, 3.0), radius: 1.5 };
+    return 0;
+}
+"#;
+        let result = parse(source);
+        assert!(
+            !result.has_errors(),
+            "struct literal with nested call should parse: {:?}",
             result.errors
         );
     }

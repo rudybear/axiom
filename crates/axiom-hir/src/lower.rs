@@ -547,6 +547,13 @@ impl LoweringContext {
                     size: sz.unwrap_or(0),
                 }
             }
+            ast::Expr::StructLiteral { type_name, fields } => HirExprKind::StructLiteral {
+                type_name: type_name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(name, expr)| (name.clone(), self.lower_expr(expr, SPAN_DUMMY)))
+                    .collect(),
+            },
         };
 
         HirExpr { id, kind, span }

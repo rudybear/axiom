@@ -6874,3 +6874,115 @@ fn test_ptr_read_u8() {
         "ptr_read_u8 should emit zext i8 to i32: {ir}"
     );
 }
+
+#[test]
+fn test_struct_literal_basic() {
+    let source = r#"
+@module struct_lit;
+struct Point { x: f64, y: f64, z: f64 }
+fn main() -> i32 {
+    let p: Point = Point { x: 1.0, y: 2.0, z: 3.0 };
+    print_f64(p.x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(
+        parse_result.errors.is_empty(),
+        "parse errors: {:?}",
+        parse_result.errors
+    );
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("%struct.Point"),
+        "should define struct: {ir}"
+    );
+    assert!(
+        ir.contains("getelementptr inbounds %struct.Point"),
+        "should GEP for fields: {ir}"
+    );
+    // Check that field values are stored
+    assert!(
+        ir.contains("store double 1.0"),
+        "should store field x: {ir}"
+    );
+    assert!(
+        ir.contains("store double 2.0"),
+        "should store field y: {ir}"
+    );
+    assert!(
+        ir.contains("store double 3.0"),
+        "should store field z: {ir}"
+    );
+    // Should have memcpy from struct literal alloca to variable alloca
+    assert!(
+        ir.contains("@llvm.memcpy.p0.p0.i64"),
+        "should memcpy struct literal to variable: {ir}"
+    );
+}
+
+#[test]
+fn test_struct_literal_with_vec3_fields() {
+    let source = r#"
+@module struct_vec;
+struct Particle { pos: vec3, vel: vec3, mass: f64 }
+fn main() -> i32 {
+    let p: Particle = Particle { pos: vec3(1.0, 2.0, 3.0), vel: vec3(0.0, 0.0, 0.0), mass: 1.5 };
+    print_f64(p.mass);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(
+        parse_result.errors.is_empty(),
+        "parse errors: {:?}",
+        parse_result.errors
+    );
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("<4 x double>"),
+        "should have vec3 type in struct: {ir}"
+    );
+    assert!(
+        ir.contains("%struct.Particle"),
+        "should define struct: {ir}"
+    );
+    assert!(
+        ir.contains("getelementptr inbounds %struct.Particle"),
+        "should GEP: {ir}"
+    );
+}
+
+#[test]
+fn test_struct_literal_nested_field_access() {
+    // Test s.center.x access pattern (FieldAccess on FieldAccess)
+    let source = r#"
+@module nested_field;
+struct Sphere { center: vec3, radius: f64 }
+fn main() -> i32 {
+    let s: Sphere = Sphere { center: vec3(1.0, 2.0, 3.0), radius: 1.5 };
+    print_f64(s.radius);
+    print_f64(s.center.x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(
+        parse_result.errors.is_empty(),
+        "parse errors: {:?}",
+        parse_result.errors
+    );
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("%struct.Sphere"),
+        "should define Sphere: {ir}"
+    );
+    // Should have extractelement for s.center.x
+    assert!(
+        ir.contains("extractelement"),
+        "should extractelement for nested vec3 field access: {ir}"
+    );
+}

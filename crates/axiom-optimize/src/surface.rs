@@ -455,6 +455,11 @@ fn walk_expr_for_holes(expr: &HirExpr, holes: &mut Vec<OptHole>) {
                 walk_expr_for_holes(arg, holes);
             }
         }
+        HirExprKind::StructLiteral { fields, .. } => {
+            for (_, expr) in fields {
+                walk_expr_for_holes(expr, holes);
+            }
+        }
         // Literals, idents, and array constructors have no holes
         HirExprKind::IntLiteral { .. }
         | HirExprKind::FloatLiteral { .. }

@@ -380,6 +380,13 @@ pub enum HirExprKind {
         /// Fixed array size.
         size: usize,
     },
+    /// Struct literal: `Point { x: 1.0, y: 2.0 }`.
+    StructLiteral {
+        /// The struct type name.
+        type_name: String,
+        /// Field name and value pairs.
+        fields: Vec<(String, HirExpr)>,
+    },
 }
 
 /// Validated type reference.
