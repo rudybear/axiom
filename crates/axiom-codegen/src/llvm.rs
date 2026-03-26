@@ -3509,6 +3509,8 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "fabs" => return emit_builtin_math_f64_simple(ctx, args, "fabs", "llvm.fabs.f64"),
             "to_f64" => return emit_builtin_to_f64(ctx, args),
             "to_f64_i64" => return emit_builtin_to_f64_i64(ctx, args),
+            "f32_to_f64" => return emit_builtin_f32_to_f64(ctx, args),
+            "f64_to_f32" => return emit_builtin_f64_to_f32(ctx, args),
             "band" => return emit_builtin_band(ctx, args),
             "bor" => return emit_builtin_bor(ctx, args),
             "bxor" => return emit_builtin_bxor(ctx, args),
@@ -3534,6 +3536,7 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "ptr_write_i16" => return emit_builtin_ptr_write_i16(ctx, args),
             "ptr_read_i16" => return emit_builtin_ptr_read_i16(ctx, args),
             "ptr_read_u8" => return emit_builtin_ptr_read_u8(ctx, args),
+            "ptr_offset" => return emit_builtin_ptr_offset(ctx, args),
             "arena_create" => return emit_builtin_arena_create(ctx, args),
             "arena_alloc" => return emit_builtin_arena_alloc(ctx, args),
             "arena_reset" => return emit_builtin_arena_reset(ctx, args),
@@ -8014,6 +8017,101 @@ fn emit_builtin_ptr_write_i16(
     LlvmValue {
         reg: "0".to_string(),
         ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `ptr_offset(ptr, byte_offset) -> ptr`.
+///
+/// Performs byte-level pointer arithmetic using `getelementptr i8`.
+fn emit_builtin_ptr_offset(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "ptr_offset() requires exactly 2 arguments (ptr, byte_offset)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let base = emit_expr(ctx, &args[0], Some("ptr"));
+    let offset = emit_expr(ctx, &args[1], Some("i64"));
+
+    // Widen offset to i64 if needed.
+    let offset_i64 = if offset.ty != "i64" {
+        let ext = ctx.fresh_reg();
+        ctx.emit(&format!("{ext} = sext {} {} to i64", offset.ty, offset.reg));
+        ext
+    } else {
+        offset.reg
+    };
+
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = getelementptr i8, ptr {}, i64 {offset_i64}",
+        base.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "ptr".to_string(),
+    }
+}
+
+/// Emit built-in `f32_to_f64(x: f32) -> f64`.
+///
+/// Widens a 32-bit float to a 64-bit double via `fpext`.
+fn emit_builtin_f32_to_f64(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "f32_to_f64() requires exactly 1 argument".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0.0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("float"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = fpext float {} to double", val.reg));
+    LlvmValue {
+        reg: result,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `f64_to_f32(x: f64) -> f32`.
+///
+/// Narrows a 64-bit double to a 32-bit float via `fptrunc`.
+fn emit_builtin_f64_to_f32(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "f64_to_f32() requires exactly 1 argument".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0.0".to_string(),
+            ty: "float".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("double"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = fptrunc double {} to float", val.reg));
+    LlvmValue {
+        reg: result,
+        ty: "float".to_string(),
     }
 }
 

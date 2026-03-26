@@ -1,0 +1,36 @@
+@module final_gaps;
+
+fn main() -> i32 {
+    // Gap 6: const
+    const BSP_VERSION: i32 = 38;
+    const LUMP_VERTICES: i32 = 3;
+    print("const: ");
+    print_i32(BSP_VERSION);
+    print_i32(LUMP_VERTICES);
+
+    // Gap 7: ptr_offset
+    let buf: ptr[i64] = heap_alloc(100, 1);
+    ptr_write_i32(buf, 0, 111);
+    ptr_write_i32(buf, 1, 222);
+    let sub: ptr[i64] = ptr_offset(buf, 4);
+    let val: i32 = ptr_read_i32(sub, 0);
+    print("ptr_offset: ");
+    print_i32(val);
+    heap_free(buf);
+
+    // Gap 8: f32 math + conversion
+    let x: f32 = 1.5;
+    let y: f32 = 2.5;
+    let z: f32 = x + y;
+    let zd: f64 = f32_to_f64(z);
+    print("f32: ");
+    print_f64(zd);
+
+    let d: f64 = 3.14;
+    let df: f32 = f64_to_f32(d);
+    let back: f64 = f32_to_f64(df);
+    print("f64->f32->f64: ");
+    print_f64(back);
+
+    return 0;
+}

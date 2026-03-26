@@ -1657,8 +1657,43 @@ impl<'src> Parser<'src> {
             TokenKind::If => Some(self.parse_if_stmt()),
             TokenKind::For => Some(self.parse_for_stmt()),
             TokenKind::While => Some(self.parse_while_stmt()),
+            TokenKind::Ident(ref name) if name == "const" => Some(self.parse_const_stmt()),
             _ => Some(self.parse_assign_or_expr_stmt()),
         }
+    }
+
+    /// Parse a const binding: `const NAME: Type = value;`.
+    ///
+    /// Desugars to an immutable let binding (`let NAME: Type = value;`).
+    /// LLVM constant-folds literal-initialized immutable variables automatically.
+    fn parse_const_stmt(&mut self) -> Spanned<Stmt> {
+        let start_span = self.current_span();
+        self.advance(); // consume "const"
+
+        let name = if let Some((name, span)) = self.expect_ident("constant name") {
+            Spanned::new(name, span)
+        } else {
+            let span = self.current_span();
+            Spanned::new("_error_".to_string(), span)
+        };
+
+        self.expect(&TokenKind::Colon, "':'");
+        let ty = self.parse_type_expr();
+
+        self.expect(&TokenKind::Assign, "'='");
+        let value = self.parse_expr();
+        self.expect_semicolon();
+
+        let end_span = self.prev_span();
+        Spanned::new(
+            Stmt::Let {
+                name,
+                ty,
+                value: Some(value),
+                mutable: false,
+            },
+            start_span.merge(end_span),
+        )
     }
 
     /// Parse a let binding: `let [mut] name: Type [= expr];`.
