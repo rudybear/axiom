@@ -386,7 +386,11 @@ fn walk_stmt_for_holes(kind: &HirStmtKind, holes: &mut Vec<OptHole>) {
             walk_expr_for_holes(target, holes);
             walk_expr_for_holes(value, holes);
         }
-        HirStmtKind::Return { value } => walk_expr_for_holes(value, holes),
+        HirStmtKind::Return { value } => {
+            if let Some(value) = value {
+                walk_expr_for_holes(value, holes);
+            }
+        }
         HirStmtKind::If {
             condition,
             then_block,

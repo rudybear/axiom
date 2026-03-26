@@ -104,7 +104,7 @@ pub enum Stmt {
         target: Expr,
         value: Expr,
     },
-    Return(Expr),
+    Return(Option<Expr>),
     If {
         condition: Expr,
         then_block: Block,

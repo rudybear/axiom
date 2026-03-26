@@ -1366,6 +1366,9 @@ impl<'src> Parser<'src> {
             TokenKind::F32 => { self.advance(); TypeExpr::Named("f32".to_string()) }
             TokenKind::F64 => { self.advance(); TypeExpr::Named("f64".to_string()) }
             TokenKind::Bool => { self.advance(); TypeExpr::Named("bool".to_string()) }
+            TokenKind::Vec2 => { self.advance(); TypeExpr::Named("vec2".to_string()) }
+            TokenKind::Vec3 => { self.advance(); TypeExpr::Named("vec3".to_string()) }
+            TokenKind::Vec4 => { self.advance(); TypeExpr::Named("vec4".to_string()) }
 
             // Tensor type: tensor[T, dims...]
             TokenKind::Tensor => {
@@ -1692,12 +1695,17 @@ impl<'src> Parser<'src> {
         )
     }
 
-    /// Parse a return statement: `return expr;`.
+    /// Parse a return statement: `return expr;` or `return;` (bare return for void functions).
     fn parse_return_stmt(&mut self) -> Spanned<Stmt> {
         let start_span = self.current_span();
         self.advance(); // consume `return`
 
-        let value = self.parse_expr();
+        // Support bare return (no value) for void functions.
+        let value = if self.check(&TokenKind::Semicolon) {
+            None
+        } else {
+            Some(self.parse_expr())
+        };
         self.expect_semicolon();
 
         let end_span = self.prev_span();
@@ -1870,6 +1878,19 @@ impl<'src> Parser<'src> {
             TokenKind::BoolLiteral(b) => {
                 self.advance();
                 Expr::BoolLiteral(b)
+            }
+            // Vector type keywords used as constructors: vec2(...), vec3(...), vec4(...)
+            TokenKind::Vec2 => {
+                self.advance();
+                Expr::Ident("vec2".to_string())
+            }
+            TokenKind::Vec3 => {
+                self.advance();
+                Expr::Ident("vec3".to_string())
+            }
+            TokenKind::Vec4 => {
+                self.advance();
+                Expr::Ident("vec4".to_string())
             }
             TokenKind::Ident(ref name) if name == "array_zeros" => {
                 self.advance();
@@ -2172,7 +2193,8 @@ mod tests {
         };
         let stmt = &func.body.stmts[0].node;
         match stmt {
-            Stmt::Return(expr) => expr.clone(),
+            Stmt::Return(Some(expr)) => expr.clone(),
+            Stmt::Return(None) => panic!("expected return with value"),
             _ => panic!("expected return statement"),
         }
     }

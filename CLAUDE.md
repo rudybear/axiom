@@ -43,7 +43,8 @@ AXIOM Parser (50 tests)       <- Recursive descent + Pratt expressions
 AXIOM HIR (25 tests)          <- Annotation validation, type checking
        |
        v
-LLVM IR Text Gen (128 tests)  <- Optimized IR with noalias, nsw, fast-math,
+LLVM IR Text Gen (140 tests)  <- Optimized IR with noalias, nsw, fast-math,
+       |                          SIMD vec2/vec3/vec4 types,
        |                          fastcc, branch hints, allocator attributes,
        |                          fence release/acquire, readonly/writeonly,
        |                          SIMD width metadata, DWARF debug info
@@ -58,7 +59,7 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`)
-- **Testing**: 469 tests (unit + integration + doc-tests + E2E)
+- **Testing**: 481 tests (unit + integration + doc-tests + E2E)
 - **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos)
 
 ## Current Feature Set
@@ -71,6 +72,7 @@ Pointers:      ptr[T]                   // heap pointer
                readonly_ptr[T]          // read-only pointer (enables LLVM readonly attr)
                writeonly_ptr[T]         // write-only pointer (enables LLVM writeonly attr)
 Slices:        slice[T]                 // fat pointer (ptr + length)
+Vectors:       vec2 vec3 vec4           // SIMD f64 vectors (2/3/4 lanes, hardware-mapped)
 Tensors:       tensor[T, dims...]       // planned
 Tuples:        (T1, T2, T3)
 Functions:     fn(T1, T2) -> R
@@ -100,19 +102,27 @@ Structs:       struct Name { field: Type } // parsed, codegen planned
 @optimization_log { ... }      // Optimization history
 ```
 
-### All Builtin Functions (113 total)
+### All Builtin Functions (137 total)
 
 #### I/O (4)
 ```
 print(str) print_i32(n) print_i64(n) print_f64(x)
 ```
 
-#### Math (11)
+#### Math (26)
 ```
-abs(x) abs_f64(x)
+abs(x) abs_f64(x) fabs(x)
 min(a,b) max(a,b) min_f64(a,b) max_f64(a,b)
 sqrt(x) pow(x,y)
+sin(x) cos(x) tan(x) asin(x) acos(x) atan(x) atan2(y,x)
+floor(x) ceil(x) round(x) log(x) log2(x) exp(x) exp2(x)
 to_f64(i32->f64) to_f64_i64(i64->f64)
+```
+
+#### Vector Construction & Math (9)
+```
+vec2(x,y) vec3(x,y,z) vec4(x,y,z,w)
+dot(a,b) cross(a,b) length(v) normalize(v) reflect(i,n) lerp(a,b,t)
 ```
 
 #### Conversions (3)
@@ -267,6 +277,7 @@ extern fn clock() -> i64;
 | SIMD width metadata | Preferred vector width hints | `@vectorizable` + target detection |
 | DWARF debug info | Source-level debugging with gdb/lldb | `@export` functions, debug builds |
 | `alwaysinline` | Force-inline hot functions, eliminate call overhead | `@inline(always)` annotation |
+| SIMD vector instructions | `fadd`/`fmul`/`fsub`/`fdiv` on `<N x double>`, `shufflevector`, `extractelement` | `vec2`/`vec3`/`vec4` types |
 
 ---
 
@@ -287,9 +298,9 @@ axiom/
 │   ├── axiom-parser/               # Parser -> AST (50 tests)
 │   ├── axiom-hir/                  # HIR + lowering (25 tests)
 │   ├── axiom-mir/                  # Mid-level IR (stub)
-│   ├── axiom-codegen/              # LLVM IR generation (128 tests)
-│   ├── axiom-optimize/             # Optimization protocol + agent API (115 tests)
-│   └── axiom-driver/               # CLI + MCP server + compilation (57 tests)
+│   ├── axiom-codegen/              # LLVM IR generation (140 tests)
+│   ├── axiom-optimize/             # Optimization protocol + agent API (119 tests)
+│   └── axiom-driver/               # CLI + MCP server + compilation (72 tests)
 │       └── runtime/
 │           └── axiom_rt.c          # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
 ├── spec/                           # Formal language specification

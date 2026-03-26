@@ -279,7 +279,7 @@ fn test_main_return_zero() {
             vec![],
             HirType::Primitive(PrimitiveType::I32),
             block(vec![stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             })]),
         )],
     );
@@ -301,7 +301,7 @@ fn test_function_params() {
             ],
             HirType::Primitive(PrimitiveType::I32),
             block(vec![stmt(HirStmtKind::Return {
-                value: binop(BinOp::Add, ident("a"), ident("b")),
+                value: Some(binop(BinOp::Add, ident("a"), ident("b"))),
             })]),
         )],
     );
@@ -345,7 +345,7 @@ fn test_let_binding() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("x"),
+                    value: Some(ident("x")),
                 }),
             ]),
         )],
@@ -378,7 +378,7 @@ fn test_assignment() {
                     value: int_lit(42),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("x"),
+                    value: Some(ident("x")),
                 }),
             ]),
         )],
@@ -404,12 +404,12 @@ fn test_if_no_else() {
                 stmt(HirStmtKind::If {
                     condition: binop(BinOp::Gt, ident("x"), int_lit(0)),
                     then_block: block(vec![stmt(HirStmtKind::Return {
-                        value: int_lit(1),
+                        value: Some(int_lit(1)),
                     })]),
                     else_block: None,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -433,10 +433,10 @@ fn test_if_else() {
             block(vec![stmt(HirStmtKind::If {
                 condition: binop(BinOp::Gt, ident("x"), int_lit(0)),
                 then_block: block(vec![stmt(HirStmtKind::Return {
-                    value: int_lit(1),
+                    value: Some(int_lit(1)),
                 })]),
                 else_block: Some(block(vec![stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 })])),
             })]),
         )],
@@ -481,7 +481,7 @@ fn test_for_loop() {
                     })]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("sum"),
+                    value: Some(ident("sum")),
                 }),
             ]),
         )],
@@ -514,7 +514,7 @@ fn test_function_call() {
                 vec![param("n", HirType::Primitive(PrimitiveType::I32))],
                 HirType::Primitive(PrimitiveType::I64),
                 block(vec![stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 })]),
             ),
             func(
@@ -530,7 +530,7 @@ fn test_function_call() {
                         mutable: false,
                     }),
                     stmt(HirStmtKind::Return {
-                        value: int_lit(0),
+                        value: Some(int_lit(0)),
                     }),
                 ]),
             ),
@@ -558,7 +558,7 @@ fn test_print_string() {
                     expr: call("print", vec![str_lit("hello")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -590,7 +590,7 @@ fn test_print_i64() {
                     expr: call("print_i64", vec![ident("x")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -632,7 +632,7 @@ fn test_widen() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -671,7 +671,7 @@ fn test_bool_literal() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -710,7 +710,7 @@ fn test_unary_neg() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -744,7 +744,7 @@ fn test_unary_not() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -789,7 +789,7 @@ fn test_float_operations() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -823,7 +823,7 @@ fn test_unsupported_type_error() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -927,7 +927,7 @@ fn test_multiple_functions() {
                 vec![param("x", HirType::Primitive(PrimitiveType::I32))],
                 HirType::Primitive(PrimitiveType::I32),
                 block(vec![stmt(HirStmtKind::Return {
-                    value: ident("x"),
+                    value: Some(ident("x")),
                 })]),
             ),
             func(
@@ -935,7 +935,7 @@ fn test_multiple_functions() {
                 vec![],
                 HirType::Primitive(PrimitiveType::I32),
                 block(vec![stmt(HirStmtKind::Return {
-                    value: call("helper", vec![int_lit(42)]),
+                    value: Some(call("helper", vec![int_lit(42)])),
                 })]),
             ),
         ],
@@ -974,7 +974,7 @@ fn test_while_loop() {
                     })]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("x"),
+                    value: Some(ident("x")),
                 }),
             ]),
         )],
@@ -1030,7 +1030,7 @@ fn test_nested_expressions() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -1158,7 +1158,7 @@ fn test_math_builtins() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -1276,7 +1276,7 @@ fn test_conversion_builtins() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -1338,7 +1338,7 @@ fn test_io_builtins() {
                     expr: call("print_f64", vec![ident("y")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -1422,7 +1422,7 @@ fn test_extern_call() {
                 mutable: false,
             }),
             stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             }),
         ]),
     );
@@ -1457,7 +1457,7 @@ fn test_export_function() {
         ],
         return_type: HirType::Primitive(PrimitiveType::I32),
         body: block(vec![stmt(HirStmtKind::Return {
-            value: binop(BinOp::Add, ident("a"), ident("b")),
+            value: Some(binop(BinOp::Add, ident("a"), ident("b"))),
         })]),
         span: span(),
     };
@@ -1596,7 +1596,7 @@ fn test_to_f64() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -1637,7 +1637,7 @@ fn test_to_f64_i64() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -1819,7 +1819,7 @@ fn test_array_alloca() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -1881,7 +1881,7 @@ fn test_array_index_read() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("x"),
+                    value: Some(ident("x")),
                 }),
             ]),
         )],
@@ -1937,7 +1937,7 @@ fn test_array_index_write() {
                     value: int_lit(42),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -2072,7 +2072,7 @@ fn test_noalias_params() {
         ],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: int_lit(0),
+            value: Some(int_lit(0)),
         })]),
         vec![],
     );
@@ -2102,7 +2102,7 @@ fn test_pure_function_attrs_readnone() {
         vec![param("n", HirType::Primitive(PrimitiveType::I64))],
         HirType::Primitive(PrimitiveType::I64),
         block(vec![stmt(HirStmtKind::Return {
-            value: ident("n"),
+            value: Some(ident("n")),
         })]),
         vec![pure_ann()],
     );
@@ -2154,7 +2154,7 @@ fn test_pure_function_attrs_argmem_read() {
         ],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: int_lit(0),
+            value: Some(int_lit(0)),
         })]),
         vec![pure_ann()],
     );
@@ -2206,7 +2206,7 @@ fn test_nsw_arithmetic() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("sum"),
+                    value: Some(ident("sum")),
                 }),
             ]),
         )],
@@ -2248,7 +2248,7 @@ fn test_wrap_ops_no_nsw() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("x"),
+                    value: Some(ident("x")),
                 }),
             ]),
         )],
@@ -2300,7 +2300,7 @@ fn test_fast_float_in_pure() {
                 mutable: false,
             }),
             stmt(HirStmtKind::Return {
-                value: ident("sum"),
+                value: Some(ident("sum")),
             }),
         ]),
         vec![pure_ann()],
@@ -2351,7 +2351,7 @@ fn test_no_fast_float_outside_pure() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -2379,7 +2379,7 @@ fn test_const_eval_simple() {
         vec![param("n", HirType::Primitive(PrimitiveType::I32))],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: binop(BinOp::Mul, ident("n"), ident("n")),
+            value: Some(binop(BinOp::Mul, ident("n"), ident("n"))),
         })]),
         vec![const_ann()],
     );
@@ -2389,7 +2389,7 @@ fn test_const_eval_simple() {
         vec![],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: call("square", vec![int_lit(42)]),
+            value: Some(call("square", vec![int_lit(42)])),
         })]),
     );
 
@@ -2417,7 +2417,7 @@ fn test_const_function_attributes() {
         vec![param("n", HirType::Primitive(PrimitiveType::I32))],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: binop(BinOp::Mul, ident("n"), ident("n")),
+            value: Some(binop(BinOp::Mul, ident("n"), ident("n"))),
         })]),
         vec![const_ann()],
     );
@@ -2448,10 +2448,10 @@ fn test_branch_prediction_hints() {
             stmt(HirStmtKind::If {
                 condition: binop(BinOp::LtEq, ident("n"), int_lit(1)),
                 then_block: block(vec![stmt(HirStmtKind::Return {
-                    value: ident("n"),
+                    value: Some(ident("n")),
                 })]),
                 else_block: Some(block(vec![stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 })])),
             }),
         ]),
@@ -2491,12 +2491,12 @@ fn test_no_branch_hints_in_non_pure() {
                 stmt(HirStmtKind::If {
                     condition: binop(BinOp::LtEq, ident("n"), int_lit(1)),
                     then_block: block(vec![stmt(HirStmtKind::Return {
-                        value: int_lit(1),
+                        value: Some(int_lit(1)),
                     })]),
                     else_block: None,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -2548,7 +2548,7 @@ fn test_loop_vectorization_hints() {
                 })]),
             }),
             stmt(HirStmtKind::Return {
-                value: ident("sum"),
+                value: Some(ident("sum")),
             }),
         ]),
         vec![vectorizable_ann()],
@@ -2596,7 +2596,7 @@ fn test_no_vectorization_without_annotation() {
                     })]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("sum"),
+                    value: Some(ident("sum")),
                 }),
             ]),
         )],
@@ -2676,7 +2676,7 @@ fn test_noalias_call_args() {
         ],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: int_lit(0),
+            value: Some(int_lit(0)),
         })]),
     );
 
@@ -2710,7 +2710,7 @@ fn test_noalias_call_args() {
                 mutable: false,
             }),
             stmt(HirStmtKind::Return {
-                value: ident("result"),
+                value: Some(ident("result")),
             }),
         ]),
     );
@@ -2745,7 +2745,7 @@ fn test_loop_increment_nsw() {
                     body: block(vec![]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -2828,7 +2828,7 @@ fn test_bitwise_builtins() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -2900,7 +2900,7 @@ fn test_bitwise_rotate_builtins() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -2953,7 +2953,7 @@ fn test_heap_alloc() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -2989,7 +2989,7 @@ fn test_heap_alloc_zeroed() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3028,7 +3028,7 @@ fn test_heap_free() {
                     expr: call("heap_free", vec![ident("p")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3074,7 +3074,7 @@ fn test_heap_realloc() {
                     expr: call("heap_free", vec![ident("p")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3127,7 +3127,7 @@ fn test_ptr_read_write_i32() {
                     expr: call("heap_free", vec![ident("p")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("val"),
+                    value: Some(ident("val")),
                 }),
             ]),
         )],
@@ -3185,7 +3185,7 @@ fn test_ptr_read_write_f64() {
                     expr: call("heap_free", vec![ident("p")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3241,7 +3241,7 @@ fn test_ptr_read_write_i64() {
                     expr: call("heap_free", vec![ident("p")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3334,7 +3334,7 @@ fn test_heap_program_full_integration() {
                     expr: call("print_i64", vec![ident("sum")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3379,7 +3379,7 @@ fn test_no_malloc_decl_when_unused() {
             vec![],
             HirType::Primitive(PrimitiveType::I32),
             block(vec![stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             })]),
         )],
     );
@@ -3450,7 +3450,7 @@ fn test_malloc_alloc_attrs() {
                     expr: call("heap_free", vec![ident("q")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3532,7 +3532,7 @@ fn test_escape_analysis_hint() {
                     expr: call("heap_free", vec![ident("buf")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(42),
+                    value: Some(int_lit(42)),
                 }),
             ]),
             vec![pure_ann()],
@@ -3599,7 +3599,7 @@ fn test_lifetime_scope() {
                     vec![lifetime_scope_ann],
                 ),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3650,7 +3650,7 @@ fn test_arena_create() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3716,7 +3716,7 @@ fn test_arena_alloc() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3774,7 +3774,7 @@ fn test_arena_reset() {
                     expr: call("arena_reset", vec![ident("arena")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3813,7 +3813,7 @@ fn test_arena_destroy() {
                     expr: call("arena_destroy", vec![ident("arena")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3903,7 +3903,7 @@ fn test_arena_program() {
                     expr: call("arena_destroy", vec![ident("arena")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -3972,7 +3972,7 @@ fn test_struct_type_definition() {
             vec![],
             HirType::Primitive(PrimitiveType::I32),
             block(vec![stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             })]),
         )],
         vec![vec3],
@@ -4020,7 +4020,7 @@ fn test_struct_field_access() {
                     value: float_lit(2.0),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4080,7 +4080,7 @@ fn test_struct_as_param() {
             vec![param("v", HirType::UserDefined("Vec2".to_string()))],
             HirType::Primitive(PrimitiveType::F64),
             block(vec![stmt(HirStmtKind::Return {
-                value: field_access(ident("v"), "x"),
+                value: Some(field_access(ident("v"), "x")),
             })]),
         )],
         vec![vec2],
@@ -4213,7 +4213,7 @@ fn test_struct_field_read() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4246,7 +4246,7 @@ fn test_let_without_initializer() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("x"),
+                    value: Some(ident("x")),
                 }),
             ]),
         )],
@@ -4284,7 +4284,7 @@ fn test_clock_ns_builtin() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4334,7 +4334,7 @@ fn test_file_read_builtin() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4368,7 +4368,7 @@ fn test_file_size_builtin() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4402,7 +4402,7 @@ fn test_get_argc_builtin() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4438,7 +4438,7 @@ fn test_get_argv_builtin() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4465,7 +4465,7 @@ fn test_runtime_declarations_only_when_needed() {
             vec![],
             HirType::Primitive(PrimitiveType::I32),
             block(vec![stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             })]),
         )],
     );
@@ -4497,7 +4497,7 @@ fn test_file_write_builtin() {
                     ),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4536,7 +4536,7 @@ fn test_coro_resume_builtin() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4571,7 +4571,7 @@ fn test_coro_yield_builtin() {
                     expr: call("coro_yield", vec![int_lit(42)]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4606,7 +4606,7 @@ fn test_coro_is_done_builtin() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4637,7 +4637,7 @@ fn test_coro_destroy_builtin() {
                     expr: call("coro_destroy", vec![int_lit(0)]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4668,7 +4668,7 @@ fn test_coro_all_declarations_emitted() {
                     expr: call("coro_yield", vec![int_lit(1)]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4768,7 +4768,7 @@ fn test_pure_with_ptr_readonly_gets_argmem_read() {
         ],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: int_lit(0),
+            value: Some(int_lit(0)),
         })]),
         vec![pure_ann()],
     );
@@ -4802,7 +4802,7 @@ fn test_noalias_on_pure_with_ptr() {
         ],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: int_lit(0),
+            value: Some(int_lit(0)),
         })]),
         vec![pure_ann()],
     );
@@ -4863,7 +4863,7 @@ fn test_fence_acquire_after_job_wait() {
                     expr: call("job_wait", vec![]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -4923,7 +4923,7 @@ fn test_fence_release_before_job_dispatch() {
                 ),
             }),
             stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             }),
         ]),
     );
@@ -4956,7 +4956,7 @@ fn test_no_nosync_on_pure() {
         vec![param("n", HirType::Primitive(PrimitiveType::I64))],
         HirType::Primitive(PrimitiveType::I64),
         block(vec![stmt(HirStmtKind::Return {
-            value: ident("n"),
+            value: Some(ident("n")),
         })]),
         vec![pure_ann()],
     );
@@ -4978,7 +4978,7 @@ fn test_nosync_on_const() {
         vec![param("n", HirType::Primitive(PrimitiveType::I32))],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: binop(BinOp::Mul, ident("n"), ident("n")),
+            value: Some(binop(BinOp::Mul, ident("n"), ident("n"))),
         })]),
         vec![const_ann()],
     );
@@ -5003,7 +5003,7 @@ fn test_pure_scalar_only_memory_none() {
         ],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: binop(BinOp::Add, ident("a"), ident("b")),
+            value: Some(binop(BinOp::Add, ident("a"), ident("b"))),
         })]),
         vec![pure_ann()],
     );
@@ -5041,11 +5041,11 @@ fn test_no_willreturn_on_pure() {
             stmt(HirStmtKind::While {
                 condition: binop(BinOp::Gt, ident("n"), int_lit(0)),
                 body: block(vec![stmt(HirStmtKind::Return {
-                    value: ident("n"),
+                    value: Some(ident("n")),
                 })]),
             }),
             stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             }),
         ]),
         vec![pure_ann()],
@@ -5068,7 +5068,7 @@ fn test_willreturn_on_const() {
         vec![param("n", HirType::Primitive(PrimitiveType::I32))],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: binop(BinOp::Mul, ident("n"), ident("n")),
+            value: Some(binop(BinOp::Mul, ident("n"), ident("n"))),
         })]),
         vec![const_ann()],
     );
@@ -5098,7 +5098,7 @@ fn test_noalias_on_callsite_ptr_args() {
         ],
         HirType::Unknown("void".to_string()),
         block(vec![stmt(HirStmtKind::Return {
-            value: int_lit(0),
+            value: Some(int_lit(0)),
         })]),
         vec![],
     );
@@ -5121,7 +5121,7 @@ fn test_noalias_on_callsite_ptr_args() {
                 expr: call("write_arr", vec![ident("data"), int_lit(10)]),
             }),
             stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             }),
         ]),
     );
@@ -5144,7 +5144,7 @@ fn test_const_attrs_complete() {
         vec![param("n", HirType::Primitive(PrimitiveType::I32))],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: binop(BinOp::Mul, ident("n"), ident("n")),
+            value: Some(binop(BinOp::Mul, ident("n"), ident("n"))),
         })]),
         vec![const_ann()],
     );
@@ -5195,7 +5195,7 @@ fn test_aliasing_warning_on_same_ptr_arg() {
         ],
         HirType::Unknown("void".to_string()),
         block(vec![stmt(HirStmtKind::Return {
-            value: int_lit(0),
+            value: Some(int_lit(0)),
         })]),
         vec![],
     );
@@ -5219,7 +5219,7 @@ fn test_aliasing_warning_on_same_ptr_arg() {
                 expr: call("swap", vec![ident("data"), ident("data")]),
             }),
             stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             }),
         ]),
     );
@@ -5276,7 +5276,7 @@ fn test_parallel_for_loop_metadata() {
                 vec![pf_ann],
             ),
             stmt(HirStmtKind::Return {
-                value: ident("sum"),
+                value: Some(ident("sum")),
             }),
         ]),
     );
@@ -5332,7 +5332,7 @@ fn test_non_parallel_for_no_parallel_metadata() {
                 })]),
             }),
             stmt(HirStmtKind::Return {
-                value: ident("sum"),
+                value: Some(ident("sum")),
             }),
         ]),
     );
@@ -5367,7 +5367,7 @@ fn test_readonly_ptr_type() {
         ],
         HirType::Primitive(PrimitiveType::F64),
         block(vec![stmt(HirStmtKind::Return {
-            value: call("ptr_read_f64", vec![ident("data"), int_lit(0)]),
+            value: Some(call("ptr_read_f64", vec![ident("data"), int_lit(0)])),
         })]),
     );
 
@@ -5472,7 +5472,7 @@ fn test_writeonly_ptr_read_error() {
         )],
         HirType::Primitive(PrimitiveType::I32),
         block(vec![stmt(HirStmtKind::Return {
-            value: call("ptr_read_i32", vec![ident("data"), int_lit(0)]),
+            value: Some(call("ptr_read_i32", vec![ident("data"), int_lit(0)])),
         })]),
     );
 
@@ -5535,7 +5535,7 @@ fn test_job_handle() {
                 expr: call("job_wait_handle", vec![ident("h")]),
             }),
             stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             }),
         ]),
     );
@@ -5626,7 +5626,7 @@ fn test_job_dependency() {
                 expr: call("job_wait_handle", vec![ident("h2")]),
             }),
             stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             }),
         ]),
     );
@@ -5706,7 +5706,7 @@ fn test_option_builtins() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -5811,7 +5811,7 @@ fn test_string_builtins() {
                     expr: call("string_print", vec![ident("s")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -5912,7 +5912,7 @@ fn test_vec_builtins() {
                     expr: call("vec_free", vec![ident("v")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -6008,7 +6008,7 @@ fn test_vec_f64_builtins() {
                     expr: call("vec_free", vec![ident("v")]),
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -6057,7 +6057,7 @@ fn test_fn_ptr_builtins() {
         params: vec![param("x", HirType::Primitive(PrimitiveType::I32))],
         return_type: HirType::Primitive(PrimitiveType::I32),
         body: block(vec![stmt(HirStmtKind::Return {
-            value: binop(BinOp::Mul, ident("x"), int_lit(2)),
+            value: Some(binop(BinOp::Mul, ident("x"), int_lit(2))),
         })]),
         span: span(),
     };
@@ -6089,7 +6089,7 @@ fn test_fn_ptr_builtins() {
                 mutable: false,
             }),
             stmt(HirStmtKind::Return {
-                value: ident("result"),
+                value: Some(ident("result")),
             }),
         ]),
     );
@@ -6172,7 +6172,7 @@ fn test_result_builtins() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: int_lit(0),
+                    value: Some(int_lit(0)),
                 }),
             ]),
         )],
@@ -6234,7 +6234,7 @@ fn test_cpu_features_builtin() {
                     mutable: false,
                 }),
                 stmt(HirStmtKind::Return {
-                    value: ident("features"),
+                    value: Some(ident("features")),
                 }),
             ]),
         )],
@@ -6300,7 +6300,7 @@ fn test_vectorize_width_metadata() {
                 })]),
             }),
             stmt(HirStmtKind::Return {
-                value: ident("sum"),
+                value: Some(ident("sum")),
             }),
         ]),
         vec![vectorizable_ann()],
@@ -6333,7 +6333,7 @@ fn test_dwarf_debug_info() {
             vec![],
             HirType::Primitive(PrimitiveType::I32),
             block(vec![stmt(HirStmtKind::Return {
-                value: int_lit(0),
+                value: Some(int_lit(0)),
             })]),
         )],
     );
@@ -6369,4 +6369,260 @@ fn test_dwarf_debug_info() {
         ir.contains("producer: \"axiom\""),
         "should have producer axiom: {ir}"
     );
+}
+
+// ── vec2/vec3/vec4 SIMD vector type tests ────────────────────────────
+
+#[test]
+fn test_vec3_constructor_and_field_access() {
+    let source = r#"
+@module vec_test;
+fn main() -> i32 {
+    let v: vec3 = vec3(1.0, 2.0, 3.0);
+    let x: f64 = v.x;
+    let y: f64 = v.y;
+    let z: f64 = v.z;
+    print_f64(x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("<4 x double>"), "should use <4 x double> for vec3: {ir}");
+    assert!(ir.contains("insertelement"), "should emit insertelement for constructor: {ir}");
+    assert!(ir.contains("extractelement"), "should emit extractelement for field access: {ir}");
+}
+
+#[test]
+fn test_vec3_arithmetic() {
+    let source = r#"
+@module vec_arith;
+@pure
+fn add_vecs(a: vec3, b: vec3) -> vec3 {
+    return a + b;
+}
+fn main() -> i32 {
+    let a: vec3 = vec3(1.0, 2.0, 3.0);
+    let b: vec3 = vec3(4.0, 5.0, 6.0);
+    let c: vec3 = add_vecs(a, b);
+    print_f64(c.x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("fadd fast <4 x double>"), "should emit fadd fast for @pure vec3 add: {ir}");
+    assert!(ir.contains("ret <4 x double>"), "should return <4 x double>: {ir}");
+}
+
+#[test]
+fn test_vec3_scalar_multiply() {
+    let source = r#"
+@module vec_scale;
+fn main() -> i32 {
+    let v: vec3 = vec3(1.0, 2.0, 3.0);
+    let s: vec3 = v * 2.0;
+    print_f64(s.x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("shufflevector"), "should broadcast scalar: {ir}");
+    assert!(ir.contains("zeroinitializer"), "should use zeroinitializer for broadcast: {ir}");
+    assert!(ir.contains("fmul <4 x double>"), "should emit fmul for vec3 * scalar: {ir}");
+}
+
+#[test]
+fn test_vec3_dot_product() {
+    let source = r#"
+@module vec_dot;
+fn main() -> i32 {
+    let a: vec3 = vec3(1.0, 2.0, 3.0);
+    let b: vec3 = vec3(4.0, 5.0, 6.0);
+    let d: f64 = dot(a, b);
+    print_f64(d);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("fmul <4 x double>"), "should emit fmul for dot: {ir}");
+    assert!(ir.contains("extractelement"), "should extract lanes for horizontal sum: {ir}");
+}
+
+#[test]
+fn test_vec3_cross_product() {
+    let source = r#"
+@module vec_cross;
+fn main() -> i32 {
+    let a: vec3 = vec3(1.0, 0.0, 0.0);
+    let b: vec3 = vec3(0.0, 1.0, 0.0);
+    let c: vec3 = cross(a, b);
+    print_f64(c.z);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("shufflevector"), "should emit shufflevector for cross: {ir}");
+    assert!(ir.contains("fsub <4 x double>"), "should emit fsub in cross: {ir}");
+}
+
+#[test]
+fn test_vec3_length_and_normalize() {
+    let source = r#"
+@module vec_len;
+fn main() -> i32 {
+    let v: vec3 = vec3(3.0, 4.0, 0.0);
+    let len: f64 = length(v);
+    let n: vec3 = normalize(v);
+    print_f64(len);
+    print_f64(n.x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("@llvm.sqrt.f64"), "should use sqrt for length/normalize: {ir}");
+    assert!(ir.contains("fdiv"), "should use fdiv for 1/length in normalize: {ir}");
+}
+
+#[test]
+fn test_vec3_reflect() {
+    let source = r#"
+@module vec_reflect;
+fn main() -> i32 {
+    let i: vec3 = vec3(1.0, -1.0, 0.0);
+    let n: vec3 = vec3(0.0, 1.0, 0.0);
+    let r: vec3 = reflect(i, n);
+    print_f64(r.y);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("fsub <4 x double>"), "should emit fsub for reflect: {ir}");
+    assert!(ir.contains("shufflevector"), "should broadcast dot in reflect: {ir}");
+}
+
+#[test]
+fn test_vec3_lerp() {
+    let source = r#"
+@module vec_lerp;
+fn main() -> i32 {
+    let a: vec3 = vec3(0.0, 0.0, 0.0);
+    let b: vec3 = vec3(10.0, 20.0, 30.0);
+    let m: vec3 = lerp(a, b, 0.5);
+    print_f64(m.x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("fsub <4 x double>"), "should emit fsub for b-a in lerp: {ir}");
+    assert!(ir.contains("fadd <4 x double>"), "should emit fadd for a + t*(b-a) in lerp: {ir}");
+}
+
+#[test]
+fn test_vec2_operations() {
+    let source = r#"
+@module vec2_test;
+fn main() -> i32 {
+    let a: vec2 = vec2(3.0, 4.0);
+    let b: vec2 = vec2(1.0, 2.0);
+    let c: vec2 = a + b;
+    let d: f64 = dot(a, b);
+    print_f64(c.x);
+    print_f64(d);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("<2 x double>"), "should use <2 x double> for vec2: {ir}");
+    assert!(ir.contains("fadd <2 x double>"), "should emit fadd <2 x double>: {ir}");
+}
+
+#[test]
+fn test_vec4_operations() {
+    let source = r#"
+@module vec4_test;
+fn main() -> i32 {
+    let a: vec4 = vec4(1.0, 2.0, 3.0, 4.0);
+    let b: vec4 = vec4(5.0, 6.0, 7.0, 8.0);
+    let c: vec4 = a + b;
+    let w: f64 = c.w;
+    print_f64(w);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("<4 x double>"), "should use <4 x double> for vec4: {ir}");
+    assert!(ir.contains("fadd <4 x double>"), "should emit fadd for vec4: {ir}");
+}
+
+#[test]
+fn test_vec3_field_assignment() {
+    let source = r#"
+@module vec_assign;
+fn main() -> i32 {
+    let v: vec3 = vec3(0.0, 0.0, 0.0);
+    v.x = 5.0;
+    v.y = 10.0;
+    print_f64(v.x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("insertelement <4 x double>"), "should emit insertelement for field assign: {ir}");
+    assert!(ir.contains("store <4 x double>"), "should store updated vector: {ir}");
+}
+
+#[test]
+fn test_vec3_pass_and_return_by_value() {
+    let source = r#"
+@module vec_passret;
+@pure
+fn scale(v: vec3, s: f64) -> vec3 {
+    return v * s;
+}
+fn main() -> i32 {
+    let v: vec3 = vec3(1.0, 2.0, 3.0);
+    let r: vec3 = scale(v, 3.0);
+    print_f64(r.z);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    // Function should take <4 x double> param and return <4 x double>
+    assert!(ir.contains("@scale(<4 x double>"), "should pass vec3 by value: {ir}");
+    assert!(ir.contains("ret <4 x double>"), "should return vec3 by value: {ir}");
 }

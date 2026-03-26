@@ -213,7 +213,11 @@ fn write_stmt(f: &mut fmt::Formatter<'_>, stmt: &HirStmt, indent: usize) -> fmt:
             )?;
         }
         HirStmtKind::Return { value } => {
-            writeln!(f, "{prefix}return {value};  // [node:{}]", stmt.id)?;
+            if let Some(value) = value {
+                writeln!(f, "{prefix}return {value};  // [node:{}]", stmt.id)?;
+            } else {
+                writeln!(f, "{prefix}return;  // [node:{}]", stmt.id)?;
+            }
         }
         HirStmtKind::If {
             condition,
@@ -383,6 +387,9 @@ impl fmt::Display for PrimitiveType {
             Self::F32 => "f32",
             Self::F64 => "f64",
             Self::Bool => "bool",
+            Self::Vec2 => "vec2",
+            Self::Vec3 => "vec3",
+            Self::Vec4 => "vec4",
         };
         write!(f, "{s}")
     }

@@ -203,6 +203,9 @@ pub enum TokenKind {
     Ptr,
     ReadonlyPtr,
     WriteonlyPtr,
+    Vec2,
+    Vec3,
+    Vec4,
 
     // ── Conversion keywords ─────────────────────────────
     Widen,
@@ -298,6 +301,9 @@ impl TokenKind {
             "ptr" => Some(TokenKind::Ptr),
             "readonly_ptr" => Some(TokenKind::ReadonlyPtr),
             "writeonly_ptr" => Some(TokenKind::WriteonlyPtr),
+            "vec2" => Some(TokenKind::Vec2),
+            "vec3" => Some(TokenKind::Vec3),
+            "vec4" => Some(TokenKind::Vec4),
             "widen" => Some(TokenKind::Widen),
             "narrow" => Some(TokenKind::Narrow),
             "truncate" => Some(TokenKind::Truncate),

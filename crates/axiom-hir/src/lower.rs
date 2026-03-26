@@ -421,8 +421,8 @@ impl LoweringContext {
                 target: self.lower_expr(target, span),
                 value: self.lower_expr(value, span),
             },
-            ast::Stmt::Return(expr) => HirStmtKind::Return {
-                value: self.lower_expr(expr, span),
+            ast::Stmt::Return(expr_opt) => HirStmtKind::Return {
+                value: expr_opt.as_ref().map(|e| self.lower_expr(e, span)),
             },
             ast::Stmt::If {
                 condition,
@@ -698,7 +698,7 @@ fn lower_dim_expr(dim: &ast::DimExpr) -> HirDimExpr {
 /// All known primitive type names.
 const PRIMITIVE_NAMES: &[&str] = &[
     "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f16", "bf16", "f32",
-    "f64", "bool",
+    "f64", "bool", "vec2", "vec3", "vec4",
 ];
 
 /// Map a type name string to a [`PrimitiveType`] enum variant.
@@ -719,6 +719,9 @@ fn resolve_primitive_type(name: &str) -> Option<PrimitiveType> {
         "f32" => Some(PrimitiveType::F32),
         "f64" => Some(PrimitiveType::F64),
         "bool" => Some(PrimitiveType::Bool),
+        "vec2" => Some(PrimitiveType::Vec2),
+        "vec3" => Some(PrimitiveType::Vec3),
+        "vec4" => Some(PrimitiveType::Vec4),
         _ => None,
     }
 }
@@ -897,7 +900,7 @@ fn foo(x: i32) -> i32 {
                     body: ast::Block {
                         annotations: vec![],
                         stmts: vec![ast::Spanned::new(
-                            ast::Stmt::Return(ast::Expr::IntLiteral(0)),
+                            ast::Stmt::Return(Some(ast::Expr::IntLiteral(0))),
                             Span::new(10, 20),
                         )],
                     },
@@ -934,7 +937,7 @@ fn foo(x: i32) -> i32 {
                     body: ast::Block {
                         annotations: vec![],
                         stmts: vec![ast::Spanned::new(
-                            ast::Stmt::Return(ast::Expr::IntLiteral(0)),
+                            ast::Stmt::Return(Some(ast::Expr::IntLiteral(0))),
                             Span::new(10, 20),
                         )],
                     },
@@ -970,7 +973,7 @@ fn foo(x: i32) -> i32 {
                     body: ast::Block {
                         annotations: vec![],
                         stmts: vec![ast::Spanned::new(
-                            ast::Stmt::Return(ast::Expr::IntLiteral(0)),
+                            ast::Stmt::Return(Some(ast::Expr::IntLiteral(0))),
                             Span::new(10, 20),
                         )],
                     },
@@ -1035,7 +1038,7 @@ fn foo(x: i32) -> i32 {
                     body: ast::Block {
                         annotations: vec![],
                         stmts: vec![ast::Spanned::new(
-                            ast::Stmt::Return(ast::Expr::IntLiteral(0)),
+                            ast::Stmt::Return(Some(ast::Expr::IntLiteral(0))),
                             Span::new(10, 20),
                         )],
                     },
@@ -1076,7 +1079,7 @@ fn foo(x: i32) -> i32 {
                     body: ast::Block {
                         annotations: vec![],
                         stmts: vec![ast::Spanned::new(
-                            ast::Stmt::Return(ast::Expr::IntLiteral(0)),
+                            ast::Stmt::Return(Some(ast::Expr::IntLiteral(0))),
                             Span::new(10, 20),
                         )],
                     },
@@ -1122,7 +1125,7 @@ fn foo(x: i32, y: f64, z: bool) -> i32 {
                     body: ast::Block {
                         annotations: vec![],
                         stmts: vec![ast::Spanned::new(
-                            ast::Stmt::Return(ast::Expr::IntLiteral(0)),
+                            ast::Stmt::Return(Some(ast::Expr::IntLiteral(0))),
                             Span::new(10, 20),
                         )],
                     },
@@ -1339,7 +1342,7 @@ struct Point {
                                 ),
                                 // Return
                                 ast::Spanned::new(
-                                    ast::Stmt::Return(ast::Expr::Ident("a".to_string())),
+                                    ast::Stmt::Return(Some(ast::Expr::Ident("a".to_string()))),
                                     Span::new(115, 120),
                                 ),
                             ],
@@ -1429,7 +1432,7 @@ struct Point {
                     HirStmtKind::Assign { target, value } => {
                         check_expr(target, kind_check) || check_expr(value, kind_check)
                     }
-                    HirStmtKind::Return { value } => check_expr(value, kind_check),
+                    HirStmtKind::Return { value } => value.as_ref().is_some_and(|v| check_expr(v, kind_check)),
                     HirStmtKind::If { condition, .. } => check_expr(condition, kind_check),
                     HirStmtKind::For { iterable, .. } => check_expr(iterable, kind_check),
                     HirStmtKind::While { condition, .. } => check_expr(condition, kind_check),
@@ -1510,7 +1513,7 @@ fn f() -> i32 {
                         body: ast::Block {
                             annotations: vec![],
                             stmts: vec![ast::Spanned::new(
-                                ast::Stmt::Return(ast::Expr::IntLiteral(0)),
+                                ast::Stmt::Return(Some(ast::Expr::IntLiteral(0))),
                                 Span::new(5, 15),
                             )],
                         },
@@ -1526,7 +1529,7 @@ fn f() -> i32 {
                         body: ast::Block {
                             annotations: vec![],
                             stmts: vec![ast::Spanned::new(
-                                ast::Stmt::Return(ast::Expr::IntLiteral(1)),
+                                ast::Stmt::Return(Some(ast::Expr::IntLiteral(1))),
                                 Span::new(30, 40),
                             )],
                         },

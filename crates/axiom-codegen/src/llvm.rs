@@ -152,6 +152,8 @@ struct CodegenContext {
     /// Whether the AXIOM C runtime is needed (file I/O, clock, argc/argv, coroutines).
     /// When true, `axiom_rt.c` must be linked alongside the `.ll` file.
     needs_runtime: bool,
+    /// Extra math function declarations needed (sin, cos, floor, etc.).
+    math_decls: std::collections::HashSet<String>,
     /// Whether coroutine builtins are used (coro_create/coro_resume/etc.).
     /// When true, coroutine extern declarations are emitted and the runtime is linked.
     needs_coroutines: bool,
@@ -242,6 +244,7 @@ impl CodegenContext {
             needs_free: false,
             needs_arena: false,
             needs_runtime: false,
+            math_decls: std::collections::HashSet::new(),
             needs_coroutines: false,
             needs_threading: false,
             needs_renderer: false,
@@ -503,6 +506,10 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     }
     if ctx.needs_fabs_f64 {
         let _ = writeln!(ctx.output, "declare double @llvm.fabs.f64(double)");
+    }
+    // Extra math function declarations (sin, cos, floor, etc.)
+    for decl in &ctx.math_decls {
+        let _ = writeln!(ctx.output, "{decl}");
     }
     if ctx.needs_memset {
         let _ = writeln!(
@@ -1026,7 +1033,7 @@ fn function_writes_through_ptrs(body: &HirBlock) -> bool {
                 }
                 expr_has_ptr_write(target) || expr_has_ptr_write(value)
             }
-            HirStmtKind::Return { value } => expr_has_ptr_write(value),
+            HirStmtKind::Return { value } => value.as_ref().is_some_and(|v| expr_has_ptr_write(v)),
             HirStmtKind::If {
                 condition,
                 then_block,
@@ -1350,9 +1357,13 @@ fn emit_param_allocas(ctx: &mut CodegenContext, params: &[HirParam]) {
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
+            let align_suffix = match vector_align(&llvm_type) {
+                0 => String::new(),
+                a => format!(", align {a}"),
+            };
+            ctx.emit(&format!("{alloca_name} = alloca {llvm_type}{align_suffix}"));
             ctx.emit(&format!(
-                "store {llvm_type} %{}, ptr {alloca_name}",
+                "store {llvm_type} %{}, ptr {alloca_name}{align_suffix}",
                 param.name
             ));
             ctx.variables.insert(
@@ -1388,7 +1399,14 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
             ..
         } => emit_let(ctx, name, ty, value.as_ref(), &stmt.annotations),
         HirStmtKind::Assign { target, value } => emit_assign(ctx, target, value),
-        HirStmtKind::Return { value } => emit_return(ctx, value),
+        HirStmtKind::Return { value } => {
+            if let Some(value) = value {
+                emit_return(ctx, value);
+            } else {
+                ctx.emit("ret void");
+                ctx.block_terminated = true;
+            }
+        }
         HirStmtKind::If {
             condition,
             then_block,
@@ -1604,19 +1622,28 @@ fn emit_let(
     let uid = ctx.next_reg;
     ctx.next_reg += 1;
     let alloca_name = format!("%{name}.{uid}");
-    ctx.emit(&format!("{alloca_name} = alloca {llvm_type}"));
+    let align_suffix = match vector_align(&llvm_type) {
+        0 => String::new(),
+        a => format!(", align {a}"),
+    };
+    ctx.emit(&format!("{alloca_name} = alloca {llvm_type}{align_suffix}"));
 
     if let Some(value) = value {
         let val = emit_expr(ctx, value, Some(&llvm_type));
         ctx.emit(&format!(
-            "store {llvm_type} {}, ptr {alloca_name}",
+            "store {llvm_type} {}, ptr {alloca_name}{align_suffix}",
             val.reg
         ));
     } else {
         // No initializer — zero-initialize primitive types too.
         // This handles `let x: i32;` → alloca + store 0.
+        let zero = if is_vector_type(&llvm_type) {
+            "zeroinitializer"
+        } else {
+            "0"
+        };
         ctx.emit(&format!(
-            "store {llvm_type} 0, ptr {alloca_name}"
+            "store {llvm_type} {zero}, ptr {alloca_name}{align_suffix}"
         ));
     }
 
@@ -1643,8 +1670,12 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
             }
         };
         let val = emit_expr(ctx, value, Some(&var_info.llvm_type));
+        let align_suffix = match vector_align(&var_info.llvm_type) {
+            0 => String::new(),
+            a => format!(", align {a}"),
+        };
         ctx.emit(&format!(
-            "store {} {}, ptr {}",
+            "store {} {}, ptr {}{align_suffix}",
             var_info.llvm_type, val.reg, var_info.alloca_name
         ));
     } else if let HirExprKind::Index {
@@ -1725,7 +1756,7 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
         ref field,
     } = target.kind
     {
-        // Struct field assignment: v.x = val
+        // Field assignment: v.x = val (vector or struct)
         if let HirExprKind::Ident { name } = &base_expr.kind {
             let var_info = match ctx.variables.get(name.as_str()) {
                 Some(v) => v.clone(),
@@ -1736,6 +1767,51 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
                     return;
                 }
             };
+
+            // Vector field assignment: v.x = val → load, insertelement, store
+            if is_vector_type(&var_info.llvm_type) {
+                let idx = match field.as_str() {
+                    "x" | "r" => 0i32,
+                    "y" | "g" => 1,
+                    "z" | "b" => 2,
+                    "w" | "a" => 3,
+                    _ => {
+                        ctx.errors.push(CodegenError::UnsupportedExpression {
+                            expr: format!("unknown vector field `{field}`"),
+                            context: "vector field assignment".to_string(),
+                        });
+                        return;
+                    }
+                };
+                let vec_type = &var_info.llvm_type;
+
+                // Reject out-of-bounds field assignment on vec2 (<2 x double>).
+                if vec_type == "<2 x double>" && idx > 1 {
+                    ctx.errors.push(CodegenError::UnsupportedExpression {
+                        expr: format!("field '.{}' is not valid for vec2 (only .x, .y)", field),
+                        context: "field assignment".to_string(),
+                    });
+                    return;
+                }
+
+                let align = vector_align(vec_type);
+                let rhs_val = emit_expr(ctx, value, Some("double"));
+                let load_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{load_reg} = load {vec_type}, ptr {}, align {align}",
+                    var_info.alloca_name
+                ));
+                let new_vec = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{new_vec} = insertelement {vec_type} {load_reg}, double {}, i32 {idx}",
+                    rhs_val.reg
+                ));
+                ctx.emit(&format!(
+                    "store {vec_type} {new_vec}, ptr {}, align {align}",
+                    var_info.alloca_name
+                ));
+                return;
+            }
 
             // Determine the struct name from the LLVM type.
             let struct_name = if var_info.llvm_type.starts_with("%struct.") {
@@ -2248,7 +2324,7 @@ fn emit_expr(ctx: &mut CodegenContext, expr: &HirExpr, expected_type: Option<&st
             }
         }
         HirExprKind::Ident { name } => emit_ident(ctx, name),
-        HirExprKind::BinaryOp { op, lhs, rhs } => emit_binary_op(ctx, *op, lhs, rhs),
+        HirExprKind::BinaryOp { op, lhs, rhs } => emit_binary_op(ctx, *op, lhs, rhs, expected_type),
         HirExprKind::UnaryOp { op, operand } => emit_unary_op(ctx, *op, operand, expected_type),
         HirExprKind::Call { func, args } => emit_call(ctx, func, args),
         HirExprKind::Index {
@@ -2341,8 +2417,12 @@ fn emit_ident(ctx: &mut CodegenContext, name: &str) -> LlvmValue {
     }
 
     let reg = ctx.fresh_reg();
+    let align_suffix = match vector_align(&var_info.llvm_type) {
+        0 => String::new(),
+        a => format!(", align {a}"),
+    };
     ctx.emit(&format!(
-        "{reg} = load {}, ptr {}",
+        "{reg} = load {}, ptr {}{align_suffix}",
         var_info.llvm_type, var_info.alloca_name
     ));
     LlvmValue {
@@ -2478,7 +2558,7 @@ fn emit_field_access(
     base_expr: &HirExpr,
     field: &str,
 ) -> LlvmValue {
-    // The base expression should be an identifier referring to a struct variable.
+    // The base expression should be an identifier referring to a vector or struct variable.
     if let HirExprKind::Ident { name } = &base_expr.kind {
         let var_info = match ctx.variables.get(name.as_str()) {
             Some(v) => v.clone(),
@@ -2492,6 +2572,54 @@ fn emit_field_access(
                 };
             }
         };
+
+        // Vector field access: v.x → load vector, extractelement
+        if is_vector_type(&var_info.llvm_type) {
+            let idx = match field {
+                "x" | "r" => 0i32,
+                "y" | "g" => 1,
+                "z" | "b" => 2,
+                "w" | "a" => 3,
+                _ => {
+                    ctx.errors.push(CodegenError::UnsupportedExpression {
+                        expr: format!("unknown vector field `{field}`"),
+                        context: "vector field access".to_string(),
+                    });
+                    return LlvmValue {
+                        reg: "0.0".to_string(),
+                        ty: "double".to_string(),
+                    };
+                }
+            };
+            let vec_type = &var_info.llvm_type;
+
+            // Reject out-of-bounds field access on vec2 (<2 x double>).
+            if vec_type == "<2 x double>" && idx > 1 {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: format!("field '.{}' is not valid for vec2 (only .x, .y)", field),
+                    context: "field access".to_string(),
+                });
+                return LlvmValue {
+                    reg: "0.0".to_string(),
+                    ty: "double".to_string(),
+                };
+            }
+
+            let align = vector_align(vec_type);
+            let load_reg = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{load_reg} = load {vec_type}, ptr {}, align {align}",
+                var_info.alloca_name
+            ));
+            let result = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{result} = extractelement {vec_type} {load_reg}, i32 {idx}"
+            ));
+            return LlvmValue {
+                reg: result,
+                ty: "double".to_string(),
+            };
+        }
 
         // Determine the struct name from the LLVM type.
         let struct_name = if var_info.llvm_type.starts_with("%struct.") {
@@ -2585,9 +2713,75 @@ fn emit_binary_op(
     op: BinOp,
     lhs: &HirExpr,
     rhs: &HirExpr,
+    expected_type: Option<&str>,
 ) -> LlvmValue {
-    let mut lhs_val = emit_expr(ctx, lhs, None);
-    let mut rhs_val = emit_expr(ctx, rhs, Some(&lhs_val.ty));
+    let mut lhs_val = emit_expr(ctx, lhs, expected_type);
+    // Don't propagate vector type to scalar RHS — let broadcast handle it.
+    let rhs_expected = if is_vector_type(&lhs_val.ty) { None } else { Some(lhs_val.ty.as_str()) };
+    let mut rhs_val = emit_expr(ctx, rhs, rhs_expected);
+
+    // Vector-scalar broadcasting: if one operand is a vector and the other is a
+    // scalar, broadcast the scalar to match the vector width.
+    // Handles both float scalars and integer literals (e.g., `v * 2`).
+    if is_vector_type(&lhs_val.ty) && !is_vector_type(&rhs_val.ty) {
+        // Convert integer scalar to double if needed.
+        if !is_float_type(&rhs_val.ty) {
+            if is_literal_reg(&rhs_val.reg) {
+                // Integer literal — reinterpret as double constant.
+                rhs_val.ty = "double".to_string();
+            } else {
+                let conv_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{conv_reg} = sitofp {} {} to double",
+                    rhs_val.ty, rhs_val.reg
+                ));
+                rhs_val.reg = conv_reg;
+                rhs_val.ty = "double".to_string();
+            }
+        }
+        let lanes = vector_lanes(&lhs_val.ty);
+        let splat0 = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{splat0} = insertelement {} poison, double {}, i32 0",
+            lhs_val.ty, rhs_val.reg
+        ));
+        let splat = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{splat} = shufflevector {} {splat0}, {} poison, <{lanes} x i32> zeroinitializer",
+            lhs_val.ty, lhs_val.ty
+        ));
+        rhs_val.reg = splat;
+        rhs_val.ty = lhs_val.ty.clone();
+    } else if is_vector_type(&rhs_val.ty) && !is_vector_type(&lhs_val.ty) {
+        // Convert integer scalar to double if needed.
+        if !is_float_type(&lhs_val.ty) {
+            if is_literal_reg(&lhs_val.reg) {
+                // Integer literal — reinterpret as double constant.
+                lhs_val.ty = "double".to_string();
+            } else {
+                let conv_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{conv_reg} = sitofp {} {} to double",
+                    lhs_val.ty, lhs_val.reg
+                ));
+                lhs_val.reg = conv_reg;
+                lhs_val.ty = "double".to_string();
+            }
+        }
+        let lanes = vector_lanes(&rhs_val.ty);
+        let splat0 = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{splat0} = insertelement {} poison, double {}, i32 0",
+            rhs_val.ty, lhs_val.reg
+        ));
+        let splat = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{splat} = shufflevector {} {splat0}, {} poison, <{lanes} x i32> zeroinitializer",
+            rhs_val.ty, rhs_val.ty
+        ));
+        lhs_val.reg = splat;
+        lhs_val.ty = rhs_val.ty.clone();
+    }
 
     // If types mismatch (e.g., literal defaulted to i64 but variable is i32),
     // coerce the literal side to match the variable side.
@@ -2628,6 +2822,36 @@ fn emit_binary_op(
     let is_int = is_signed_int_type_str(&lhs_val.ty);
     let in_pure = ctx.current_func_is_pure || ctx.current_func_is_const;
     let result_reg = ctx.fresh_reg();
+
+    // Reject comparison operators on vector types — they produce vector<i1>, not scalar i1.
+    if matches!(
+        op,
+        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq
+    ) && (is_vector_type(&lhs_val.ty) || is_vector_type(&rhs_val.ty))
+    {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "comparison operators are not supported on vector types".to_string(),
+            context: "binary operation".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i1".to_string(),
+        };
+    }
+
+    // Reject logical and/or operators on vector types.
+    if matches!(op, BinOp::And | BinOp::Or)
+        && (is_vector_type(&lhs_val.ty) || is_vector_type(&rhs_val.ty))
+    {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "logical operators are not supported on vector types".to_string(),
+            context: "binary operation".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i1".to_string(),
+        };
+    }
 
     let instruction = match (op, is_float) {
         // Integer arithmetic — add nsw/nuw flags.
@@ -2870,6 +3094,21 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "max_f64" => return emit_builtin_max_f64(ctx, args),
             "sqrt" => return emit_builtin_sqrt(ctx, args),
             "pow" => return emit_builtin_pow(ctx, args),
+            "sin" => return emit_builtin_math_f64_simple(ctx, args, "sin", "llvm.sin.f64"),
+            "cos" => return emit_builtin_math_f64_simple(ctx, args, "cos", "llvm.cos.f64"),
+            "tan" => return emit_builtin_math_f64_simple(ctx, args, "tan", "tan"),
+            "asin" => return emit_builtin_math_f64_simple(ctx, args, "asin", "asin"),
+            "acos" => return emit_builtin_math_f64_simple(ctx, args, "acos", "acos"),
+            "atan" => return emit_builtin_math_f64_simple(ctx, args, "atan", "atan"),
+            "atan2" => return emit_builtin_atan2(ctx, args),
+            "floor" => return emit_builtin_math_f64_simple(ctx, args, "floor", "llvm.floor.f64"),
+            "ceil" => return emit_builtin_math_f64_simple(ctx, args, "ceil", "llvm.ceil.f64"),
+            "round" => return emit_builtin_math_f64_simple(ctx, args, "round", "llvm.round.f64"),
+            "log" => return emit_builtin_math_f64_simple(ctx, args, "log", "llvm.log.f64"),
+            "log2" => return emit_builtin_math_f64_simple(ctx, args, "log2", "llvm.log2.f64"),
+            "exp" => return emit_builtin_math_f64_simple(ctx, args, "exp", "llvm.exp.f64"),
+            "exp2" => return emit_builtin_math_f64_simple(ctx, args, "exp2", "llvm.exp2.f64"),
+            "fabs" => return emit_builtin_math_f64_simple(ctx, args, "fabs", "llvm.fabs.f64"),
             "to_f64" => return emit_builtin_to_f64(ctx, args),
             "to_f64_i64" => return emit_builtin_to_f64_i64(ctx, args),
             "band" => return emit_builtin_band(ctx, args),
@@ -3006,6 +3245,17 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             // G3: Audio builtins
             "play_beep" => return emit_builtin_play_beep(ctx, args),
             "play_sound" => return emit_builtin_play_sound(ctx, args),
+            // Vector constructor builtins (vec2, vec3, vec4)
+            "vec2" => return emit_builtin_vec_construct(ctx, args, 2),
+            "vec3" => return emit_builtin_vec_construct(ctx, args, 3),
+            "vec4" => return emit_builtin_vec_construct(ctx, args, 4),
+            // Vector math builtins
+            "dot" => return emit_builtin_dot(ctx, args),
+            "cross" => return emit_builtin_cross(ctx, args),
+            "length" => return emit_builtin_length(ctx, args),
+            "normalize" => return emit_builtin_normalize(ctx, args),
+            "reflect" => return emit_builtin_reflect(ctx, args),
+            "lerp" => return emit_builtin_lerp(ctx, args),
             _ => {}
         }
 
@@ -3555,6 +3805,64 @@ fn emit_builtin_pow(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
     ctx.emit(&format!(
         "{result_reg} = call double @llvm.pow.f64(double {}, double {})",
         base.reg, exp.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Generic emit for single-argument f64 math builtins (sin, cos, floor, ceil, etc.).
+fn emit_builtin_math_f64_simple(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+    name: &str,
+    llvm_func: &str,
+) -> LlvmValue {
+    ctx.math_decls.insert(format!("declare double @{llvm_func}(double)"));
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("{name}() with wrong number of arguments"),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("double"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call double @{llvm_func}(double {})",
+        val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `atan2(y: f64, x: f64) -> f64`.
+fn emit_builtin_atan2(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.math_decls.insert("declare double @atan2(double, double)".to_string());
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "atan2() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let y = emit_expr(ctx, &args[0], Some("double"));
+    let x = emit_expr(ctx, &args[1], Some("double"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call double @atan2(double {}, double {})",
+        y.reg, x.reg
     ));
     LlvmValue {
         reg: result_reg,
@@ -6969,6 +7277,8 @@ fn llvm_type_size(ty: &str) -> u64 {
         "float" => 4,
         "double" => 8,
         "ptr" => 8,
+        "<2 x double>" => 16,
+        "<4 x double>" => 32,
         _ => 8, // conservative default
     }
 }
@@ -7055,12 +7365,38 @@ fn primitive_to_llvm(p: PrimitiveType) -> String {
         PrimitiveType::F32 => "float".to_string(),
         PrimitiveType::F64 => "double".to_string(),
         PrimitiveType::Bool => "i1".to_string(),
+        PrimitiveType::Vec2 => "<2 x double>".to_string(),
+        PrimitiveType::Vec3 => "<4 x double>".to_string(),
+        PrimitiveType::Vec4 => "<4 x double>".to_string(),
     }
 }
 
 /// Check whether an LLVM type string represents a floating-point type.
 fn is_float_type(ty: &str) -> bool {
-    matches!(ty, "float" | "double" | "half" | "bfloat")
+    matches!(ty, "float" | "double" | "half" | "bfloat" | "<2 x double>" | "<4 x double>")
+}
+
+/// Check whether an LLVM type string represents a SIMD vector type (vec2/vec3/vec4).
+fn is_vector_type(ty: &str) -> bool {
+    matches!(ty, "<2 x double>" | "<4 x double>")
+}
+
+/// Return the number of lanes in an LLVM vector type.
+fn vector_lanes(ty: &str) -> usize {
+    match ty {
+        "<2 x double>" => 2,
+        "<4 x double>" => 4,
+        _ => 0,
+    }
+}
+
+/// Return the required alignment for a vector LLVM type, or 0 for non-vector types.
+fn vector_align(ty: &str) -> usize {
+    match ty {
+        "<2 x double>" => 16,
+        "<4 x double>" => 32,
+        _ => 0,
+    }
 }
 
 /// Check if a register name is a literal constant (number, not a %register).
@@ -7079,6 +7415,8 @@ fn type_bits(ty: &str) -> u32 {
         "i128" => 128,
         "float" | "half" | "bfloat" => 32,
         "double" => 64,
+        "<2 x double>" => 128,
+        "<4 x double>" => 256,
         _ => 64,
     }
 }
@@ -7177,7 +7515,10 @@ fn eval_const_block(
     for stmt in &block.stmts {
         match &stmt.kind {
             HirStmtKind::Return { ref value } => {
-                return eval_const_expr_full(value, &locals, funcs, fuel);
+                if let Some(value) = value {
+                    return eval_const_expr_full(value, &locals, funcs, fuel);
+                }
+                return None;
             }
             HirStmtKind::Let { name, value: Some(init_expr), .. } => {
                 let val = eval_const_expr_full(init_expr, &locals, funcs, fuel)?;
@@ -7506,6 +7847,594 @@ fn emit_builtin_play_sound(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVa
     LlvmValue {
         reg: "0".to_string(),
         ty: "void".to_string(),
+    }
+}
+
+// ── Vector type builtins (vec2, vec3, vec4) ─────────────────────────
+
+/// Emit a vec2/vec3/vec4 constructor: `vec3(x, y, z)` → insertelement chain.
+fn emit_builtin_vec_construct(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+    lanes: usize,
+) -> LlvmValue {
+    let llvm_type = if lanes == 2 {
+        "<2 x double>"
+    } else {
+        "<4 x double>"
+    };
+    if args.len() != lanes {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!(
+                "vec{}() requires {} arguments, got {}",
+                lanes,
+                lanes,
+                args.len()
+            ),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: llvm_type.to_string(),
+        };
+    }
+
+    // Build insertelement chain from poison.
+    let mut current = "poison".to_string();
+    for i in 0..lanes {
+        let val = emit_expr(ctx, &args[i], Some("double"));
+        let result = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{result} = insertelement {llvm_type} {current}, double {}, i32 {i}",
+            val.reg
+        ));
+        current = result;
+    }
+
+    // For vec3: zero the w component (lane 3) to maintain the invariant.
+    if lanes == 3 {
+        let result = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{result} = insertelement {llvm_type} {current}, double 0.0, i32 3"
+        ));
+        current = result;
+    }
+
+    LlvmValue {
+        reg: current,
+        ty: llvm_type.to_string(),
+    }
+}
+
+/// Emit dot(a, b) → fmul + horizontal sum.
+/// Works for vec2, vec3, and vec4 (vec3 has w=0 so 4-lane sum is correct).
+fn emit_builtin_dot(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("dot() requires 2 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0.0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], None);
+    let b = emit_expr(ctx, &args[1], None);
+
+    // Validate: both arguments must be vector types.
+    if !is_vector_type(&a.ty) {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "dot() requires vector arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0.0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+    if a.ty != b.ty {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!(
+                "dot() requires matching vector types, got {} and {}",
+                a.ty, b.ty
+            ),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0.0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let vec_type = a.ty.clone();
+    let fast = if ctx.current_func_is_pure || ctx.current_func_is_const {
+        " fast"
+    } else {
+        ""
+    };
+
+    let mul = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{mul} = fmul{fast} {vec_type} {}, {}",
+        a.reg, b.reg
+    ));
+
+    // Extract and sum components.
+    let e0 = ctx.fresh_reg();
+    ctx.emit(&format!("{e0} = extractelement {vec_type} {mul}, i32 0"));
+    let e1 = ctx.fresh_reg();
+    ctx.emit(&format!("{e1} = extractelement {vec_type} {mul}, i32 1"));
+    let s01 = ctx.fresh_reg();
+    ctx.emit(&format!("{s01} = fadd{fast} double {e0}, {e1}"));
+
+    if vec_type == "<2 x double>" {
+        return LlvmValue {
+            reg: s01,
+            ty: "double".to_string(),
+        };
+    }
+
+    // For <4 x double> (vec3 or vec4): sum all 4 lanes.
+    // vec3 has w=0, so 0*0=0 adds nothing — correct result.
+    let e2 = ctx.fresh_reg();
+    ctx.emit(&format!("{e2} = extractelement {vec_type} {mul}, i32 2"));
+    let s012 = ctx.fresh_reg();
+    ctx.emit(&format!("{s012} = fadd{fast} double {s01}, {e2}"));
+
+    let e3 = ctx.fresh_reg();
+    ctx.emit(&format!("{e3} = extractelement {vec_type} {mul}, i32 3"));
+    let dot_val = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{dot_val} = fadd{fast} double {s012}, {e3}"
+    ));
+
+    LlvmValue {
+        reg: dot_val,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit cross(a, b) → shufflevector cross product (vec3 only, <4 x double>).
+fn emit_builtin_cross(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("cross() requires 2 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], None);
+    let b = emit_expr(ctx, &args[1], None);
+
+    // Validate: both arguments must be vector types and must match.
+    if !is_vector_type(&a.ty) {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "cross() requires vector arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+    if a.ty != b.ty {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!(
+                "cross() requires matching vector types, got {} and {}",
+                a.ty, b.ty
+            ),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+
+    let vt = "<4 x double>";
+    let fast = if ctx.current_func_is_pure || ctx.current_func_is_const {
+        " fast"
+    } else {
+        ""
+    };
+
+    // a.yzx * b.zxy
+    let a_yzx = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{a_yzx} = shufflevector {vt} {}, {vt} poison, <4 x i32> <i32 1, i32 2, i32 0, i32 3>",
+        a.reg
+    ));
+    let b_zxy = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{b_zxy} = shufflevector {vt} {}, {vt} poison, <4 x i32> <i32 2, i32 0, i32 1, i32 3>",
+        b.reg
+    ));
+    let t1 = ctx.fresh_reg();
+    ctx.emit(&format!("{t1} = fmul{fast} {vt} {a_yzx}, {b_zxy}"));
+
+    // a.zxy * b.yzx
+    let a_zxy = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{a_zxy} = shufflevector {vt} {}, {vt} poison, <4 x i32> <i32 2, i32 0, i32 1, i32 3>",
+        a.reg
+    ));
+    let b_yzx = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{b_yzx} = shufflevector {vt} {}, {vt} poison, <4 x i32> <i32 1, i32 2, i32 0, i32 3>",
+        b.reg
+    ));
+    let t2 = ctx.fresh_reg();
+    ctx.emit(&format!("{t2} = fmul{fast} {vt} {a_zxy}, {b_yzx}"));
+
+    // result = t1 - t2, then zero the w component
+    let raw = ctx.fresh_reg();
+    ctx.emit(&format!("{raw} = fsub{fast} {vt} {t1}, {t2}"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = insertelement {vt} {raw}, double 0.0, i32 3"
+    ));
+
+    LlvmValue {
+        reg: result,
+        ty: vt.to_string(),
+    }
+}
+
+/// Emit length(v) → sqrt(dot(v, v)).
+fn emit_builtin_length(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("length() requires 1 argument, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0.0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let v = emit_expr(ctx, &args[0], None);
+    let vec_type = v.ty.clone();
+    let fast = if ctx.current_func_is_pure || ctx.current_func_is_const {
+        " fast"
+    } else {
+        ""
+    };
+
+    // dot(v, v)
+    let mul = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{mul} = fmul{fast} {vec_type} {}, {}",
+        v.reg, v.reg
+    ));
+
+    let e0 = ctx.fresh_reg();
+    ctx.emit(&format!("{e0} = extractelement {vec_type} {mul}, i32 0"));
+    let e1 = ctx.fresh_reg();
+    ctx.emit(&format!("{e1} = extractelement {vec_type} {mul}, i32 1"));
+    let s01 = ctx.fresh_reg();
+    ctx.emit(&format!("{s01} = fadd{fast} double {e0}, {e1}"));
+
+    let dot_val = if vec_type == "<2 x double>" {
+        s01
+    } else {
+        let e2 = ctx.fresh_reg();
+        ctx.emit(&format!("{e2} = extractelement {vec_type} {mul}, i32 2"));
+        let s012 = ctx.fresh_reg();
+        ctx.emit(&format!("{s012} = fadd{fast} double {s01}, {e2}"));
+        let e3 = ctx.fresh_reg();
+        ctx.emit(&format!("{e3} = extractelement {vec_type} {mul}, i32 3"));
+        let s0123 = ctx.fresh_reg();
+        ctx.emit(&format!("{s0123} = fadd{fast} double {s012}, {e3}"));
+        s0123
+    };
+
+    // sqrt
+    ctx.needs_sqrt_f64 = true;
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call double @llvm.sqrt.f64(double {dot_val})"
+    ));
+
+    LlvmValue {
+        reg: result,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit normalize(v) → v * (1.0 / length(v)) with broadcast.
+fn emit_builtin_normalize(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("normalize() requires 1 argument, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+
+    let v = emit_expr(ctx, &args[0], None);
+    let vec_type = v.ty.clone();
+    let lanes = vector_lanes(&vec_type);
+    let fast = if ctx.current_func_is_pure || ctx.current_func_is_const {
+        " fast"
+    } else {
+        ""
+    };
+
+    // dot(v, v)
+    let mul = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{mul} = fmul{fast} {vec_type} {}, {}",
+        v.reg, v.reg
+    ));
+
+    let e0 = ctx.fresh_reg();
+    ctx.emit(&format!("{e0} = extractelement {vec_type} {mul}, i32 0"));
+    let e1 = ctx.fresh_reg();
+    ctx.emit(&format!("{e1} = extractelement {vec_type} {mul}, i32 1"));
+    let s01 = ctx.fresh_reg();
+    ctx.emit(&format!("{s01} = fadd{fast} double {e0}, {e1}"));
+
+    let dot_val = if vec_type == "<2 x double>" {
+        s01
+    } else {
+        let e2 = ctx.fresh_reg();
+        ctx.emit(&format!("{e2} = extractelement {vec_type} {mul}, i32 2"));
+        let s012 = ctx.fresh_reg();
+        ctx.emit(&format!("{s012} = fadd{fast} double {s01}, {e2}"));
+        let e3 = ctx.fresh_reg();
+        ctx.emit(&format!("{e3} = extractelement {vec_type} {mul}, i32 3"));
+        let s0123 = ctx.fresh_reg();
+        ctx.emit(&format!("{s0123} = fadd{fast} double {s012}, {e3}"));
+        s0123
+    };
+
+    // 1.0 / sqrt(dot)
+    ctx.needs_sqrt_f64 = true;
+    let len = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{len} = call double @llvm.sqrt.f64(double {dot_val})"
+    ));
+    let inv_len = ctx.fresh_reg();
+    ctx.emit(&format!("{inv_len} = fdiv{fast} double 1.0, {len}"));
+
+    // Broadcast inv_len to vector
+    let splat0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{splat0} = insertelement {vec_type} poison, double {inv_len}, i32 0"
+    ));
+    let splat = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{splat} = shufflevector {vec_type} {splat0}, {vec_type} poison, <{lanes} x i32> zeroinitializer"
+    ));
+
+    // v * inv_len
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = fmul{fast} {vec_type} {}, {splat}",
+        v.reg
+    ));
+
+    LlvmValue {
+        reg: result,
+        ty: vec_type,
+    }
+}
+
+/// Emit reflect(i, n) → i - 2 * dot(i, n) * n.
+fn emit_builtin_reflect(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("reflect() requires 2 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+
+    let i_val = emit_expr(ctx, &args[0], None);
+    let n_val = emit_expr(ctx, &args[1], None);
+
+    // Validate: both arguments must be vector types and must match.
+    if !is_vector_type(&i_val.ty) {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "reflect() requires vector arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+    if i_val.ty != n_val.ty {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!(
+                "reflect() requires matching vector types, got {} and {}",
+                i_val.ty, n_val.ty
+            ),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+
+    let vec_type = i_val.ty.clone();
+    let lanes = vector_lanes(&vec_type);
+    let fast = if ctx.current_func_is_pure || ctx.current_func_is_const {
+        " fast"
+    } else {
+        ""
+    };
+
+    // dot(i, n)
+    let dot_mul = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{dot_mul} = fmul{fast} {vec_type} {}, {}",
+        i_val.reg, n_val.reg
+    ));
+
+    let e0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{e0} = extractelement {vec_type} {dot_mul}, i32 0"
+    ));
+    let e1 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{e1} = extractelement {vec_type} {dot_mul}, i32 1"
+    ));
+    let s01 = ctx.fresh_reg();
+    ctx.emit(&format!("{s01} = fadd{fast} double {e0}, {e1}"));
+
+    let dot_val = if vec_type == "<2 x double>" {
+        s01
+    } else {
+        let e2 = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{e2} = extractelement {vec_type} {dot_mul}, i32 2"
+        ));
+        let s012 = ctx.fresh_reg();
+        ctx.emit(&format!("{s012} = fadd{fast} double {s01}, {e2}"));
+        let e3 = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{e3} = extractelement {vec_type} {dot_mul}, i32 3"
+        ));
+        let s0123 = ctx.fresh_reg();
+        ctx.emit(&format!("{s0123} = fadd{fast} double {s012}, {e3}"));
+        s0123
+    };
+
+    // 2 * dot(i, n)
+    let two_dot = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{two_dot} = fmul{fast} double {dot_val}, 2.0"
+    ));
+
+    // Broadcast to vector
+    let splat0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{splat0} = insertelement {vec_type} poison, double {two_dot}, i32 0"
+    ));
+    let splat = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{splat} = shufflevector {vec_type} {splat0}, {vec_type} poison, <{lanes} x i32> zeroinitializer"
+    ));
+
+    // 2*dot(i,n)*n
+    let scaled_n = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{scaled_n} = fmul{fast} {vec_type} {splat}, {}",
+        n_val.reg
+    ));
+
+    // i - 2*dot(i,n)*n
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = fsub{fast} {vec_type} {}, {scaled_n}",
+        i_val.reg
+    ));
+
+    LlvmValue {
+        reg: result,
+        ty: vec_type,
+    }
+}
+
+/// Emit lerp(a, b, t) → a + broadcast(t) * (b - a).
+fn emit_builtin_lerp(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("lerp() requires 3 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], None);
+    let b = emit_expr(ctx, &args[1], Some(&a.ty));
+    let t = emit_expr(ctx, &args[2], Some("double"));
+
+    // Validate: first two arguments must be matching vector types.
+    if !is_vector_type(&a.ty) {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "lerp() requires vector arguments for first two parameters".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+    if a.ty != b.ty {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!(
+                "lerp() requires matching vector types, got {} and {}",
+                a.ty, b.ty
+            ),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+
+    let vec_type = a.ty.clone();
+    let lanes = vector_lanes(&vec_type);
+    let fast = if ctx.current_func_is_pure || ctx.current_func_is_const {
+        " fast"
+    } else {
+        ""
+    };
+
+    // Broadcast t to vector
+    let splat0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{splat0} = insertelement {vec_type} poison, double {}, i32 0",
+        t.reg
+    ));
+    let splat = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{splat} = shufflevector {vec_type} {splat0}, {vec_type} poison, <{lanes} x i32> zeroinitializer"
+    ));
+
+    // b - a
+    let diff = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{diff} = fsub{fast} {vec_type} {}, {}",
+        b.reg, a.reg
+    ));
+
+    // t * (b - a)
+    let scaled = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{scaled} = fmul{fast} {vec_type} {splat}, {diff}"
+    ));
+
+    // a + t * (b - a)
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = fadd{fast} {vec_type} {}, {scaled}",
+        a.reg
+    ));
+
+    LlvmValue {
+        reg: result,
+        ty: vec_type,
     }
 }
 

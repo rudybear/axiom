@@ -257,10 +257,10 @@ pub enum HirStmtKind {
         /// Value being assigned.
         value: HirExpr,
     },
-    /// `return value;`
+    /// `return value;` or `return;` (bare return for void functions).
     Return {
-        /// Return value expression.
-        value: HirExpr,
+        /// Return value expression. None for bare return.
+        value: Option<HirExpr>,
     },
     /// `if condition { then_block } [else { else_block }]`
     If {
@@ -471,6 +471,12 @@ pub enum PrimitiveType {
     F64,
     /// Boolean.
     Bool,
+    /// 2-component f64 vector (SIMD).
+    Vec2,
+    /// 3-component f64 vector (SIMD, padded to 4 lanes with w=0).
+    Vec3,
+    /// 4-component f64 vector (SIMD).
+    Vec4,
 }
 
 /// Tensor dimension expression, mirrors `ast::DimExpr`.
