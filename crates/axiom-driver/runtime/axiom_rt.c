@@ -1833,9 +1833,9 @@ void axiom_string_print(long long s) {
  *   axiom_is_mouse_down(button)   -> i32 (0=left, 1=right, 2=middle)
  */
 
-/* axiom_key_state, axiom_mouse_x/y, axiom_mouse_buttons are declared
-   earlier (before the renderer section) so the Win32 wnd_proc can use them. */
-
+/* When using the wgpu renderer DLL, input functions come from the DLL.
+   Only compile the C runtime input functions when NOT using the DLL. */
+#ifndef AXIOM_USE_WGPU_RENDERER
 int axiom_is_key_down(int key_code) {
     return axiom_key_state[key_code & 0xFF];
 }
@@ -1852,6 +1852,7 @@ int axiom_is_mouse_down(int button) {
     if (button < 0 || button > 2) return 0;
     return axiom_mouse_buttons[button];
 }
+#endif /* !AXIOM_USE_WGPU_RENDERER */
 
 /* ── Audio (Minimal) ─────────────────────────────────────────────── */
 /*
