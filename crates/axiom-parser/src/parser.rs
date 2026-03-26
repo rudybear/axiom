@@ -714,6 +714,20 @@ impl<'src> Parser<'src> {
                     Annotation::Align(0)
                 }
             }
+            "lifetime" => {
+                // @lifetime(scope|static|manual)
+                if self.eat(&TokenKind::LParen) {
+                    let scope = if let Some((name, _)) = self.eat_ident() {
+                        name
+                    } else {
+                        "scope".to_string()
+                    };
+                    self.expect(&TokenKind::RParen, "')'");
+                    Annotation::Lifetime(scope)
+                } else {
+                    Annotation::Lifetime("scope".to_string())
+                }
+            }
             _ => {
                 // Custom annotation: @name or @name(args) or @name { kv }
                 if self.eat(&TokenKind::LParen) {
@@ -1584,6 +1598,9 @@ impl<'src> Parser<'src> {
         // (e.g., @parallel_for). These are kept separate so they can be injected
         // into the for-loop's body block annotations for correct association.
         let mut pending_for_annotations: Vec<Spanned<Annotation>> = Vec::new();
+        // Statement-level annotations (e.g., @lifetime) that should be attached
+        // to the next let statement.
+        let mut pending_let_annotations: Vec<Spanned<Annotation>> = Vec::new();
 
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
             self.skip_error_tokens();
@@ -1600,6 +1617,9 @@ impl<'src> Parser<'src> {
                     // to the next for-loop rather than the enclosing block.
                     if matches!(ann.node, Annotation::ParallelFor(_)) {
                         pending_for_annotations.push(ann);
+                    } else if matches!(ann.node, Annotation::Lifetime(_)) {
+                        // @lifetime annotations attach to the next let statement.
+                        pending_let_annotations.push(ann);
                     } else if matches!(ann.node, Annotation::Strategy(_)) {
                         block_annotations.push(ann);
                     } else {
@@ -1619,6 +1639,12 @@ impl<'src> Parser<'src> {
                         let mut merged = std::mem::take(&mut pending_for_annotations);
                         merged.append(&mut body.annotations);
                         body.annotations = merged;
+                    }
+                }
+                // Attach pending @lifetime annotations to let statements.
+                if matches!(stmt.node, Stmt::Let { .. }) && !pending_let_annotations.is_empty() {
+                    if let Stmt::Let { ref mut annotations, .. } = &mut stmt.node {
+                        annotations.extend(std::mem::take(&mut pending_let_annotations));
                     }
                 }
                 stmts.push(stmt);
@@ -1691,6 +1717,7 @@ impl<'src> Parser<'src> {
                 ty,
                 value: Some(value),
                 mutable: false,
+                annotations: Vec::new(),
             },
             start_span.merge(end_span),
         )
@@ -1731,6 +1758,7 @@ impl<'src> Parser<'src> {
                 ty,
                 value,
                 mutable,
+                annotations: Vec::new(),
             },
             start_span.merge(end_span),
         )
@@ -2817,6 +2845,7 @@ fn foo() -> i32 {
                 ty,
                 value,
                 mutable,
+                ..
             } => {
                 assert_eq!(name.node, "x");
                 assert!(matches!(ty, TypeExpr::Named(ref n) if n == "i32"));

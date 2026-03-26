@@ -211,6 +211,9 @@ struct CodegenContext {
     current_loop_header: Option<String>,
     /// Label for the current loop's exit block (for `break`).
     current_loop_exit: Option<String>,
+    /// Set of variable names that were promoted from heap to stack via `@lifetime(scope)`.
+    /// `heap_free` calls on these variables are skipped since the stack handles deallocation.
+    stack_promoted_vars: std::collections::HashSet<String>,
 }
 
 /// Ownership kind for pointer parameters, used for access validation.
@@ -276,6 +279,7 @@ impl CodegenContext {
             param_ownership: HashMap::new(),
             current_loop_header: None,
             current_loop_exit: None,
+            stack_promoted_vars: std::collections::HashSet::new(),
         }
     }
 
@@ -1600,6 +1604,9 @@ fn emit_let(
                             array_info: None,
                         },
                     );
+                    // Track this variable as stack-promoted so heap_free
+                    // calls on it are skipped (freeing a stack pointer is UB).
+                    ctx.stack_promoted_vars.insert(name.to_string());
                     return;
                 }
             }
@@ -4662,10 +4669,9 @@ fn emit_builtin_heap_alloc_zeroed(ctx: &mut CodegenContext, args: &[HirExpr]) ->
 
 /// Emit built-in `heap_free(p: ptr)`.
 ///
-/// Calls `free(p)`.
+/// Calls `free(p)`. Skips the free if the pointer was promoted to stack
+/// via `@lifetime(scope)`, since freeing a stack pointer is undefined behavior.
 fn emit_builtin_heap_free(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
-    ctx.needs_free = true;
-
     if args.len() != 1 {
         ctx.errors.push(CodegenError::UnsupportedExpression {
             expr: "heap_free() requires exactly 1 argument (ptr)".to_string(),
@@ -4677,6 +4683,17 @@ fn emit_builtin_heap_free(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVal
         };
     }
 
+    // Check if the argument is a stack-promoted variable — skip the free.
+    if let HirExprKind::Ident { name } = &args[0].kind {
+        if ctx.stack_promoted_vars.contains(name) {
+            return LlvmValue {
+                reg: "0".to_string(),
+                ty: "void".to_string(),
+            };
+        }
+    }
+
+    ctx.needs_free = true;
     let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
     ctx.emit(&format!("call void @free(ptr {})", ptr_val.reg));
     LlvmValue {

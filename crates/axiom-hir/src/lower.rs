@@ -410,13 +410,23 @@ impl LoweringContext {
                 ty,
                 value,
                 mutable,
-            } => HirStmtKind::Let {
-                name: name.node.clone(),
-                name_span: name.span,
-                ty: self.lower_type(ty, name.span),
-                value: value.as_ref().map(|v| self.lower_expr(v, span)),
-                mutable: *mutable,
-            },
+                annotations,
+            } => {
+                // Extract @lifetime annotations from the let statement and
+                // attach them to the HirStmt's annotations.
+                let let_anns: Vec<HirAnnotation> = annotations
+                    .iter()
+                    .map(|a| self.lower_annotation(a))
+                    .collect();
+                stmt_annotations.extend(let_anns);
+                HirStmtKind::Let {
+                    name: name.node.clone(),
+                    name_span: name.span,
+                    ty: self.lower_type(ty, name.span),
+                    value: value.as_ref().map(|v| self.lower_expr(v, span)),
+                    mutable: *mutable,
+                }
+            }
             ast::Stmt::Assign { target, value } => HirStmtKind::Assign {
                 target: self.lower_expr(target, span),
                 value: self.lower_expr(value, span),
@@ -1223,6 +1233,7 @@ struct Point {
                                         ty: ast::TypeExpr::Named("i32".to_string()),
                                         value: Some(ast::Expr::IntLiteral(42)),
                                         mutable: false,
+                                        annotations: vec![],
                                     },
                                     Span::new(20, 30),
                                 ),
@@ -1236,6 +1247,7 @@ struct Point {
                                         ty: ast::TypeExpr::Named("f64".to_string()),
                                         value: Some(ast::Expr::FloatLiteral(3.14)),
                                         mutable: true,
+                                        annotations: vec![],
                                     },
                                     Span::new(30, 40),
                                 ),

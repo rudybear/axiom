@@ -99,6 +99,8 @@ pub enum Stmt {
         ty: TypeExpr,
         value: Option<Expr>,
         mutable: bool,
+        /// Annotations attached to this let binding (e.g., `@lifetime(scope)`).
+        annotations: Vec<Spanned<Annotation>>,
     },
     Assign {
         target: Expr,
