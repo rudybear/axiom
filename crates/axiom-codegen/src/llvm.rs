@@ -992,6 +992,7 @@ fn function_writes_through_ptrs(body: &HirBlock) -> bool {
                     if name == "ptr_write_i32"
                         || name == "ptr_write_i64"
                         || name == "ptr_write_f64"
+                        || name == "ptr_write_f32"
                     {
                         return true;
                     }
@@ -2573,50 +2574,146 @@ fn emit_field_access(
             }
         };
 
-        // Vector field access: v.x → load vector, extractelement
+        // Vector field access: v.x → extractelement, v.zyx → shufflevector
         if is_vector_type(&var_info.llvm_type) {
-            let idx = match field {
-                "x" | "r" => 0i32,
-                "y" | "g" => 1,
-                "z" | "b" => 2,
-                "w" | "a" => 3,
-                _ => {
+            let vec_type = &var_info.llvm_type;
+            let max_idx: u32 = if vec_type == "<2 x double>" { 1 } else { 3 };
+
+            // Single-component access: v.x, v.y, etc. → extractelement
+            if field.len() == 1 {
+                let idx = match field {
+                    "x" | "r" => 0i32,
+                    "y" | "g" => 1,
+                    "z" | "b" => 2,
+                    "w" | "a" => 3,
+                    _ => {
+                        ctx.errors.push(CodegenError::UnsupportedExpression {
+                            expr: format!("unknown vector field `{field}`"),
+                            context: "vector field access".to_string(),
+                        });
+                        return LlvmValue {
+                            reg: "0.0".to_string(),
+                            ty: "double".to_string(),
+                        };
+                    }
+                };
+
+                // Reject out-of-bounds field access on vec2 (<2 x double>).
+                if vec_type == "<2 x double>" && idx > 1 {
                     ctx.errors.push(CodegenError::UnsupportedExpression {
-                        expr: format!("unknown vector field `{field}`"),
-                        context: "vector field access".to_string(),
+                        expr: format!("field '.{}' is not valid for vec2 (only .x, .y)", field),
+                        context: "field access".to_string(),
                     });
                     return LlvmValue {
                         reg: "0.0".to_string(),
                         ty: "double".to_string(),
                     };
                 }
-            };
-            let vec_type = &var_info.llvm_type;
 
-            // Reject out-of-bounds field access on vec2 (<2 x double>).
-            if vec_type == "<2 x double>" && idx > 1 {
-                ctx.errors.push(CodegenError::UnsupportedExpression {
-                    expr: format!("field '.{}' is not valid for vec2 (only .x, .y)", field),
-                    context: "field access".to_string(),
-                });
+                let align = vector_align(vec_type);
+                let load_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{load_reg} = load {vec_type}, ptr {}, align {align}",
+                    var_info.alloca_name
+                ));
+                let result = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{result} = extractelement {vec_type} {load_reg}, i32 {idx}"
+                ));
                 return LlvmValue {
-                    reg: "0.0".to_string(),
+                    reg: result,
                     ty: "double".to_string(),
                 };
             }
 
-            let align = vector_align(vec_type);
-            let load_reg = ctx.fresh_reg();
-            ctx.emit(&format!(
-                "{load_reg} = load {vec_type}, ptr {}, align {align}",
-                var_info.alloca_name
-            ));
-            let result = ctx.fresh_reg();
-            ctx.emit(&format!(
-                "{result} = extractelement {vec_type} {load_reg}, i32 {idx}"
-            ));
+            // Multi-component swizzle: v.xy, v.zyx, v.xxx, etc. → shufflevector
+            if let Some(indices) = parse_swizzle_indices(field) {
+                // Validate all indices are in-bounds for the source vector.
+                for &idx in &indices {
+                    if idx > max_idx {
+                        ctx.errors.push(CodegenError::UnsupportedExpression {
+                            expr: format!(
+                                "swizzle '.{}' has out-of-bounds component for {}",
+                                field,
+                                if vec_type == "<2 x double>" { "vec2" } else { "vec3/vec4" }
+                            ),
+                            context: "vector swizzle".to_string(),
+                        });
+                        return LlvmValue {
+                            reg: "0.0".to_string(),
+                            ty: "double".to_string(),
+                        };
+                    }
+                }
+
+                let align = vector_align(vec_type);
+                let load_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{load_reg} = load {vec_type}, ptr {}, align {align}",
+                    var_info.alloca_name
+                ));
+
+                let swizzle_len = indices.len();
+
+                match swizzle_len {
+                    2 => {
+                        // Narrowing to vec2: <2 x double>
+                        let mask = format!("<2 x i32> <i32 {}, i32 {}>", indices[0], indices[1]);
+                        let result = ctx.fresh_reg();
+                        ctx.emit(&format!(
+                            "{result} = shufflevector {vec_type} {load_reg}, {vec_type} poison, {mask}"
+                        ));
+                        return LlvmValue {
+                            reg: result,
+                            ty: "<2 x double>".to_string(),
+                        };
+                    }
+                    3 => {
+                        // Swizzle to vec3: stored as <4 x double>, w lane zeroed.
+                        let mask = format!(
+                            "<4 x i32> <i32 {}, i32 {}, i32 {}, i32 undef>",
+                            indices[0], indices[1], indices[2]
+                        );
+                        let shuf_reg = ctx.fresh_reg();
+                        ctx.emit(&format!(
+                            "{shuf_reg} = shufflevector {vec_type} {load_reg}, {vec_type} poison, {mask}"
+                        ));
+                        // Zero the w lane for clean vec3.
+                        let result = ctx.fresh_reg();
+                        ctx.emit(&format!(
+                            "{result} = insertelement <4 x double> {shuf_reg}, double 0.0, i32 3"
+                        ));
+                        return LlvmValue {
+                            reg: result,
+                            ty: "<4 x double>".to_string(),
+                        };
+                    }
+                    4 => {
+                        // Swizzle to vec4: <4 x double>
+                        let mask = format!(
+                            "<4 x i32> <i32 {}, i32 {}, i32 {}, i32 {}>",
+                            indices[0], indices[1], indices[2], indices[3]
+                        );
+                        let result = ctx.fresh_reg();
+                        ctx.emit(&format!(
+                            "{result} = shufflevector {vec_type} {load_reg}, {vec_type} poison, {mask}"
+                        ));
+                        return LlvmValue {
+                            reg: result,
+                            ty: "<4 x double>".to_string(),
+                        };
+                    }
+                    _ => unreachable!("parse_swizzle_indices guarantees 2..=4 length"),
+                }
+            }
+
+            // Not a valid single-char field or multi-char swizzle.
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: format!("unknown vector field `{field}`"),
+                context: "vector field access".to_string(),
+            });
             return LlvmValue {
-                reg: result,
+                reg: "0.0".to_string(),
                 ty: "double".to_string(),
             };
         }
@@ -3130,6 +3227,10 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "ptr_write_i32" => return emit_builtin_ptr_write(ctx, args, "i32"),
             "ptr_write_i64" => return emit_builtin_ptr_write(ctx, args, "i64"),
             "ptr_write_f64" => return emit_builtin_ptr_write(ctx, args, "double"),
+            "ptr_read_f32" => return emit_builtin_ptr_read(ctx, args, "float"),
+            "ptr_write_f32" => return emit_builtin_ptr_write(ctx, args, "float"),
+            "ptr_read_i16" => return emit_builtin_ptr_read(ctx, args, "i16"),
+            "ptr_read_u8" => return emit_builtin_ptr_read(ctx, args, "i8"),
             "arena_create" => return emit_builtin_arena_create(ctx, args),
             "arena_alloc" => return emit_builtin_arena_alloc(ctx, args),
             "arena_reset" => return emit_builtin_arena_reset(ctx, args),
@@ -7264,6 +7365,229 @@ fn emit_builtin_ptr_write(
     }
 }
 
+/// Emit built-in `ptr_read_f32(p: ptr, index: i32) -> f64`.
+///
+/// Reads a 32-bit float from memory and widens it to f64 (AXIOM's native float type).
+/// Emits: GEP float + load float + fpext float to double.
+fn emit_builtin_ptr_read_f32(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "ptr_read_f32() requires exactly 2 arguments (ptr, index)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    // Ownership validation: cannot read from a writeonly_ptr.
+    if let HirExprKind::Ident { ref name } = args[0].kind {
+        if ctx.param_ownership.get(name) == Some(&PtrOwnership::Writeonly) {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: format!(
+                    "cannot call ptr_read_f32() on writeonly_ptr parameter '{name}'"
+                ),
+                context: "ownership violation".to_string(),
+            });
+        }
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+
+    // Widen index to i64 for GEP.
+    let idx64 = ctx.fresh_reg();
+    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+
+    let gep_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{gep_reg} = getelementptr float, ptr {}, i64 {idx64}",
+        ptr_val.reg
+    ));
+
+    let f32_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{f32_reg} = load float, ptr {gep_reg}"));
+
+    let f64_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{f64_reg} = fpext float {f32_reg} to double"));
+
+    LlvmValue {
+        reg: f64_reg,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `ptr_write_f32(p: ptr, index: i32, val: f64)`.
+///
+/// Truncates an f64 value to f32 and stores it. Emits: fptrunc double to float + GEP + store.
+fn emit_builtin_ptr_write_f32(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "ptr_write_f32() requires exactly 3 arguments (ptr, index, val)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    // Ownership validation: cannot write to a readonly_ptr.
+    if let HirExprKind::Ident { ref name } = args[0].kind {
+        if ctx.param_ownership.get(name) == Some(&PtrOwnership::Readonly) {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: format!(
+                    "cannot call ptr_write_f32() on readonly_ptr parameter '{name}'"
+                ),
+                context: "ownership violation".to_string(),
+            });
+        }
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+    let val = emit_expr(ctx, &args[2], Some("double"));
+
+    // Truncate f64 to f32.
+    let f32_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{f32_reg} = fptrunc double {} to float", val.reg));
+
+    // Widen index to i64 for GEP.
+    let idx64 = ctx.fresh_reg();
+    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+
+    let gep_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{gep_reg} = getelementptr float, ptr {}, i64 {idx64}",
+        ptr_val.reg
+    ));
+
+    ctx.emit(&format!("store float {f32_reg}, ptr {gep_reg}"));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `ptr_read_i16(p: ptr, index: i32) -> i32`.
+///
+/// Reads a signed 16-bit integer from memory and sign-extends it to i32.
+/// Emits: GEP i16 + load i16 + sext i16 to i32.
+fn emit_builtin_ptr_read_i16(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "ptr_read_i16() requires exactly 2 arguments (ptr, index)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    // Ownership validation: cannot read from a writeonly_ptr.
+    if let HirExprKind::Ident { ref name } = args[0].kind {
+        if ctx.param_ownership.get(name) == Some(&PtrOwnership::Writeonly) {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: format!(
+                    "cannot call ptr_read_i16() on writeonly_ptr parameter '{name}'"
+                ),
+                context: "ownership violation".to_string(),
+            });
+        }
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+
+    // Widen index to i64 for GEP.
+    let idx64 = ctx.fresh_reg();
+    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+
+    let gep_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{gep_reg} = getelementptr i16, ptr {}, i64 {idx64}",
+        ptr_val.reg
+    ));
+
+    let i16_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{i16_reg} = load i16, ptr {gep_reg}"));
+
+    let i32_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{i32_reg} = sext i16 {i16_reg} to i32"));
+
+    LlvmValue {
+        reg: i32_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `ptr_read_u8(p: ptr, byte_index: i32) -> i32`.
+///
+/// Reads an unsigned byte from memory and zero-extends it to i32.
+/// Emits: GEP i8 + load i8 + zext i8 to i32.
+fn emit_builtin_ptr_read_u8(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "ptr_read_u8() requires exactly 2 arguments (ptr, byte_index)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    // Ownership validation: cannot read from a writeonly_ptr.
+    if let HirExprKind::Ident { ref name } = args[0].kind {
+        if ctx.param_ownership.get(name) == Some(&PtrOwnership::Writeonly) {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: format!(
+                    "cannot call ptr_read_u8() on writeonly_ptr parameter '{name}'"
+                ),
+                context: "ownership violation".to_string(),
+            });
+        }
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+
+    // Widen index to i64 for GEP.
+    let idx64 = ctx.fresh_reg();
+    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+
+    let gep_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{gep_reg} = getelementptr i8, ptr {}, i64 {idx64}",
+        ptr_val.reg
+    ));
+
+    let i8_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{i8_reg} = load i8, ptr {gep_reg}"));
+
+    let i32_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{i32_reg} = zext i8 {i8_reg} to i32"));
+
+    LlvmValue {
+        reg: i32_reg,
+        ty: "i32".to_string(),
+    }
+}
+
 /// Return the size in bytes of an LLVM primitive type string.
 fn llvm_type_size(ty: &str) -> u64 {
     match ty {
@@ -7397,6 +7721,28 @@ fn vector_align(ty: &str) -> usize {
         "<4 x double>" => 32,
         _ => 0,
     }
+}
+
+/// Parse a swizzle string (e.g., "zyx", "xy", "xxx") into component indices.
+/// Returns None if not a valid swizzle. Length-1 strings are NOT swizzles (handled elsewhere).
+fn parse_swizzle_indices(field: &str) -> Option<Vec<u32>> {
+    if field.len() < 2 || field.len() > 4 {
+        return None;
+    }
+    let mut indices = Vec::with_capacity(field.len());
+    let mut has_xyzw = false;
+    let mut has_rgba = false;
+    for ch in field.chars() {
+        let (idx, is_rgba) = match ch {
+            'x' => (0, false), 'y' => (1, false), 'z' => (2, false), 'w' => (3, false),
+            'r' => (0, true), 'g' => (1, true), 'b' => (2, true), 'a' => (3, true),
+            _ => return None,
+        };
+        if is_rgba { has_rgba = true; } else { has_xyzw = true; }
+        indices.push(idx);
+    }
+    if has_xyzw && has_rgba { return None; } // reject mixed notation
+    Some(indices)
 }
 
 /// Check if a register name is a literal constant (number, not a %register).

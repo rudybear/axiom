@@ -6626,3 +6626,77 @@ fn main() -> i32 {
     assert!(ir.contains("@scale(<4 x double>"), "should pass vec3 by value: {ir}");
     assert!(ir.contains("ret <4 x double>"), "should return vec3 by value: {ir}");
 }
+
+#[test]
+fn test_swizzle_reorder() {
+    let source = r#"
+@module swiz;
+fn main() -> i32 {
+    let v: vec3 = vec3(1.0, 2.0, 3.0);
+    let r: vec3 = v.zyx;
+    print_f64(r.x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("shufflevector"), "should emit shufflevector for swizzle: {ir}");
+}
+
+#[test]
+fn test_swizzle_broadcast() {
+    let source = r#"
+@module swiz_bcast;
+fn main() -> i32 {
+    let v: vec3 = vec3(1.0, 2.0, 3.0);
+    let b: vec3 = v.xxx;
+    print_f64(b.y);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("shufflevector"), "should emit shufflevector: {ir}");
+    assert!(ir.contains("i32 0, i32 0, i32 0"), "should broadcast x: {ir}");
+}
+
+#[test]
+fn test_swizzle_narrow_to_vec2() {
+    let source = r#"
+@module swiz_narrow;
+fn main() -> i32 {
+    let v: vec3 = vec3(1.0, 2.0, 3.0);
+    let xy: vec2 = v.xy;
+    print_f64(xy.x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("shufflevector"), "should emit shufflevector: {ir}");
+    assert!(ir.contains("<2 x i32>"), "should produce vec2 mask: {ir}");
+}
+
+#[test]
+fn test_swizzle_rgba_notation() {
+    let source = r#"
+@module swiz_rgba;
+fn main() -> i32 {
+    let color: vec3 = vec3(1.0, 0.5, 0.0);
+    let rg: vec2 = color.rg;
+    print_f64(rg.x);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(parse_result.errors.is_empty(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(ir.contains("shufflevector"), "should emit shufflevector for rgba swizzle: {ir}");
+}

@@ -279,6 +279,22 @@ bash .pipeline/scripts/verify-optimization.sh benchmarks/real_world/
 
 ---
 
+## Rule 11: AOS with vec3 fields beats SOA when accessing all fields per entity
+
+**Pattern:** `vec3(ptr_read_f64(data, i+0), ptr_read_f64(data, i+1), ptr_read_f64(data, i+2))` —
+three sequential reads reconstructing a vector from flat memory.
+
+**When to apply:** When code processes one entity's full state at a time (raytracers, physics engines,
+particle systems). AOS with vec3 fields eliminates reconstruction overhead.
+
+**When SOA wins instead:** When iterating one property across ALL entities (e.g., updating all positions,
+then all velocities). In this case, SOA enables SIMD lane packing across entities.
+
+**AXIOM-specific:** Use vec3 struct fields for AOS: `struct Sphere { center: vec3, radius: f64 }`.
+The vec3 type is SIMD-aligned and loads as a single `<4 x double>` instruction.
+
+---
+
 ## How This File Is Used
 
 1. **Before optimization:** The LLM optimizer reads this file as part of the prompt context

@@ -1049,8 +1049,11 @@ pub fn build_rewrite_prompt(source: &str) -> String {
     p.push_str("   initialization, prefer `heap_alloc_zeroed` over `heap_alloc` + manual zeroing loop.\n\n");
     p.push_str("3. **`@inline(always)` on hot helpers**: Small functions called in tight loops should be\n");
     p.push_str("   marked `@inline(always)` to avoid call overhead.\n\n");
-    p.push_str("4. **SOA over AOS**: Prefer Struct-of-Arrays layout for cache-friendly iteration.\n");
-    p.push_str("   Separate component arrays iterate faster than interleaved struct arrays.\n\n");
+    p.push_str("4. **Data layout by access pattern**: Choose data layout based on access pattern: SOA (flat arrays)\n");
+    p.push_str("   is better for sweeping one property across all entities. AOS (structs with vec3 fields) is better\n");
+    p.push_str("   when accessing all fields of one entity together (e.g., sphere center + radius + color in a\n");
+    p.push_str("   raytracer). When you see 3 consecutive ptr_read_f64 calls packed into vec3(), the data should\n");
+    p.push_str("   be stored as a struct with vec3 fields instead.\n\n");
     p.push_str("5. **Arena allocation**: Use `arena_create`/`arena_alloc` for groups of related allocations\n");
     p.push_str("   to reduce per-allocation overhead and improve locality.\n\n");
     p.push_str("6. **Loop strength reduction**: Replace `x * constant` with accumulating additions\n");

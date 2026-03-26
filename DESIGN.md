@@ -4,7 +4,7 @@ This is the living design document for AXIOM. It summarizes the current
 implementation state, references the formal specification files, and tracks
 design decisions and open questions.
 
-**Project stats:** 138 commits, 35,802 LOC, 469 tests, 197 benchmarks, 27 examples, 24 samples. ALL 47 milestones COMPLETE across 8 tracks.
+**Project stats:** 138 commits, 35,802 LOC, 481 tests, 197 benchmarks, 27 examples, 24 samples. ALL 47 milestones COMPLETE across 8 tracks.
 
 **FINAL benchmark result:** AXIOM beats C turbo (-O3 -march=native -ffast-math) by 3% overall (0.97x total wall clock) across 20 real-world benchmarks. 2 AXIOM wins (JPEG DCT 56% faster, RLE 16% faster), 9 ties, 9 C wins. Optimization Knowledge Base: 10 rules + 5 anti-patterns, grows with each LLM session.
 
@@ -69,7 +69,7 @@ The `spec/` directory contains the formal language specification:
   names checked against known set; unknown types produce errors but lowering
   continues with `HirType::Unknown`.
 - Types: `Primitive`, `UserDefined`, `Tensor`, `Array`, `Slice`, `Ptr`,
-  `ReadonlyPtr`, `WriteonlyPtr`, `Tuple`, `Fn`, `Unknown`.
+  `ReadonlyPtr`, `WriteonlyPtr`, `Vec2`, `Vec3`, `Vec4`, `Tuple`, `Fn`, `Unknown`.
 - Annotation target validation: each annotation is checked against its set of
   valid targets (Module, Function, Param, StructDef, StructField, Block).
   Invalid placement produces errors but lowering continues.
@@ -81,16 +81,19 @@ The `spec/` directory contains the formal language specification:
   InlineHint, LayoutKind, AnnotationValue, StrategyBlock, StrategyValue,
   TransferBlock, OptLogEntry, ParallelForConfig).
 
-### Codegen (`axiom-codegen`) -- Complete (128 tests)
+### Codegen (`axiom-codegen`) -- Complete (140 tests)
 
 - HIR-to-LLVM-IR text generation for the full language subset: functions with
   all primitive types, arithmetic (with `nsw`), if/else, for loops, while loops,
   return, function calls, extern function declarations, `@export` functions.
-- 113 builtin functions covering: I/O, math, conversions, bitwise, heap memory,
-  arena allocation, file I/O, system, coroutines, threading, atomics, mutex,
-  job system (with dependency graph), renderer/Vulkan FFI, option, string, vec,
-  function pointers, result/error handling, CPU feature detection, input system,
-  audio, and GPU operations (multi-light, instancing, screenshot).
+- 137 builtin functions covering: I/O, math (26 functions incl. trig, log, exp),
+  SIMD vector construction & math (vec2/vec3/vec4, dot, cross, length, normalize,
+  reflect, lerp), conversions, bitwise, heap memory, arena allocation, file I/O,
+  system, coroutines, threading, atomics, mutex, job system (with dependency graph),
+  renderer/Vulkan FFI, option, string, vec, function pointers, result/error handling,
+  CPU feature detection, input system, audio, and GPU operations.
+- `vec2`/`vec3`/`vec4` -> LLVM `<N x double>` vector types with native SIMD
+  `fadd`/`fmul`/`fsub`/`fdiv` instructions and `shufflevector`/`extractelement`.
 - `@pure` -> `memory(none)` or `memory(argmem: read)`, `readnone`/`readonly`,
   fast-math flags on float operations.
 - `@const` -> `speculatable` + compile-time evaluation (supports recursive
@@ -111,7 +114,7 @@ The `spec/` directory contains the formal language specification:
 - `fence release`/`fence acquire` around parallel regions.
 - DWARF debug metadata (`!dbg` references) for source-level debugging.
 
-### Optimization Protocol (`axiom-optimize`) -- Complete (115 tests)
+### Optimization Protocol (`axiom-optimize`) -- Complete (119 tests)
 
 - **Surface extraction**: `extract_surfaces` parses source through HIR and
   walks all functions for `@strategy` annotations and `?hole` expressions.
@@ -130,7 +133,7 @@ The `spec/` directory contains the formal language specification:
   LLVM IR, assembly, benchmark data, `@constraint` annotations, and optimization
   history. Supports Claude API (via curl), Claude CLI, and dry-run modes.
 
-### Driver (`axiom-driver`) -- Complete (57 tests)
+### Driver (`axiom-driver`) -- Complete (72 tests)
 
 - CLI frontend with 12 subcommands:
   - `axiom compile` -- full compilation (.axm -> native binary), with `--emit` for
@@ -182,8 +185,9 @@ AXIOM Parser (50 tests)      -- Recursive descent + Pratt expressions
 AXIOM HIR (25 tests)         -- Annotation validation, type checking, NodeIds
        |
        v
-LLVM IR Text (128 tests)     -- Optimized IR with noalias, nsw, fast-math,
-       |                        fastcc, fences, readonly/writeonly, DWARF debug
+LLVM IR Text (140 tests)     -- Optimized IR with noalias, nsw, fast-math,
+       |                        SIMD vec2/vec3/vec4, fastcc, fences,
+       |                        readonly/writeonly, DWARF debug
        v
 clang -O2                    -- Native binary (x86_64, AArch64)
 ```
@@ -230,12 +234,12 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 | Category | Count | Details |
 |----------|-------|---------|
 | Primitive types | 15 | i8-i128, u8-u128, f16, bf16, f32, f64, bool |
-| Compound types | 8 | array, ptr, readonly_ptr, writeonly_ptr, slice, tensor, tuple, fn |
+| Compound types | 11 | array, ptr, readonly_ptr, writeonly_ptr, slice, vec2, vec3, vec4, tensor, tuple, fn |
 | Annotations | 19 | pure, const, inline, complexity, intent, module, constraint, target, strategy, vectorizable, parallel, parallel_for, layout, align, lifetime, export, transfer, optimization_log, custom |
-| Builtin functions | 113 | I/O, math, conversions, bitwise, memory, arena, file, system, coroutines, threads, atomics, mutex, jobs, renderer, option, string, vec, fn_ptr, result, cpu, input, audio, gpu |
+| Builtin functions | 137 | I/O, math, vectors, conversions, bitwise, memory, arena, file, system, coroutines, threads, atomics, mutex, jobs, renderer, option, string, vec, fn_ptr, result, cpu, input, audio, gpu |
 | CLI commands | 12 | compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp |
 | Keywords | 21 | fn, let, mut, return, if, else, for, while, in, struct, type, module, import, pub, unsafe, extern, and, or, not, true, false |
-| Type keywords | 22 | i8-i128 (5), u8-u128 (5), f16, bf16, f32, f64, bool, tensor, array, slice, ptr, readonly_ptr, writeonly_ptr |
+| Type keywords | 25 | i8-i128 (5), u8-u128 (5), f16, bf16, f32, f64, bool, tensor, array, slice, ptr, readonly_ptr, writeonly_ptr, vec2, vec3, vec4 |
 | Operators | 16 | +, -, *, /, %, +%, +\|, -%, -\|, *%, ==, !=, <, >, <=, >= |
 | Milestones | 47/47 | ALL COMPLETE across 8 tracks (MT, LLM, Platform, Language, Ecosystem, Renderer, Engine, Self-Improvement) |
 

@@ -6,7 +6,7 @@ A programming language designed as the canonical transfer format between AI agen
 
 > **This is NOT a language for humans to program in. This is a language for AI agents to communicate optimized computation through.**
 
-> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 138 commits. 35,802 LOC. 469 tests. 197 benchmarks. ALL 47 milestones COMPLETE.
+> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 138 commits. 35,802 LOC. 481 tests. 197 benchmarks. ALL 47 milestones COMPLETE.
 
 ## Why AXIOM Exists
 
@@ -153,8 +153,9 @@ AXIOM Source (.axm)
    HIR LOWERING (25 tests)  Validated annotations, type checking
        |
        v
-   LLVM IR GEN (128 tests)  Optimized IR text with:
+   LLVM IR GEN (140 tests)  Optimized IR text with:
        |                     - noalias, nsw, fast-math
+       |                     - SIMD vec2/vec3/vec4 types
        |                     - fastcc, branch hints
        |                     - allocator attributes
        |                     - fence release/acquire
@@ -177,6 +178,7 @@ ptr[T]                         // Heap pointer
 readonly_ptr[T]                // Read-only pointer
 writeonly_ptr[T]               // Write-only pointer
 slice[T]                       // Fat pointer (ptr + length)
+vec2 vec3 vec4                 // SIMD f64 vectors (2/3/4 lanes)
 tensor[T, dims...]             // Tensor type (planned)
 (T1, T2, T3)                  // Tuple
 fn(T1, T2) -> R               // Function type
@@ -264,13 +266,38 @@ rotl(a, n)     // Rotate left rotr(a, n)     // Rotate right
 ### Math
 ```axiom
 abs(x)         // Integer absolute value
-abs_f64(x)     // Float absolute value
+abs_f64(x)     // Float absolute value       fabs(x)        // Float absolute value
 min(a, b)      // Integer min       max(a, b)      // Integer max
 min_f64(a, b)  // Float min         max_f64(a, b)  // Float max
 sqrt(x)        // Square root       pow(x, y)      // Power
+sin(x) cos(x) tan(x)              // Trigonometry
+asin(x) acos(x) atan(x) atan2(y,x) // Inverse trig
+floor(x) ceil(x) round(x)         // Rounding
+log(x) log2(x) exp(x) exp2(x)     // Logarithms & exponentials
 to_f64(x)      // i32 -> f64        to_f64_i64(x)  // i64 -> f64
 widen(x)       // Widen type         narrow(x)      // Narrow type
 truncate(x)    // Float -> integer truncation
+```
+
+### Vector Math (SIMD)
+```axiom
+// Construction -- returns <N x double> LLVM vectors
+let v: vec3 = vec3(1.0, 2.0, 3.0);
+let u: vec2 = vec2(0.5, 0.5);
+let q: vec4 = vec4(0.0, 0.0, 0.0, 1.0);
+
+// Operations
+let d: f64 = dot(a, b);           // Dot product
+let c: vec3 = cross(a, b);        // Cross product (vec3 only)
+let l: f64 = length(v);           // Euclidean length
+let n: vec3 = normalize(v);       // Unit vector
+let r: vec3 = reflect(i, n);      // Reflection
+let m: vec3 = lerp(a, b, t);      // Linear interpolation
+
+// Arithmetic via standard operators
+let sum: vec3 = a + b;            // Component-wise add
+let diff: vec3 = a - b;           // Component-wise subtract
+let prod: vec3 = a * b;           // Component-wise multiply
 ```
 
 ### Concurrency
@@ -438,10 +465,10 @@ axiom/
 │   ├── axiom-lexer/            # Tokenizer (63 tests)
 │   ├── axiom-parser/           # Recursive descent + Pratt (50 tests)
 │   ├── axiom-hir/              # High-level IR + validation (25 tests)
-│   ├── axiom-codegen/          # LLVM IR generation (128 tests)
-│   ├── axiom-optimize/         # Optimization protocol + agent API (115 tests)
+│   ├── axiom-codegen/          # LLVM IR generation (140 tests)
+│   ├── axiom-optimize/         # Optimization protocol + agent API (119 tests)
 │   ├── axiom-mir/              # Mid-level IR (stub)
-│   └── axiom-driver/           # CLI + MCP server + compilation (57 tests)
+│   └── axiom-driver/           # CLI + MCP server + compilation (72 tests)
 │       └── runtime/
 │           └── axiom_rt.c      # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
 ├── spec/                       # Formal language specification
@@ -493,10 +520,10 @@ axiom/
 ## Stats
 
 - **35,802 lines of Rust** across 7 crates
-- **469 tests** (all passing)
+- **481 tests** (all passing)
 - **197 benchmarks** (100% compile rate)
 - **138 git commits** across 11 development phases (all complete)
-- **113 builtin functions** (I/O, math, memory, concurrency, rendering, collections, input, audio, GPU)
+- **137 builtin functions** (I/O, math, vectors, memory, concurrency, rendering, collections, input, audio, GPU)
 - **12 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp
 - **27 example programs**, **24 sample programs**
 - **5 formal specification documents**
