@@ -412,6 +412,7 @@ fn walk_stmt_for_holes(kind: &HirStmtKind, holes: &mut Vec<OptHole>) {
             walk_expr_for_holes(condition, holes);
             walk_block_for_holes(body, holes);
         }
+        HirStmtKind::Break | HirStmtKind::Continue => {}
         HirStmtKind::Expr { expr } => walk_expr_for_holes(expr, holes),
     }
 }

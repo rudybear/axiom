@@ -120,6 +120,8 @@ pub enum Stmt {
         condition: Expr,
         body: Block,
     },
+    Break,
+    Continue,
     Expr(Expr),
 }
 

@@ -254,6 +254,8 @@ impl<'src> Parser<'src> {
                 self.peek(),
                 TokenKind::Let
                     | TokenKind::Return
+                    | TokenKind::Break
+                    | TokenKind::Continue
                     | TokenKind::If
                     | TokenKind::For
                     | TokenKind::While
@@ -302,6 +304,8 @@ impl<'src> Parser<'src> {
                 TokenKind::RBrace
                 | TokenKind::Let
                 | TokenKind::Return
+                | TokenKind::Break
+                | TokenKind::Continue
                 | TokenKind::If
                 | TokenKind::For
                 | TokenKind::While
@@ -1648,6 +1652,8 @@ impl<'src> Parser<'src> {
         match self.peek() {
             TokenKind::Let => Some(self.parse_let_stmt()),
             TokenKind::Return => Some(self.parse_return_stmt()),
+            TokenKind::Break => Some(self.parse_break_stmt()),
+            TokenKind::Continue => Some(self.parse_continue_stmt()),
             TokenKind::If => Some(self.parse_if_stmt()),
             TokenKind::For => Some(self.parse_for_stmt()),
             TokenKind::While => Some(self.parse_while_stmt()),
@@ -1712,6 +1718,24 @@ impl<'src> Parser<'src> {
         Spanned::new(Stmt::Return(value), start_span.merge(end_span))
     }
 
+    /// Parse a break statement: `break;`.
+    fn parse_break_stmt(&mut self) -> Spanned<Stmt> {
+        let start_span = self.current_span();
+        self.advance(); // consume `break`
+        self.expect_semicolon();
+        let end_span = self.prev_span();
+        Spanned::new(Stmt::Break, start_span.merge(end_span))
+    }
+
+    /// Parse a continue statement: `continue;`.
+    fn parse_continue_stmt(&mut self) -> Spanned<Stmt> {
+        let start_span = self.current_span();
+        self.advance(); // consume `continue`
+        self.expect_semicolon();
+        let end_span = self.prev_span();
+        Spanned::new(Stmt::Continue, start_span.merge(end_span))
+    }
+
     /// Parse an if statement: `if cond { } else { }`.
     fn parse_if_stmt(&mut self) -> Spanned<Stmt> {
         let start_span = self.current_span();
@@ -1721,7 +1745,16 @@ impl<'src> Parser<'src> {
         let then_block = self.parse_block();
 
         let else_block = if self.eat(&TokenKind::Else) {
-            Some(self.parse_block())
+            if self.check(&TokenKind::If) {
+                // `else if` — parse the chained if as a single-statement block.
+                let chained_if = self.parse_if_stmt();
+                Some(Block {
+                    annotations: Vec::new(),
+                    stmts: vec![chained_if],
+                })
+            } else {
+                Some(self.parse_block())
+            }
         } else {
             None
         };

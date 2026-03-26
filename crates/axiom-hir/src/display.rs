@@ -254,6 +254,12 @@ fn write_stmt(f: &mut fmt::Formatter<'_>, stmt: &HirStmt, indent: usize) -> fmt:
             write_block_contents(f, body, indent + 1)?;
             writeln!(f, "{prefix}}}")?;
         }
+        HirStmtKind::Break => {
+            writeln!(f, "{prefix}break;  // [node:{}]", stmt.id)?;
+        }
+        HirStmtKind::Continue => {
+            writeln!(f, "{prefix}continue;  // [node:{}]", stmt.id)?;
+        }
         HirStmtKind::Expr { expr } => {
             writeln!(f, "{prefix}{expr};  // [node:{}]", stmt.id)?;
         }

@@ -291,6 +291,10 @@ pub enum HirStmtKind {
         /// Loop body.
         body: HirBlock,
     },
+    /// `break;` — exit the innermost loop.
+    Break,
+    /// `continue;` — skip to the next iteration of the innermost loop.
+    Continue,
     /// Expression statement.
     Expr {
         /// The expression.

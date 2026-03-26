@@ -207,6 +207,10 @@ struct CodegenContext {
     /// Maps parameter names to their ownership kind for the current function.
     /// Used to validate readonly_ptr / writeonly_ptr access at codegen time.
     param_ownership: HashMap<String, PtrOwnership>,
+    /// Label for the current loop's condition/header block (for `continue`).
+    current_loop_header: Option<String>,
+    /// Label for the current loop's exit block (for `break`).
+    current_loop_exit: Option<String>,
 }
 
 /// Ownership kind for pointer parameters, used for access validation.
@@ -270,6 +274,8 @@ impl CodegenContext {
             const_func_bodies: HashMap::new(),
             warnings: Vec::new(),
             param_ownership: HashMap::new(),
+            current_loop_header: None,
+            current_loop_exit: None,
         }
     }
 
@@ -1001,6 +1007,8 @@ fn function_writes_through_ptrs(body: &HirBlock) -> bool {
                         || name == "ptr_write_i64"
                         || name == "ptr_write_f64"
                         || name == "ptr_write_f32"
+                        || name == "ptr_write_u8"
+                        || name == "ptr_write_i16"
                     {
                         return true;
                     }
@@ -1061,6 +1069,7 @@ fn function_writes_through_ptrs(body: &HirBlock) -> bool {
             HirStmtKind::While { condition, body } => {
                 expr_has_ptr_write(condition) || block_has_ptr_write(body)
             }
+            HirStmtKind::Break | HirStmtKind::Continue => false,
             HirStmtKind::Expr { expr } => expr_has_ptr_write(expr),
         }
     }
@@ -1432,6 +1441,28 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
             ..
         } => emit_for(ctx, var, var_type, iterable, body, &stmt.annotations),
         HirStmtKind::While { condition, body } => emit_while(ctx, condition, body),
+        HirStmtKind::Break => {
+            if let Some(ref exit_label) = ctx.current_loop_exit {
+                ctx.emit(&format!("br label %{exit_label}"));
+                ctx.block_terminated = true;
+            } else {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: "break outside of loop".to_string(),
+                    context: "break statement".to_string(),
+                });
+            }
+        }
+        HirStmtKind::Continue => {
+            if let Some(ref header_label) = ctx.current_loop_header {
+                ctx.emit(&format!("br label %{header_label}"));
+                ctx.block_terminated = true;
+            } else {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: "continue outside of loop".to_string(),
+                    context: "continue statement".to_string(),
+                });
+            }
+        }
         HirStmtKind::Expr { expr } => {
             emit_expr(ctx, expr, None);
         }
@@ -1690,6 +1721,19 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
             }
         };
         let val = emit_expr(ctx, value, Some(&var_info.llvm_type));
+        // Struct assignment: memcpy from source ptr to dest ptr.
+        if var_info.llvm_type.starts_with("%struct.") {
+            let struct_name_key = var_info.llvm_type.strip_prefix("%struct.").unwrap().to_string();
+            if let Some(info) = ctx.struct_registry.get(&struct_name_key).cloned() {
+                ctx.needs_memcpy = true;
+                let base_ptr = get_struct_base_ptr(ctx, &var_info);
+                ctx.emit(&format!(
+                    "call void @llvm.memcpy.p0.p0.i64(ptr {base_ptr}, ptr {}, i64 {}, i1 false)",
+                    val.reg, info.total_size
+                ));
+                return;
+            }
+        }
         let align_suffix = match vector_align(&var_info.llvm_type) {
             0 => String::new(),
             a => format!(", align {a}"),
@@ -1933,6 +1977,16 @@ fn emit_return(ctx: &mut CodegenContext, value: &HirExpr) {
     } else {
         &val.ty
     };
+    // For struct return types, the expression yields a pointer to the struct
+    // (from a struct literal alloca or a variable). Load the aggregate value
+    // from the pointer before returning it.
+    if ty.starts_with("%struct.") {
+        let load_reg = ctx.fresh_reg();
+        ctx.emit(&format!("{load_reg} = load {ty}, ptr {}", val.reg));
+        ctx.emit(&format!("ret {ty} {load_reg}"));
+        ctx.block_terminated = true;
+        return;
+    }
     ctx.emit(&format!("ret {ty} {}", val.reg));
     ctx.block_terminated = true;
 }
@@ -2092,14 +2146,15 @@ fn emit_for(
     // Detect @parallel_for annotation on this for loop.
     let is_parallel = has_parallel_for(annotations);
 
-    // Recognize range(start, end) or range(end) pattern.
-    let (start_expr, end_expr) = match &iterable.kind {
+    // Recognize range(start, end) or range(end) or range(start, end, step) pattern.
+    let (start_expr, end_expr, step_expr): (Option<&HirExpr>, Option<&HirExpr>, Option<&HirExpr>) = match &iterable.kind {
         HirExprKind::Call { func, args } => {
             if let HirExprKind::Ident { name } = &func.kind {
                 if name == "range" {
                     match args.len() {
-                        1 => (None, Some(&args[0])),
-                        2 => (Some(&args[0]), Some(&args[1])),
+                        1 => (None, Some(&args[0]), None),
+                        2 => (Some(&args[0]), Some(&args[1]), None),
+                        3 => (Some(&args[0]), Some(&args[1]), Some(&args[2])),
                         _ => {
                             ctx.errors.push(CodegenError::UnsupportedExpression {
                                 expr: "range() with wrong number of arguments".to_string(),
@@ -2144,6 +2199,15 @@ fn emit_for(
     // Emit end value (once, before the loop).
     let end_val = emit_expr(ctx, end_expr.expect("end_expr should be Some"), Some(&loop_type));
 
+    // Emit step value (once, before the loop). Defaults to 1 if not provided.
+    let step_val = match step_expr {
+        Some(expr) => emit_expr(ctx, expr, Some(&loop_type)),
+        None => LlvmValue {
+            reg: "1".to_string(),
+            ty: loop_type.clone(),
+        },
+    };
+
     // Alloca for loop variable — use unique name to avoid collisions with
     // multiple loops using the same variable name.
     let unique_id = ctx.next_reg;
@@ -2169,6 +2233,7 @@ fn emit_for(
 
     let cond_label = ctx.fresh_label("for.cond");
     let body_label = ctx.fresh_label("for.body");
+    let inc_label = ctx.fresh_label("for.inc");
     let end_label = ctx.fresh_label("for.end");
 
     ctx.emit(&format!("br label %{cond_label}"));
@@ -2194,16 +2259,37 @@ fn emit_for(
     ctx.emit_blank();
     ctx.emit_raw(&format!("{body_label}:"));
     ctx.block_terminated = false;
+
+    // Save and set loop labels for break/continue.
+    // continue jumps to the increment block (not the condition) so the loop variable
+    // is properly incremented before the next iteration.
+    let old_loop_header = ctx.current_loop_header.take();
+    let old_loop_exit = ctx.current_loop_exit.take();
+    ctx.current_loop_header = Some(inc_label.clone());
+    ctx.current_loop_exit = Some(end_label.clone());
+
     emit_block(ctx, body);
 
-    // Increment loop variable with nsw (loop induction variable doesn't wrap).
+    // Restore loop labels.
+    ctx.current_loop_header = old_loop_header;
+    ctx.current_loop_exit = old_loop_exit;
+
+    // Jump to increment block if the body didn't terminate.
     if !ctx.block_terminated {
+        ctx.emit(&format!("br label %{inc_label}"));
+    }
+
+    // Increment block: update loop variable and branch back to condition.
+    ctx.emit_blank();
+    ctx.emit_raw(&format!("{inc_label}:"));
+    ctx.block_terminated = false;
+    {
         let inc_load = ctx.fresh_reg();
         ctx.emit(&format!(
             "{inc_load} = load {loop_type}, ptr {alloca_name}"
         ));
         let inc_add = ctx.fresh_reg();
-        ctx.emit(&format!("{inc_add} = add nsw {loop_type} {inc_load}, 1"));
+        ctx.emit(&format!("{inc_add} = add nsw {loop_type} {inc_load}, {}", step_val.reg));
         ctx.emit(&format!(
             "store {loop_type} {inc_add}, ptr {alloca_name}"
         ));
@@ -2300,7 +2386,19 @@ fn emit_while(ctx: &mut CodegenContext, condition: &HirExpr, body: &HirBlock) {
     ctx.emit_blank();
     ctx.emit_raw(&format!("{body_label}:"));
     ctx.block_terminated = false;
+
+    // Save and set loop labels for break/continue.
+    let old_loop_header = ctx.current_loop_header.take();
+    let old_loop_exit = ctx.current_loop_exit.take();
+    ctx.current_loop_header = Some(cond_label.clone());
+    ctx.current_loop_exit = Some(end_label.clone());
+
     emit_block(ctx, body);
+
+    // Restore loop labels.
+    ctx.current_loop_header = old_loop_header;
+    ctx.current_loop_exit = old_loop_exit;
+
     if !ctx.block_terminated {
         ctx.emit(&format!("br label %{cond_label}"));
     }
@@ -3432,6 +3530,8 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "ptr_write_f64" => return emit_builtin_ptr_write(ctx, args, "double"),
             "ptr_read_f32" => return emit_builtin_ptr_read_f32(ctx, args),
             "ptr_write_f32" => return emit_builtin_ptr_write_f32(ctx, args),
+            "ptr_write_u8" => return emit_builtin_ptr_write_u8(ctx, args),
+            "ptr_write_i16" => return emit_builtin_ptr_write_i16(ctx, args),
             "ptr_read_i16" => return emit_builtin_ptr_read_i16(ctx, args),
             "ptr_read_u8" => return emit_builtin_ptr_read_u8(ctx, args),
             "arena_create" => return emit_builtin_arena_create(ctx, args),
@@ -3682,6 +3782,20 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
                 "{result_reg} = call {cc}{} @{name}({args_str})",
                 func_info.return_type
             ));
+            // For struct return types, the call returns an aggregate value.
+            // Store it into a temp alloca so downstream code can treat it as
+            // a pointer (consistent with struct literal representation).
+            if func_info.return_type.starts_with("%struct.") {
+                let tmp = ctx.fresh_reg();
+                let struct_name_key = func_info.return_type.strip_prefix("%struct.").unwrap();
+                let struct_align = struct_max_align(ctx, struct_name_key);
+                ctx.emit(&format!("{tmp} = alloca {}, align {struct_align}", func_info.return_type));
+                ctx.emit(&format!("store {} {result_reg}, ptr {tmp}", func_info.return_type));
+                return LlvmValue {
+                    reg: tmp,
+                    ty: func_info.return_type,
+                };
+            }
             LlvmValue {
                 reg: result_reg,
                 ty: func_info.return_type,
@@ -7788,6 +7902,118 @@ fn emit_builtin_ptr_read_u8(
     LlvmValue {
         reg: i32_reg,
         ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `ptr_write_u8(p: ptr, byte_index: i32, val: i32)`.
+///
+/// Truncates the i32 value to i8 and stores it at the given byte offset.
+/// Emits: trunc i32 to i8 + GEP i8 + store i8.
+fn emit_builtin_ptr_write_u8(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "ptr_write_u8() requires exactly 3 arguments (ptr, index, val)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    // Ownership validation: cannot write to a readonly_ptr.
+    if let HirExprKind::Ident { ref name } = args[0].kind {
+        if ctx.param_ownership.get(name) == Some(&PtrOwnership::Readonly) {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: format!(
+                    "cannot call ptr_write_u8() on readonly_ptr parameter '{name}'"
+                ),
+                context: "ownership violation".to_string(),
+            });
+        }
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+    let val = emit_expr(ctx, &args[2], Some("i32"));
+
+    // Truncate i32 to i8.
+    let i8_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{i8_reg} = trunc i32 {} to i8", val.reg));
+
+    // Widen index to i64 for GEP.
+    let idx64 = ctx.fresh_reg();
+    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+
+    let gep_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{gep_reg} = getelementptr i8, ptr {}, i64 {idx64}",
+        ptr_val.reg
+    ));
+
+    ctx.emit(&format!("store i8 {i8_reg}, ptr {gep_reg}"));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `ptr_write_i16(p: ptr, index: i32, val: i32)`.
+///
+/// Truncates the i32 value to i16 and stores it at the given element offset.
+/// Emits: trunc i32 to i16 + GEP i16 + store i16.
+fn emit_builtin_ptr_write_i16(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "ptr_write_i16() requires exactly 3 arguments (ptr, index, val)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    // Ownership validation: cannot write to a readonly_ptr.
+    if let HirExprKind::Ident { ref name } = args[0].kind {
+        if ctx.param_ownership.get(name) == Some(&PtrOwnership::Readonly) {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: format!(
+                    "cannot call ptr_write_i16() on readonly_ptr parameter '{name}'"
+                ),
+                context: "ownership violation".to_string(),
+            });
+        }
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let index = emit_expr(ctx, &args[1], Some("i32"));
+    let val = emit_expr(ctx, &args[2], Some("i32"));
+
+    // Truncate i32 to i16.
+    let i16_reg = ctx.fresh_reg();
+    ctx.emit(&format!("{i16_reg} = trunc i32 {} to i16", val.reg));
+
+    // Widen index to i64 for GEP.
+    let idx64 = ctx.fresh_reg();
+    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+
+    let gep_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{gep_reg} = getelementptr i16, ptr {}, i64 {idx64}",
+        ptr_val.reg
+    ));
+
+    ctx.emit(&format!("store i16 {i16_reg}, ptr {gep_reg}"));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
     }
 }
 

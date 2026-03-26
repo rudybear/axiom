@@ -1,0 +1,60 @@
+@module quick_wins_test;
+
+fn main() -> i32 {
+    // Gap 2: ptr_write_u8
+    let buf: ptr[i64] = heap_alloc(100, 1);
+    ptr_write_u8(buf, 0, 255);
+    let b: i32 = ptr_read_u8(buf, 0);
+    print_i32(b);
+
+    // Gap 2: ptr_write_i16
+    let buf16: ptr[i64] = heap_alloc(100, 2);
+    ptr_write_i16(buf16, 0, 1000);
+    let s: i32 = ptr_read_i16(buf16, 0);
+    print_i32(s);
+    heap_free(buf16);
+
+    // Gap 5: range with step
+    let mut sum: i32 = 0;
+    for i: i32 in range(0, 100, 20) {
+        sum = sum + i;
+    }
+    print_i32(sum);
+
+    // Gap 9: break
+    let mut count: i32 = 0;
+    for i: i32 in range(0, 10) {
+        if i == 5 { break; }
+        count = count + 1;
+    }
+    print_i32(count);
+
+    // Gap 9: continue
+    let mut evens: i32 = 0;
+    for i: i32 in range(0, 10) {
+        if i == 3 { continue; }
+        evens = evens + 1;
+    }
+    print_i32(evens);
+
+    // Gap 10: else if
+    let x: i32 = 42;
+    if x == 1 {
+        print_i32(1);
+    } else if x == 42 {
+        print_i32(42);
+    } else {
+        print_i32(0);
+    }
+
+    // Gap 11: hex literals
+    let mask: i32 = 0xFF;
+    print_i32(mask);
+
+    // Gap 12: negative literals
+    let neg: i32 = -1;
+    print_i32(neg);
+
+    heap_free(buf);
+    return 0;
+}

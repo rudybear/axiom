@@ -1,0 +1,47 @@
+@module q2_test;
+
+struct Point { x: f64, y: f64 }
+
+fn make_point(x: f64, y: f64) -> Point {
+    let p: Point = Point { x: x, y: y };
+    return p;
+}
+
+fn main() -> i32 {
+    // struct return
+    let p: Point = make_point(3.0, 4.0);
+    print_f64(p.x);
+    print_f64(p.y);
+
+    // ptr_write_u8
+    let buf: ptr[i64] = heap_alloc(10, 1);
+    ptr_write_u8(buf, 0, 65);
+    print_i32(ptr_read_u8(buf, 0));
+    heap_free(buf);
+
+    // range with step
+    let sum: i32 = 0;
+    for i: i32 in range(0, 100, 20) {
+        sum = sum + i;
+    }
+    print_i32(sum);
+
+    // break
+    let count: i32 = 0;
+    for i: i32 in range(0, 100) {
+        if i == 5 { break; }
+        count = count + 1;
+    }
+    print_i32(count);
+
+    // continue
+    let evens: i32 = 0;
+    for i: i32 in range(0, 10) {
+        if i == 3 { continue; }
+        if i == 7 { continue; }
+        evens = evens + 1;
+    }
+    print_i32(evens);
+
+    return 0;
+}
