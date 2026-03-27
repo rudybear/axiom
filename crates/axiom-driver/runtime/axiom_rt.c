@@ -44,9 +44,10 @@ static int axiom_mouse_y = 0;
 static int axiom_mouse_buttons[3] = {0};
 
 /* ── Renderer API ────────────────────────────────────────────────────── */
-/* When AXIOM_USE_WGPU_RENDERER is defined, the renderer functions come  */
-/* from the axiom_renderer.dll (wgpu-based). Skip the C stub.           */
-#ifndef AXIOM_USE_WGPU_RENDERER
+/* These are fallback implementations. When a DLL/shared library provides */
+/* the same symbols (e.g. axiom_renderer.dll), the linker prefers those. */
+/* On Windows: /alternatename linker directives.                         */
+/* On Linux/macOS: __attribute__((weak)) symbols.                        */
 /*
  * Provides a rendering API that AXIOM programs call to create windows,
  * load SPIR-V shaders (compiled by Lux), build pipelines, and draw
@@ -165,7 +166,7 @@ static LRESULT CALLBACK axiom_wnd_proc(HWND hwnd, UINT msg,
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-void *axiom_renderer_create(int width, int height, const char *title) {
+static void *axiom_renderer_create_fallback(int width, int height, const char *title) {
     AxiomRenderer *r = (AxiomRenderer *)calloc(1, sizeof(AxiomRenderer));
     if (!r) return NULL;
 
@@ -243,8 +244,9 @@ void *axiom_renderer_create(int width, int height, const char *title) {
 
     return r;
 }
+#pragma comment(linker, "/alternatename:axiom_renderer_create=axiom_renderer_create_fallback")
 
-void axiom_renderer_destroy(void *renderer) {
+static void axiom_renderer_destroy_fallback(void *renderer) {
     if (!renderer) return;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
 
@@ -263,10 +265,11 @@ void axiom_renderer_destroy(void *renderer) {
     free(r->framebuffer);
     free(r);
 }
+#pragma comment(linker, "/alternatename:axiom_renderer_destroy=axiom_renderer_destroy_fallback")
 
 /* ---- Frame operations -------------------------------------------------- */
 
-int axiom_renderer_begin_frame(void *renderer) {
+static int axiom_renderer_begin_frame_fallback(void *renderer) {
     if (!renderer) return 0;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
 
@@ -284,8 +287,9 @@ int axiom_renderer_begin_frame(void *renderer) {
     if (r->should_close) return 0;
     return 1;
 }
+#pragma comment(linker, "/alternatename:axiom_renderer_begin_frame=axiom_renderer_begin_frame_fallback")
 
-void axiom_renderer_end_frame(void *renderer) {
+static void axiom_renderer_end_frame_fallback(void *renderer) {
     if (!renderer) return;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
 
@@ -308,16 +312,18 @@ void axiom_renderer_end_frame(void *renderer) {
         printf("[AXIOM Renderer] Frame %d presented\n", r->frame_count);
     }
 }
+#pragma comment(linker, "/alternatename:axiom_renderer_end_frame=axiom_renderer_end_frame_fallback")
 
-int axiom_renderer_should_close(void *renderer) {
+static int axiom_renderer_should_close_fallback(void *renderer) {
     if (!renderer) return 1;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
     return r->should_close;
 }
+#pragma comment(linker, "/alternatename:axiom_renderer_should_close=axiom_renderer_should_close_fallback")
 
 /* ---- Clear -------------------------------------------------------------- */
 
-void axiom_renderer_clear(void *renderer, unsigned int color) {
+static void axiom_renderer_clear_fallback(void *renderer, unsigned int color) {
     if (!renderer) return;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
     int total = r->width * r->height;
@@ -331,12 +337,13 @@ void axiom_renderer_clear(void *renderer, unsigned int color) {
         }
     }
 }
+#pragma comment(linker, "/alternatename:axiom_renderer_clear=axiom_renderer_clear_fallback")
 
 /* ---- Drawing: points ---------------------------------------------------- */
 
 /* Draw colored points.  x_arr and y_arr are arrays of f64 positions,
    colors is an array of u32 (0xRRGGBB), count is the number of points. */
-void axiom_renderer_draw_points(void *renderer,
+static void axiom_renderer_draw_points_fallback(void *renderer,
                                 const double *x_arr,
                                 const double *y_arr,
                                 const unsigned int *colors,
@@ -364,6 +371,7 @@ void axiom_renderer_draw_points(void *renderer,
         }
     }
 }
+#pragma comment(linker, "/alternatename:axiom_renderer_draw_points=axiom_renderer_draw_points_fallback")
 
 /* ---- Drawing: triangles ------------------------------------------------- */
 
@@ -383,7 +391,7 @@ static int axiom_edge_func(int ax, int ay, int bx, int by, int px, int py) {
     return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
 }
 
-void axiom_renderer_draw_triangles(void *renderer,
+static void axiom_renderer_draw_triangles_fallback(void *renderer,
                                    const double *positions,
                                    const double *colors_f,
                                    int vertex_count) {
@@ -450,19 +458,21 @@ void axiom_renderer_draw_triangles(void *renderer,
         }
     }
 }
+#pragma comment(linker, "/alternatename:axiom_renderer_draw_triangles=axiom_renderer_draw_triangles_fallback")
 
 /* ---- Time -------------------------------------------------------------- */
 
-double axiom_renderer_get_time(void *renderer) {
+static double axiom_renderer_get_time_fallback(void *renderer) {
     if (!renderer) return 0.0;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
     long long now = axiom_clock_ns();
     return (double)(now - r->start_time_ns) / 1000000000.0;
 }
+#pragma comment(linker, "/alternatename:axiom_renderer_get_time=axiom_renderer_get_time_fallback")
 
 /* ---- Shader loading (SPIR-V from Lux) --------------------------------- */
 
-void *axiom_shader_load(void *renderer, const char *spv_path, int stage) {
+static void *axiom_shader_load_fallback(void *renderer, const char *spv_path, int stage) {
     if (!renderer || !spv_path) return NULL;
     (void)renderer;
 
@@ -493,10 +503,11 @@ void *axiom_shader_load(void *renderer, const char *spv_path, int stage) {
     printf("[AXIOM Renderer] ERROR: no free shader slots\n");
     return NULL;
 }
+#pragma comment(linker, "/alternatename:axiom_shader_load=axiom_shader_load_fallback")
 
 /* ---- Pipeline creation ------------------------------------------------- */
 
-void *axiom_pipeline_create(void *renderer, void *vert_shader, void *frag_shader) {
+static void *axiom_pipeline_create_fallback(void *renderer, void *vert_shader, void *frag_shader) {
     if (!renderer) return NULL;
     (void)renderer;
 
@@ -529,12 +540,14 @@ void *axiom_pipeline_create(void *renderer, void *vert_shader, void *frag_shader
     printf("[AXIOM Renderer] ERROR: no free pipeline slots\n");
     return NULL;
 }
+#pragma comment(linker, "/alternatename:axiom_pipeline_create=axiom_pipeline_create_fallback")
 
-void axiom_renderer_bind_pipeline(void *renderer, void *pipeline) {
+static void axiom_renderer_bind_pipeline_fallback(void *renderer, void *pipeline) {
     if (!renderer || !pipeline) return;
     (void)renderer;
     (void)pipeline;
 }
+#pragma comment(linker, "/alternatename:axiom_renderer_bind_pipeline=axiom_renderer_bind_pipeline_fallback")
 
 #else /* !_WIN32 -- headless stub for non-Windows platforms */
 
@@ -549,6 +562,7 @@ typedef struct {
     long long start_time_ns;
 } AxiomRenderer;
 
+__attribute__((weak))
 void *axiom_renderer_create(int width, int height, const char *title) {
     AxiomRenderer *r = (AxiomRenderer *)calloc(1, sizeof(AxiomRenderer));
     if (!r) return NULL;
@@ -573,6 +587,7 @@ void *axiom_renderer_create(int width, int height, const char *title) {
     return r;
 }
 
+__attribute__((weak))
 void axiom_renderer_destroy(void *renderer) {
     if (!renderer) return;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
@@ -581,11 +596,13 @@ void axiom_renderer_destroy(void *renderer) {
     free(r);
 }
 
+__attribute__((weak))
 int axiom_renderer_begin_frame(void *renderer) {
     if (!renderer) return 0;
     return 1;
 }
 
+__attribute__((weak))
 void axiom_renderer_end_frame(void *renderer) {
     if (!renderer) return;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
@@ -595,15 +612,18 @@ void axiom_renderer_end_frame(void *renderer) {
     }
 }
 
+__attribute__((weak))
 int axiom_renderer_should_close(void *renderer) {
     if (!renderer) return 1;
     return ((AxiomRenderer *)renderer)->should_close;
 }
 
+__attribute__((weak))
 void axiom_renderer_clear(void *renderer, unsigned int color) {
     (void)renderer; (void)color;
 }
 
+__attribute__((weak))
 void axiom_renderer_draw_points(void *renderer,
                                 const double *x_arr,
                                 const double *y_arr,
@@ -612,6 +632,7 @@ void axiom_renderer_draw_points(void *renderer,
     (void)renderer; (void)x_arr; (void)y_arr; (void)colors; (void)count;
 }
 
+__attribute__((weak))
 void axiom_renderer_draw_triangles(void *renderer,
                                    const double *positions,
                                    const double *colors,
@@ -625,6 +646,7 @@ void axiom_renderer_draw_triangles(void *renderer,
     }
 }
 
+__attribute__((weak))
 double axiom_renderer_get_time(void *renderer) {
     if (!renderer) return 0.0;
     AxiomRenderer *r = (AxiomRenderer *)renderer;
@@ -632,6 +654,7 @@ double axiom_renderer_get_time(void *renderer) {
     return (double)(now - r->start_time_ns) / 1000000000.0;
 }
 
+__attribute__((weak))
 void *axiom_shader_load(void *renderer, const char *spv_path, int stage) {
     if (!renderer || !spv_path) return NULL;
     (void)renderer;
@@ -653,6 +676,7 @@ void *axiom_shader_load(void *renderer, const char *spv_path, int stage) {
     return NULL;
 }
 
+__attribute__((weak))
 void *axiom_pipeline_create(void *renderer, void *vert_shader, void *frag_shader) {
     if (!renderer) return NULL;
     (void)renderer;
@@ -674,12 +698,12 @@ void *axiom_pipeline_create(void *renderer, void *vert_shader, void *frag_shader
     return NULL;
 }
 
+__attribute__((weak))
 void axiom_renderer_bind_pipeline(void *renderer, void *pipeline) {
     (void)renderer; (void)pipeline;
 }
 
 #endif /* _WIN32 / headless stub */
-#endif /* !AXIOM_USE_WGPU_RENDERER */
 
 #include "axiom_rt_vec.c"
 
@@ -697,26 +721,55 @@ void axiom_renderer_bind_pipeline(void *renderer, void *pipeline) {
  *   axiom_is_mouse_down(button)   -> i32 (0=left, 1=right, 2=middle)
  */
 
-/* When using the wgpu renderer DLL, input functions come from the DLL.
-   Only compile the C runtime input functions when NOT using the DLL. */
-#ifndef AXIOM_USE_WGPU_RENDERER
+/* Fallback input functions. When a DLL provides these symbols, the linker */
+/* prefers the DLL versions. Otherwise these fallbacks are used.           */
+#if defined(_WIN32)
+
+static int axiom_is_key_down_fallback(int key_code) {
+    return axiom_key_state[key_code & 0xFF];
+}
+#pragma comment(linker, "/alternatename:axiom_is_key_down=axiom_is_key_down_fallback")
+
+static int axiom_get_mouse_x_fallback(void) {
+    return axiom_mouse_x;
+}
+#pragma comment(linker, "/alternatename:axiom_get_mouse_x=axiom_get_mouse_x_fallback")
+
+static int axiom_get_mouse_y_fallback(void) {
+    return axiom_mouse_y;
+}
+#pragma comment(linker, "/alternatename:axiom_get_mouse_y=axiom_get_mouse_y_fallback")
+
+static int axiom_is_mouse_down_fallback(int button) {
+    if (button < 0 || button > 2) return 0;
+    return axiom_mouse_buttons[button];
+}
+#pragma comment(linker, "/alternatename:axiom_is_mouse_down=axiom_is_mouse_down_fallback")
+
+#else /* Linux/macOS */
+
+__attribute__((weak))
 int axiom_is_key_down(int key_code) {
     return axiom_key_state[key_code & 0xFF];
 }
 
+__attribute__((weak))
 int axiom_get_mouse_x(void) {
     return axiom_mouse_x;
 }
 
+__attribute__((weak))
 int axiom_get_mouse_y(void) {
     return axiom_mouse_y;
 }
 
+__attribute__((weak))
 int axiom_is_mouse_down(int button) {
     if (button < 0 || button > 2) return 0;
     return axiom_mouse_buttons[button];
 }
-#endif /* !AXIOM_USE_WGPU_RENDERER */
+
+#endif /* _WIN32 / weak symbols */
 
 /* ── Audio (Minimal) ─────────────────────────────────────────────── */
 /*
