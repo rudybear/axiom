@@ -13,8 +13,8 @@ AXIOM is a programming language designed as the canonical transfer format betwee
 AXIOM must achieve top-tier scores on language comparison benchmarks. This is a hard requirement.
 
 **FINAL results (197 benchmarks):**
-- **AXIOM beats C turbo (-O3 -march=native -ffast-math) by 3% overall** (0.97x total wall clock) across 20 real-world benchmarks
-- **2 AXIOM wins, 9 ties, 9 C wins** across 20 real-world benchmarks
+- **115/115 benchmarks pass**, 1.01x average ratio vs C (parity)
+- **Raytracer:** AXIOM scalar 42ms (+7% faster than C), AXIOM AOS vec3 44ms (+2% faster), C -O2 47ms, C turbo 51ms
 - JPEG DCT: **AXIOM 56% faster** than C turbo
 - RLE compression: **AXIOM 16% faster** than C turbo
 - Binary trees (Benchmarks Game classic): **AXIOM 80% faster** with arena allocator
@@ -37,13 +37,13 @@ AXIOM Source (.axm)           <- AI agents read/write here
 AXIOM Lexer (63 tests)        <- Tokenizer with error recovery
        |
        v
-AXIOM Parser (52 tests)       <- Recursive descent + Pratt expressions
+AXIOM Parser (52 tests)        <- Recursive descent + Pratt expressions
        |
        v
 AXIOM HIR (25 tests)          <- Annotation validation, type checking,
        |                          @strict enforcement, pre/postcondition lowering
        v
-LLVM IR Text Gen (150 tests)  <- Optimized IR with noalias, nsw, fast-math,
+LLVM IR Text Gen (152 tests)  <- Optimized IR with noalias, nsw, fast-math,
        |                          SIMD vec2/vec3/vec4 types,
        |                          fastcc, branch hints, allocator attributes,
        |                          fence release/acquire, readonly/writeonly,
@@ -55,12 +55,12 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 
 ## Technology Stack
 
-- **Compiler language**: Rust (36,778 lines, 7 crates)
+- **Compiler language**: Rust (~39,500 lines, 7 crates)
 - **Backend**: LLVM IR text generation -> clang -O2 (no inkwell dependency)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`)
-- **Testing**: 504 tests (unit + integration + doc-tests + E2E)
+- **Testing**: 532 tests (unit + integration + doc-tests + E2E)
 - **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos)
 
 ## Current Feature Set
@@ -68,12 +68,16 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 ### Types
 ```
 Primitives:    i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f16 bf16 f32 f64 bool
+               vec2 vec3 vec4 ivec2 ivec3 ivec4 fvec2 fvec3 fvec4 mat3 mat4
 Arrays:        array[T, N]              // fixed-size, stack-allocated
 Pointers:      ptr[T]                   // heap pointer
                readonly_ptr[T]          // read-only pointer (enables LLVM readonly attr)
                writeonly_ptr[T]         // write-only pointer (enables LLVM writeonly attr)
 Slices:        slice[T]                 // fat pointer (ptr + length)
 Vectors:       vec2 vec3 vec4           // SIMD f64 vectors (2/3/4 lanes, hardware-mapped)
+Int vectors:   ivec2 ivec3 ivec4       // SIMD i32 vectors
+Float vectors: fvec2 fvec3 fvec4       // SIMD f32 vectors
+Matrices:      mat3 mat4              // 3x3 and 4x4 f64 matrices
 Tensors:       tensor[T, dims...]       // planned
 Tuples:        (T1, T2, T3)
 Functions:     fn(T1, T2) -> R
@@ -138,11 +142,16 @@ let broadcast: vec3 = v.xxx;        // Broadcast single component
 @precondition(expr)            // Function: runtime check at entry (--debug)
 @postcondition(expr)           // Function: runtime check at exit (--debug)
 @test { input: (...), expect } // Function: inline test case
+@requires(expr)                // Function: formal precondition (alias for @precondition)
+@ensures(expr)                 // Function: formal postcondition (alias for @postcondition)
+@invariant(expr)               // Block: loop invariant (checked in --debug)
+@trace                         // Function: emit ENTER/EXIT calls for tracing
+@link("lib", "kind")           // Function: link against a native library
 @transfer { ... }              // Inter-agent handoff
 @optimization_log { ... }      // Optimization history
 ```
 
-### All Builtin Functions (173 total)
+### All Builtin Functions (~200 total)
 
 #### I/O (4)
 ```
@@ -163,6 +172,34 @@ to_f64(i32->f64) to_f64_i64(i64->f64)
 ```
 vec2(x,y) vec3(x,y,z) vec4(x,y,z,w)
 dot(a,b) cross(a,b) length(v) normalize(v) reflect(i,n) lerp(a,b,t)
+```
+
+#### Integer/Float Vector Construction (6)
+```
+ivec2(x,y) ivec3(x,y,z) ivec4(x,y,z,w)
+fvec2(x,y) fvec3(x,y,z) fvec4(x,y,z,w)
+```
+
+#### Vector Conversions (6)
+```
+vec2_to_ivec2(v) vec2_to_fvec2(v) ivec2_to_vec2(v) fvec2_to_vec2(v)
+ivec3_to_vec3(v) fvec3_to_vec3(v) ivec4_to_vec4(v) fvec4_to_vec4(v)
+vec3_to_ivec3(v) vec3_to_fvec3(v) vec4_to_ivec4(v) vec4_to_fvec4(v)
+```
+
+#### Matrix Operations (14)
+```
+mat3_identity() mat3_mul_vec3(m,v)
+mat4_identity() mat4_mul(a,b) mat4_mul_vec4(m,v) mat4_transpose(m)
+mat4_translate(x,y,z) mat4_scale(x,y,z) mat4_rotate_x(a) mat4_rotate_y(a) mat4_rotate_z(a)
+mat4_perspective(fov,aspect,near,far) mat4_look_at(eye,center,up)
+mat4_row(m,i) mat4_set_row(m,i,v)
+```
+
+#### Slices (6)
+```
+slice_from(ptr, len) slice_get(s, idx) slice_set(s, idx, val)
+slice_len(s) slice_ptr(s) slice_sub(s, start, end)
 ```
 
 #### Conversions (5)
@@ -360,9 +397,9 @@ axiom/
 │   ├── axiom-parser/               # Parser -> AST (52 tests)
 │   ├── axiom-hir/                  # HIR + lowering (25 tests)
 │   ├── axiom-mir/                  # Mid-level IR (stub)
-│   ├── axiom-codegen/              # LLVM IR generation (150 tests)
-│   ├── axiom-optimize/             # Optimization protocol + agent API (119 tests)
-│   └── axiom-driver/               # CLI + MCP server + compilation (83 tests)
+│   ├── axiom-codegen/              # LLVM IR generation (152 tests)
+│   ├── axiom-optimize/             # Optimization protocol + agent API (132 tests)
+│   └── axiom-driver/               # CLI + MCP server + compilation (96 tests)
 │       └── runtime/
 │           └── axiom_rt.c          # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
 ├── spec/                           # Formal language specification
@@ -453,7 +490,7 @@ Self-hosted AXIOM parser written in AXIOM (`examples/self_host/`). Compiler self
 
 ---
 
-## CLI Commands (14 total)
+## CLI Commands (16 total)
 
 ```bash
 # Build
@@ -503,6 +540,10 @@ axiom lsp
 axiom verify program.axm                # Check annotation completeness (@strict)
 axiom test program.axm                  # Run @test blocks
 axiom test program.axm --fuzz           # Auto-fuzz from @precondition
+
+# Time-travel debugging
+axiom replay program.trace.jsonl             # Replay execution trace
+axiom replay program.trace.jsonl --filter fn # Filter by function name
 
 # MCP server
 axiom mcp

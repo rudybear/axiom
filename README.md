@@ -6,7 +6,7 @@ A programming language designed as the canonical transfer format between AI agen
 
 > **This is NOT a language for humans to program in. This is a language for AI agents to communicate optimized computation through.**
 
-> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 169 commits. 36,778 LOC. 504 tests. 197 benchmarks. ALL 47 milestones COMPLETE.
+> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** ~39,500 LOC. 532 tests. 115/115 benchmarks pass (1.01x avg vs C). ALL 47 milestones COMPLETE.
 
 ## Why AXIOM Exists
 
@@ -40,9 +40,18 @@ The `?params` are optimization holes that AI agents fill in, benchmark, and iter
 
 ## Benchmark Results
 
-**AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.**
+**115/115 benchmarks pass, 1.01x average ratio vs C (parity). Raytracer: AXIOM scalar 42ms (+7% faster than C), AXIOM AOS vec3 44ms (+2% faster), C -O2 47ms.**
 
 **197 benchmarks** comparing AXIOM against C turbo (clang -O3 -march=native -ffast-math). Same LLVM backend, but AXIOM generates better-optimized IR.
+
+### Raytracer Benchmark (latest)
+
+| Version | Median (ms) | vs C -O2 |
+|---------|-------------|----------|
+| **AXIOM scalar** | **42** | **+7% faster** |
+| **AXIOM AOS vec3** | **44** | **+2% faster** |
+| C -O2 | 47 | baseline |
+| C turbo (-O3 -ffast-math) | 51 | -9% slower |
 
 ### Real-World Benchmarks (20 programs) -- vs C Turbo
 
@@ -140,6 +149,10 @@ axiom verify program.axm                # Check annotation completeness (@strict
 axiom test program.axm                  # Run @test blocks
 axiom test program.axm --fuzz           # Auto-fuzz from @precondition
 
+# Time-travel debugging
+axiom compile --record program.axm -o program  # Record execution trace
+axiom replay program.trace.jsonl               # Replay trace events
+
 # Start LSP server for editor integration
 axiom lsp
 
@@ -164,7 +177,7 @@ AXIOM Source (.axm)
    HIR LOWERING (25 tests)  Validated annotations, type checking,
        |                     @strict enforcement, pre/postcondition lowering
        v
-   LLVM IR GEN (150 tests)  Optimized IR text with:
+   LLVM IR GEN (152 tests)  Optimized IR text with:
        |                     - noalias, nsw, fast-math
        |                     - fastcc, branch hints
        |                     - allocator attributes
@@ -189,6 +202,9 @@ readonly_ptr[T]                // Read-only pointer
 writeonly_ptr[T]               // Write-only pointer
 slice[T]                       // Fat pointer (ptr + length)
 vec2 vec3 vec4                 // SIMD f64 vectors (2/3/4 lanes, hardware-mapped)
+ivec2 ivec3 ivec4              // SIMD i32 vectors
+fvec2 fvec3 fvec4              // SIMD f32 vectors
+mat3 mat4                      // 3x3 and 4x4 f64 matrices
 tensor[T, dims...]             // Tensor type (planned)
 (T1, T2, T3)                  // Tuple
 fn(T1, T2) -> R               // Function type
@@ -217,6 +233,11 @@ struct Name { field: Type }    // With literal constructors: Name { x: 1, y: 2 }
 @precondition(expr)            // Function: runtime check at entry (--debug)
 @postcondition(expr)           // Function: runtime check at exit (--debug)
 @test { input: (...), expect } // Function: inline test case
+@requires(expr)                // Function: formal precondition (alias for @precondition)
+@ensures(expr)                 // Function: formal postcondition (alias for @postcondition)
+@invariant(expr)               // Block: loop invariant (checked in --debug)
+@trace                         // Function: emit ENTER/EXIT calls for tracing
+@link("lib", "kind")           // Function: link against a native library
 @transfer { ... }              // Inter-agent handoff metadata
 @optimization_log { ... }      // Optimization history
 ```
@@ -403,7 +424,7 @@ let result: i32 = call_fn_ptr_i32(fp, arg);
 let result: f64 = call_fn_ptr_f64(fp, arg);
 ```
 
-### Renderer (Vulkan) -- 34 builtins
+### Renderer (Vulkan)
 ```axiom
 // Core renderer (12)
 renderer_create(width, height, title) renderer_destroy(r)
@@ -423,12 +444,16 @@ gpu_create_textured_mesh(r, ...) gpu_create_lit_textured_mesh(r, ...)
 gpu_create_mesh_triangles(r, ...) gpu_blit_rgba(r, data, w, h)
 ```
 
-### C Interop
+### C Interop / FFI
 ```axiom
 extern fn clock() -> i64;
 
 @export
 fn compute(data: ptr[f64], n: i32) -> f64 { ... }
+
+// Link against native libraries
+@link("mylib", "static")
+extern fn my_native_func(x: i32) -> i32;
 ```
 
 ## AI Agent Integration
@@ -498,10 +523,10 @@ axiom/
 │   ├── axiom-lexer/            # Tokenizer (63 tests)
 │   ├── axiom-parser/           # Recursive descent + Pratt (52 tests)
 │   ├── axiom-hir/              # High-level IR + validation (25 tests)
-│   ├── axiom-codegen/          # LLVM IR generation (150 tests)
-│   ├── axiom-optimize/         # Optimization protocol + agent API (119 tests)
+│   ├── axiom-codegen/          # LLVM IR generation (152 tests)
+│   ├── axiom-optimize/         # Optimization protocol + agent API (132 tests)
 │   ├── axiom-mir/              # Mid-level IR (stub)
-│   └── axiom-driver/           # CLI + MCP server + compilation (83 tests)
+│   └── axiom-driver/           # CLI + MCP server + compilation (96 tests)
 │       └── runtime/
 │           └── axiom_rt.c      # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
 ├── spec/                       # Formal language specification
@@ -555,12 +580,11 @@ axiom/
 
 ## Stats
 
-- **36,778 lines of Rust** across 7 crates
-- **504 tests** (all passing)
-- **197 benchmarks** (100% compile rate)
-- **169 git commits** across 12 development phases (all complete)
-- **173 builtin functions** (I/O, math, vector math, memory, concurrency, rendering, GPU, collections, input, audio, debug)
-- **14 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test
+- **~39,500 lines of Rust** across 7 crates
+- **532 tests** (all passing)
+- **115/115 benchmarks pass** (1.01x avg ratio vs C)
+- **~200 builtin functions** (I/O, math, vector math, matrix ops, memory, concurrency, rendering, GPU, collections, input, audio, debug, slices)
+- **16 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test, replay
 - **16 example programs**, **24 sample programs**
 - **5 formal specification documents**
 - **6 research documents** (optimization, memory, game engine, multithreading, Lux integration, language plan)

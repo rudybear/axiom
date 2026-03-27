@@ -1,6 +1,6 @@
 # AXIOM Annotation Schema
 
-Version 0.3 -- matches implemented parser and HIR as of 2026-03-25.
+Version 0.4 -- matches implemented parser and HIR as of 2026-03-25.
 Source of truth: `crates/axiom-parser/src/ast.rs` (`Annotation` enum),
 `crates/axiom-hir/src/hir.rs` (`HirAnnotationKind` enum),
 `crates/axiom-hir/src/lower.rs` (`annotation_valid_targets` function).
@@ -458,6 +458,98 @@ fn factorial(n: i32) -> i32 {
     if n <= 1 { return 1; }
     return n * factorial(n - 1);
 }
+```
+
+### `@requires`
+
+**Syntax:** `@requires(expr)`
+**Valid targets:** Function
+**Meaning:** Alias for `@precondition` that signals formal verification intent.
+Semantically identical to `@precondition` -- emits a runtime check at function
+entry in `--debug` builds, zero overhead in release. The name `@requires` is
+preferred when the annotation participates in a formal contract specification
+alongside `@ensures` and `@invariant`.
+**Effect on compilation:** Same as `@precondition`.
+
+```axiom
+@requires(n > 0)
+fn factorial(n: i32) -> i32 {
+    if n <= 1 { return 1; }
+    return n * factorial(n - 1);
+}
+```
+
+### `@ensures`
+
+**Syntax:** `@ensures(expr)`
+**Valid targets:** Function
+**Meaning:** Alias for `@postcondition` that signals formal verification intent.
+Semantically identical to `@postcondition` -- emits a runtime check before each
+return statement in `--debug` builds. The expression can reference parameter names
+and the special name `result` to refer to the return value.
+**Effect on compilation:** Same as `@postcondition`.
+
+```axiom
+@ensures(result >= 0)
+fn my_abs(x: i32) -> i32 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+```
+
+### `@invariant`
+
+**Syntax:** `@invariant(expr)`
+**Valid targets:** Block
+**Meaning:** Declares a loop invariant -- a boolean expression that must hold at
+the start and end of every loop iteration. In `--debug` builds, the compiler
+inserts runtime checks at the loop header and before the back-edge. In release
+builds, no code is emitted (zero overhead).
+**Effect on compilation:** Runtime checks in debug mode only. Can be used by
+future static analysis passes to prove loop correctness.
+
+```axiom
+@invariant(i >= 0 and i <= n)
+for i in range(0, n) {
+    // i is guaranteed in bounds
+}
+```
+
+### `@trace`
+
+**Syntax:** `@trace`
+**Valid targets:** Function
+**Meaning:** Instruments the function with ENTER/EXIT trace calls. When the
+program is compiled with `--record`, these calls write structured events to a
+`.trace.jsonl` file that can be replayed with `axiom replay`.
+**Effect on compilation:** Emits `printf`-based trace calls at function entry
+and before each return statement, including the function name and arguments.
+
+```axiom
+@trace
+fn compute(x: i32) -> i32 {
+    return x * x;
+}
+// At runtime prints: ENTER compute(42) / EXIT compute -> 1764
+```
+
+### `@link`
+
+**Syntax:** `@link("library_name", "kind")`
+**Valid targets:** Function
+**Meaning:** Declares that the annotated `extern fn` requires linking against
+the named native library. The `kind` parameter specifies the linking strategy:
+`"static"` for static linking, `"dynamic"` for dynamic linking, `"framework"`
+for macOS frameworks.
+**Effect on compilation:** Passes `-l` flags to the linker via clang. Can also
+be used with `axiom compile --link-dir` to specify library search paths.
+
+```axiom
+@link("m", "dynamic")
+extern fn cbrt(x: f64) -> f64;
+
+@link("mylib", "static")
+extern fn my_native_func(x: i32) -> i32;
 ```
 
 ---

@@ -14,11 +14,11 @@ to AXIOM. Both produce identical checksums (5854663641).
 ### Five versions benchmarked (20 runs each, median):
 | Version | Lines | Median (ms) | Best (ms) | vs C |
 |---------|-------|-------------|-----------|------|
-| **AXIOM scalar** | 627 | **41** | **41** | **+5% faster** |
-| **AXIOM AOS vec3** | 311 | **43** | **43** | **= C, 23% fewer lines** |
-| C -O2 | 401 | 43 | 43 | baseline |
-| AXIOM vec3 SOA | 310 | 48 | 44 | -5% |
-| C turbo (-O3 -ffast-math) | 401 | 53 | 49 | -23% slower |
+| **AXIOM scalar** | 627 | **42** | **42** | **+7% faster** |
+| **AXIOM AOS vec3** | 311 | **44** | **44** | **+2% faster** |
+| C -O2 | 401 | 47 | 47 | baseline |
+| AXIOM vec3 SOA | 310 | 48 | 44 | -2% |
+| C turbo (-O3 -ffast-math) | 401 | 51 | 49 | -9% slower |
 
 ### Gaps resolved by vec2/vec3/vec4:
 - **GAP #1 RESOLVED**: `vec3(1.0, 2.0, 3.0)` constructor syntax
@@ -86,9 +86,10 @@ to AXIOM. Both produce identical checksums (5854663641).
 
 | Version | Median (ms) | vs C -O2 |
 |---------|------------|----------|
-| **AXIOM** | **40** | **+12% faster** |
-| C -O2 | 45 | baseline |
-| C turbo (-O3 -march=native -ffast-math) | 49 | -9% slower |
+| **AXIOM scalar** | **42** | **+7% faster** |
+| **AXIOM AOS vec3** | **44** | **+2% faster** |
+| C -O2 | 47 | baseline |
+| C turbo (-O3 -march=native -ffast-math) | 51 | -9% slower |
 
 AXIOM beats C because: `@pure` -> `memory(none)` + `fast` math | `noalias` on all ptr params |
 `nsw` on integer arithmetic | `fastcc` calling convention | `@inline(always)` -> `alwaysinline`
