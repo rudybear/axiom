@@ -585,6 +585,12 @@ pub enum HirAnnotationKind {
     Link { library: String, kind: String },
     /// `@trace` — emit ENTER/EXIT printf calls for function tracing.
     Trace,
+    /// `@requires(expr)` — alias for `@precondition`, signals formal verification intent.
+    Requires(Box<HirExpr>),
+    /// `@ensures(expr)` — alias for `@postcondition`, signals formal verification intent.
+    Ensures(Box<HirExpr>),
+    /// `@invariant(expr)` — loop invariant (checked at runtime in debug mode).
+    Invariant(Box<HirExpr>),
     /// `@custom(name, args)` - extensibility.
     Custom(String, Vec<AnnotationValue>),
 }

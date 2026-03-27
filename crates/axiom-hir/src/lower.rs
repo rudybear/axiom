@@ -52,14 +52,17 @@ pub fn lower(module: &ast::Module) -> Result<HirModule, Vec<LowerError>> {
             let has_contract = func.annotations.iter().any(|a| {
                 matches!(
                     a.kind,
-                    HirAnnotationKind::Precondition(_) | HirAnnotationKind::Postcondition(_)
+                    HirAnnotationKind::Precondition(_)
+                        | HirAnnotationKind::Postcondition(_)
+                        | HirAnnotationKind::Requires(_)
+                        | HirAnnotationKind::Ensures(_)
                 )
             });
             if !has_intent || !has_contract {
                 let missing = match (!has_intent, !has_contract) {
-                    (true, true) => "@intent and @precondition/@postcondition",
+                    (true, true) => "@intent and @precondition/@postcondition (or @requires/@ensures)",
                     (true, false) => "@intent",
-                    (false, true) => "@precondition/@postcondition",
+                    (false, true) => "@precondition/@postcondition (or @requires/@ensures)",
                     _ => unreachable!(),
                 };
                 ctx.errors.push(LowerError::StrictMissingAnnotations {
@@ -733,6 +736,15 @@ impl LoweringContext {
                 }
             }
             ast::Annotation::Trace => HirAnnotationKind::Trace,
+            ast::Annotation::Requires(expr) => {
+                HirAnnotationKind::Requires(Box::new(self.lower_expr(expr, ann.span)))
+            }
+            ast::Annotation::Ensures(expr) => {
+                HirAnnotationKind::Ensures(Box::new(self.lower_expr(expr, ann.span)))
+            }
+            ast::Annotation::Invariant(expr) => {
+                HirAnnotationKind::Invariant(Box::new(self.lower_expr(expr, ann.span)))
+            }
             ast::Annotation::Custom(name, args) => {
                 HirAnnotationKind::Custom(name.clone(), args.clone())
             }
@@ -842,6 +854,9 @@ fn annotation_valid_targets(kind: &HirAnnotationKind) -> (&str, Vec<AnnotationTa
         HirAnnotationKind::Test(_) => ("test", vec![Function]),
         HirAnnotationKind::Link { .. } => ("link", vec![Function]),
         HirAnnotationKind::Trace => ("trace", vec![Function]),
+        HirAnnotationKind::Requires(_) => ("requires", vec![Function]),
+        HirAnnotationKind::Ensures(_) => ("ensures", vec![Function]),
+        HirAnnotationKind::Invariant(_) => ("invariant", vec![Block]),
         HirAnnotationKind::Custom(_, _) => (
             "custom",
             vec![Function, Module, Param, StructDef, StructField, Block],
@@ -998,6 +1013,7 @@ fn foo(x: i32) -> i32 {
                             Span::new(10, 20),
                         )],
                     },
+                    is_public: false,
                 }),
                 Span::new(0, 30),
             )],
@@ -1035,6 +1051,7 @@ fn foo(x: i32) -> i32 {
                             Span::new(10, 20),
                         )],
                     },
+                    is_public: false,
                 }),
                 Span::new(0, 30),
             )],
@@ -1071,6 +1088,7 @@ fn foo(x: i32) -> i32 {
                             Span::new(10, 20),
                         )],
                     },
+                    is_public: false,
                 }),
                 Span::new(0, 30),
             )],
@@ -1136,6 +1154,7 @@ fn foo(x: i32) -> i32 {
                             Span::new(10, 20),
                         )],
                     },
+                    is_public: false,
                 }),
                 Span::new(0, 30),
             )],
@@ -1177,6 +1196,7 @@ fn foo(x: i32) -> i32 {
                             Span::new(10, 20),
                         )],
                     },
+                    is_public: false,
                 }),
                 Span::new(0, 30),
             )],
@@ -1223,6 +1243,7 @@ fn foo(x: i32, y: f64, z: bool) -> i32 {
                             Span::new(10, 20),
                         )],
                     },
+                    is_public: false,
                 }),
                 Span::new(0, 30),
             )],
@@ -1443,6 +1464,7 @@ struct Point {
                                 ),
                             ],
                         },
+                        is_public: false,
                     }),
                     Span::new(0, 120),
                 ),
@@ -1472,6 +1494,7 @@ struct Point {
                     ast::Item::Import(ast::ImportDecl {
                         path: vec!["std".to_string(), "io".to_string()],
                         alias: None,
+                        is_public: false,
                     }),
                     Span::new(150, 160),
                 ),
@@ -1614,6 +1637,7 @@ fn f() -> i32 {
                                 Span::new(5, 15),
                             )],
                         },
+                        is_public: false,
                     }),
                     Span::new(0, 20),
                 ),
@@ -1630,6 +1654,7 @@ fn f() -> i32 {
                                 Span::new(30, 40),
                             )],
                         },
+                        is_public: false,
                     }),
                     Span::new(20, 45),
                 ),

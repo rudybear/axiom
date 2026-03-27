@@ -1,0 +1,15 @@
+@strict;
+@module verify_test;
+
+@intent("compute absolute value")
+@requires(true)
+@ensures(result >= 0)
+fn my_abs(x: i32) -> i32 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+
+fn main() -> i32 {
+    print_i32(my_abs(-7));
+    return 0;
+}

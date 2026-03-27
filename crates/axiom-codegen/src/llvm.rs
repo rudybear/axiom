@@ -1131,20 +1131,26 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
         ctx.needs_crash_handler = true;
     }
 
-    // Emit precondition checks in debug mode.
+    // Emit precondition checks in debug mode (@precondition and @requires).
     if ctx.debug_mode {
         for ann in &func.annotations {
             if let HirAnnotationKind::Precondition(ref expr) = ann.kind {
                 emit_contract_check(ctx, expr, "Precondition", &func.name);
             }
+            if let HirAnnotationKind::Requires(ref expr) = ann.kind {
+                emit_contract_check(ctx, expr, "Requires", &func.name);
+            }
         }
     }
 
-    // Collect postconditions for checking at return sites.
+    // Collect postconditions for checking at return sites (@postcondition and @ensures).
     ctx.postconditions.clear();
     if ctx.debug_mode {
         for ann in &func.annotations {
             if let HirAnnotationKind::Postcondition(ref expr) = ann.kind {
+                ctx.postconditions.push((func.name.clone(), (**expr).clone()));
+            }
+            if let HirAnnotationKind::Ensures(ref expr) = ann.kind {
                 ctx.postconditions.push((func.name.clone(), (**expr).clone()));
             }
         }
@@ -2381,6 +2387,15 @@ fn emit_for(
     ctx.current_loop_header = Some(inc_label.clone());
     ctx.current_loop_exit = Some(end_label.clone());
 
+    // Emit @invariant checks at the top of the loop body (debug mode only).
+    if ctx.debug_mode {
+        for ann in &body.annotations {
+            if let HirAnnotationKind::Invariant(ref expr) = ann.kind {
+                emit_contract_check(ctx, expr, "Invariant", "loop");
+            }
+        }
+    }
+
     emit_block(ctx, body);
 
     // Restore loop labels.
@@ -2505,6 +2520,15 @@ fn emit_while(ctx: &mut CodegenContext, condition: &HirExpr, body: &HirBlock) {
     let old_loop_exit = ctx.current_loop_exit.take();
     ctx.current_loop_header = Some(cond_label.clone());
     ctx.current_loop_exit = Some(end_label.clone());
+
+    // Emit @invariant checks at the top of the while loop body (debug mode only).
+    if ctx.debug_mode {
+        for ann in &body.annotations {
+            if let HirAnnotationKind::Invariant(ref expr) = ann.kind {
+                emit_contract_check(ctx, expr, "Invariant", "loop");
+            }
+        }
+    }
 
     emit_block(ctx, body);
 

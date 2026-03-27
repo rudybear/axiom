@@ -416,12 +416,15 @@ impl<'src> Parser<'src> {
         // Collect annotations preceding the item
         let annotations = self.parse_annotations();
 
+        // Check for `pub` visibility modifier before fn/extern/import
+        let is_public = self.eat(&TokenKind::Pub);
+
         match self.peek() {
-            TokenKind::Fn => Some(self.parse_function(annotations)),
-            TokenKind::Extern => Some(self.parse_extern_function(annotations)),
+            TokenKind::Fn => Some(self.parse_function(annotations, is_public)),
+            TokenKind::Extern => Some(self.parse_extern_function(annotations, is_public)),
             TokenKind::Struct => Some(self.parse_struct(annotations)),
             TokenKind::Type => Some(self.parse_type_alias(annotations)),
-            TokenKind::Import => Some(self.parse_import(annotations)),
+            TokenKind::Import => Some(self.parse_import(annotations, is_public)),
             _ => {
                 if !self.at_end() {
                     self.errors.push(ParseError::UnexpectedToken {
@@ -780,6 +783,27 @@ impl<'src> Parser<'src> {
                 let expr = self.parse_expr();
                 self.expect(&TokenKind::RParen, "')'");
                 Annotation::Postcondition(Box::new(expr))
+            }
+            "requires" => {
+                // @requires(expr) — alias for @precondition
+                self.expect(&TokenKind::LParen, "'('");
+                let expr = self.parse_expr();
+                self.expect(&TokenKind::RParen, "')'");
+                Annotation::Requires(Box::new(expr))
+            }
+            "ensures" => {
+                // @ensures(expr) — alias for @postcondition
+                self.expect(&TokenKind::LParen, "'('");
+                let expr = self.parse_expr();
+                self.expect(&TokenKind::RParen, "')'");
+                Annotation::Ensures(Box::new(expr))
+            }
+            "invariant" => {
+                // @invariant(expr) — loop invariant
+                self.expect(&TokenKind::LParen, "'('");
+                let expr = self.parse_expr();
+                self.expect(&TokenKind::RParen, "')'");
+                Annotation::Invariant(Box::new(expr))
             }
             "test" => {
                 // @test { input: (args...), expect: value }
@@ -1168,7 +1192,7 @@ impl<'src> Parser<'src> {
     // ── Function ──────────────────────────────────────────────────────
 
     /// Parse a function definition.
-    fn parse_function(&mut self, annotations: Vec<Spanned<Annotation>>) -> Spanned<Item> {
+    fn parse_function(&mut self, annotations: Vec<Spanned<Annotation>>, is_public: bool) -> Spanned<Item> {
         let start_span = self.current_span();
         self.advance(); // consume `fn`
 
@@ -1232,13 +1256,14 @@ impl<'src> Parser<'src> {
                 params,
                 return_type,
                 body,
+                is_public,
             }),
             start_span.merge(end_span),
         )
     }
 
     /// Parse an extern function declaration: `extern fn name(params) -> RetType;`
-    fn parse_extern_function(&mut self, annotations: Vec<Spanned<Annotation>>) -> Spanned<Item> {
+    fn parse_extern_function(&mut self, annotations: Vec<Spanned<Annotation>>, is_public: bool) -> Spanned<Item> {
         let start_span = self.current_span();
         self.advance(); // consume `extern`
 
@@ -1320,6 +1345,7 @@ impl<'src> Parser<'src> {
                 return_type,
                 convention,
                 is_variadic,
+                is_public,
             }),
             start_span.merge(end_span),
         )
@@ -1453,7 +1479,7 @@ impl<'src> Parser<'src> {
     // ── Import ────────────────────────────────────────────────────────
 
     /// Parse an import declaration: `import path::to::module;`.
-    fn parse_import(&mut self, annotations: Vec<Spanned<Annotation>>) -> Spanned<Item> {
+    fn parse_import(&mut self, annotations: Vec<Spanned<Annotation>>, is_public: bool) -> Spanned<Item> {
         let start_span = self.current_span();
         self.advance(); // consume `import`
 
@@ -1480,7 +1506,7 @@ impl<'src> Parser<'src> {
         let end_span = self.prev_span();
         let _ = annotations;
         Spanned::new(
-            Item::Import(ImportDecl { path, alias }),
+            Item::Import(ImportDecl { path, alias, is_public }),
             start_span.merge(end_span),
         )
     }
@@ -1724,9 +1750,9 @@ impl<'src> Parser<'src> {
 
         let mut stmts = Vec::new();
         let mut block_annotations = Vec::new();
-        // Annotations that should be attached to the next for-loop statement
-        // (e.g., @parallel_for). These are kept separate so they can be injected
-        // into the for-loop's body block annotations for correct association.
+        // Annotations that should be attached to the next for/while-loop statement
+        // (e.g., @parallel_for, @invariant). These are kept separate so they can be
+        // injected into the loop's body block annotations for correct association.
         let mut pending_for_annotations: Vec<Spanned<Annotation>> = Vec::new();
         // Statement-level annotations (e.g., @lifetime) that should be attached
         // to the next let statement.
@@ -1745,7 +1771,7 @@ impl<'src> Parser<'src> {
                 if let Some(ann) = self.parse_annotation() {
                     // @parallel_for annotations are statement-level: they attach
                     // to the next for-loop rather than the enclosing block.
-                    if matches!(ann.node, Annotation::ParallelFor(_)) {
+                    if matches!(ann.node, Annotation::ParallelFor(_) | Annotation::Invariant(_)) {
                         pending_for_annotations.push(ann);
                     } else if matches!(ann.node, Annotation::Lifetime(_)) {
                         // @lifetime annotations attach to the next let statement.
@@ -1762,10 +1788,18 @@ impl<'src> Parser<'src> {
             }
 
             if let Some(mut stmt) = self.parse_stmt() {
-                // Attach pending @parallel_for annotations to for-loops.
+                // Attach pending @parallel_for/@invariant annotations to for-loops.
                 if matches!(stmt.node, Stmt::For { .. }) && !pending_for_annotations.is_empty() {
                     if let Stmt::For { ref mut body, .. } = &mut stmt.node {
                         // Prepend the pending annotations to the for-loop's body block.
+                        let mut merged = std::mem::take(&mut pending_for_annotations);
+                        merged.append(&mut body.annotations);
+                        body.annotations = merged;
+                    }
+                }
+                // Attach pending @invariant annotations to while-loops.
+                if matches!(stmt.node, Stmt::While { .. }) && !pending_for_annotations.is_empty() {
+                    if let Stmt::While { ref mut body, .. } = &mut stmt.node {
                         let mut merged = std::mem::take(&mut pending_for_annotations);
                         merged.append(&mut body.annotations);
                         body.annotations = merged;

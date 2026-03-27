@@ -278,24 +278,47 @@ fn read_source_with_includes(input: &str) -> miette::Result<String> {
 /// Parse the imported file and merge its extern function declarations and struct
 /// definitions into the main module's AST (in-place). This allows user code to
 /// `import renderer;` and then call `axiom_renderer_create(...)` directly.
+///
+/// When a module uses `pub` on any function, only `pub` items are visible to
+/// importers. If no items are `pub`, all items are visible (legacy behavior).
+///
+/// `pub import renderer;` re-exports the imported module's declarations so that
+/// transitive importers also see them.
+///
+/// Circular imports are detected via the `resolving` set and produce a warning.
 fn resolve_imports(module: &mut axiom_parser::ast::Module, source_path: &str) {
+    let mut resolving = HashSet::new();
+    if let Ok(canonical) = std::fs::canonicalize(source_path) {
+        resolving.insert(canonical);
+    } else {
+        resolving.insert(std::path::PathBuf::from(source_path));
+    }
+    resolve_imports_inner(module, source_path, &mut resolving);
+}
+
+/// Inner recursive import resolver with circular import detection.
+fn resolve_imports_inner(
+    module: &mut axiom_parser::ast::Module,
+    source_path: &str,
+    resolving: &mut HashSet<std::path::PathBuf>,
+) {
     use axiom_parser::ast::Item;
     let source_dir = Path::new(source_path).parent().unwrap_or(Path::new("."));
 
-    // Collect the import paths first to avoid borrow issues.
-    let import_paths: Vec<Vec<String>> = module
+    // Collect the import paths and their `pub` status first to avoid borrow issues.
+    let import_info: Vec<(Vec<String>, bool)> = module
         .items
         .iter()
         .filter_map(|item| {
             if let Item::Import(ref decl) = item.node {
-                Some(decl.path.clone())
+                Some((decl.path.clone(), decl.is_public))
             } else {
                 None
             }
         })
         .collect();
 
-    for path_segments in import_paths {
+    for (path_segments, is_pub_import) in import_info {
         let name = path_segments.join("/");
         let file_name = format!("{name}.axm");
 
@@ -334,6 +357,18 @@ fn resolve_imports(module: &mut axiom_parser::ast::Module, source_path: &str) {
             }
         };
 
+        // Circular import detection: if this file is already being resolved
+        // in the current chain, emit a warning and skip.
+        let canonical = std::fs::canonicalize(&resolved_path)
+            .unwrap_or_else(|_| resolved_path.clone());
+        if resolving.contains(&canonical) {
+            eprintln!(
+                "warning: circular import detected: '{}' is already being resolved",
+                name
+            );
+            continue;
+        }
+
         let import_source = match std::fs::read_to_string(&resolved_path) {
             Ok(s) => s,
             Err(e) => {
@@ -360,18 +395,52 @@ fn resolve_imports(module: &mut axiom_parser::ast::Module, source_path: &str) {
             continue;
         }
 
-        // Merge imported items into the main module.
-        for item in import_result.module.items {
+        // Recursively resolve imports in the imported module (for re-exports
+        // and transitive dependencies).
+        let mut imported_module = import_result.module;
+        resolving.insert(canonical.clone());
+        resolve_imports_inner(
+            &mut imported_module,
+            &resolved_path.display().to_string(),
+            resolving,
+        );
+        resolving.remove(&canonical);
+
+        // Check if the imported module uses `pub` visibility at all.
+        // If any item is marked `pub`, only `pub` items are visible.
+        // If no items are marked `pub`, all items are visible (legacy behavior).
+        let has_any_pub = imported_module.items.iter().any(|item| {
             match &item.node {
-                Item::ExternFunction(_) | Item::Struct(_) => {
+                Item::Function(f) => f.is_public,
+                Item::ExternFunction(ef) => ef.is_public,
+                _ => false,
+            }
+        });
+
+        // Merge imported items into the main module.
+        for item in imported_module.items {
+            match &item.node {
+                Item::ExternFunction(ef) => {
+                    if !has_any_pub || ef.is_public {
+                        module.items.push(item);
+                    }
+                }
+                Item::Struct(_) => {
+                    // Structs are always visible when imported.
                     module.items.push(item);
                 }
-                Item::Function(_) => {
-                    // Also merge functions from imported modules.
+                Item::Function(f) => {
+                    if !has_any_pub || f.is_public {
+                        module.items.push(item);
+                    }
+                }
+                Item::Import(decl) if decl.is_public && is_pub_import => {
+                    // Re-exported imports: if this import was `pub import X;`
+                    // and X itself has `pub import Y;`, propagate Y.
                     module.items.push(item);
                 }
                 _ => {
-                    // Skip imports-of-imports and type aliases for now.
+                    // Skip non-pub imports and type aliases.
                 }
             }
         }
@@ -854,8 +923,8 @@ fn main() -> miette::Result<()> {
         }
 
         // Verified Development Pipeline: run @test annotations
-        Commands::Test { input, fuzz: _ } => {
-            run_test(&input)
+        Commands::Test { input, fuzz } => {
+            run_test_with_fuzz(&input, fuzz)
         }
     }
 }
@@ -1967,6 +2036,8 @@ fn run_verify(input: &str) -> miette::Result<()> {
                 a.kind,
                 axiom_hir::HirAnnotationKind::Precondition(_)
                     | axiom_hir::HirAnnotationKind::Postcondition(_)
+                    | axiom_hir::HirAnnotationKind::Requires(_)
+                    | axiom_hir::HirAnnotationKind::Ensures(_)
             )
         }) {
             with_contract += 1;
@@ -1975,7 +2046,7 @@ fn run_verify(input: &str) -> miette::Result<()> {
 
     eprintln!("[VERIFY] {input}: {total} functions checked");
     eprintln!("[VERIFY]   {with_intent}/{total} have @intent");
-    eprintln!("[VERIFY]   {with_contract}/{total} have @precondition/@postcondition");
+    eprintln!("[VERIFY]   {with_contract}/{total} have contracts");
     if total == 0 {
         eprintln!("[VERIFY] PASS — no non-main functions to check");
     } else if with_intent == total && with_contract == total {
@@ -2151,6 +2222,248 @@ fn strip_main_function(source: &str) -> String {
     drop(chars);
 
     result
+}
+
+/// Run `axiom test` with optional `--fuzz` flag.
+///
+/// When `--fuzz` is enabled, functions with `@precondition` annotations get
+/// auto-generated test inputs derived from the constraint ranges.
+fn run_test_with_fuzz(input: &str, fuzz: bool) -> miette::Result<()> {
+    if !fuzz {
+        return run_test(input);
+    }
+
+    let source = read_source_with_includes(input)?;
+
+    let parse_result = axiom_parser::parse(&source);
+    if parse_result.has_errors() {
+        eprintln!("--- Parse Errors ---");
+        for err in &parse_result.errors {
+            eprintln!("  {err}");
+        }
+        return Err(miette::miette!(
+            "parsing failed with {} error(s)",
+            parse_result.errors.len()
+        ));
+    }
+
+    let hir = axiom_hir::lower(&parse_result.module).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("HIR lowering failed with {} error(s)", errors.len())
+    })?;
+
+    // Collect existing @test cases plus fuzz-generated inputs from @precondition.
+    let mut test_cases: Vec<(String, Vec<axiom_hir::HirTestCase>)> = Vec::new();
+    let mut fuzz_test_count = 0usize;
+
+    for func in &hir.functions {
+        // Collect existing @test annotations.
+        let mut tests: Vec<axiom_hir::HirTestCase> = func
+            .annotations
+            .iter()
+            .filter_map(|a| {
+                if let axiom_hir::HirAnnotationKind::Test(tc) = &a.kind {
+                    Some(tc.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Extract @precondition annotations for fuzz input generation.
+        let preconditions: Vec<axiom_hir::HirExpr> = func
+            .annotations
+            .iter()
+            .filter_map(|a| match &a.kind {
+                axiom_hir::HirAnnotationKind::Precondition(expr) => Some((**expr).clone()),
+                axiom_hir::HirAnnotationKind::Requires(expr) => Some((**expr).clone()),
+                _ => None,
+            })
+            .collect();
+
+        if !preconditions.is_empty() {
+            let ranges = axiom_optimize::fuzz::extract_fuzz_ranges(&preconditions, &func.params);
+            let fuzz_inputs = axiom_optimize::fuzz::generate_fuzz_inputs(&ranges, 20);
+
+            eprintln!(
+                "[FUZZ] {} @precondition(s) on '{}' -> {} ranges -> {} generated inputs",
+                preconditions.len(),
+                func.name,
+                ranges.len(),
+                fuzz_inputs.len()
+            );
+
+            for fuzz_input in &fuzz_inputs {
+                fuzz_test_count += 1;
+                let inputs: Vec<axiom_hir::HirExpr> = fuzz_input
+                    .iter()
+                    .map(|&v| axiom_hir::HirExpr {
+                        id: axiom_hir::NodeId(0),
+                        kind: axiom_hir::HirExprKind::IntLiteral { value: v as i128 },
+                        span: axiom_hir::SPAN_DUMMY,
+                    })
+                    .collect();
+
+                tests.push(axiom_hir::HirTestCase {
+                    inputs,
+                    // Sentinel: fuzz tests use __fuzz_any__ to indicate
+                    // "just check it doesn't crash".
+                    expected: axiom_hir::HirExpr {
+                        id: axiom_hir::NodeId(0),
+                        kind: axiom_hir::HirExprKind::Ident {
+                            name: "__fuzz_any__".to_string(),
+                        },
+                        span: axiom_hir::SPAN_DUMMY,
+                    },
+                });
+            }
+        }
+
+        if !tests.is_empty() {
+            test_cases.push((func.name.clone(), tests));
+        }
+    }
+
+    if test_cases.is_empty() {
+        eprintln!("[TEST] No @test or @precondition annotations found in {input}");
+        return Ok(());
+    }
+
+    let total_tests: usize = test_cases.iter().map(|(_, ts)| ts.len()).sum();
+    eprintln!(
+        "[TEST] Found {total_tests} test(s) across {} function(s) ({fuzz_test_count} fuzz-generated)",
+        test_cases.len()
+    );
+
+    // Build the test harness main function.
+    let mut test_main = String::new();
+    test_main.push_str("fn main() -> i32 {\n");
+    test_main.push_str("    let passed: i32 = 0;\n");
+    test_main.push_str("    let failed: i32 = 0;\n");
+
+    for (func_name, tests) in &test_cases {
+        for (i, tc) in tests.iter().enumerate() {
+            let is_fuzz = matches!(
+                &tc.expected.kind,
+                axiom_hir::HirExprKind::Ident { name } if name == "__fuzz_any__"
+            );
+
+            let args: Vec<String> = tc
+                .inputs
+                .iter()
+                .map(|e| format_hir_expr_as_axiom(e))
+                .collect();
+            let args_str = args.join(", ");
+
+            let var = format!("t{}_{}", i, func_name);
+
+            if is_fuzz {
+                // Fuzz test: just call the function to check it doesn't crash.
+                test_main.push_str(&format!(
+                    "    let {var}: i32 = {func_name}({args_str});\n"
+                ));
+                test_main.push_str(&format!(
+                    "    print(\"[FUZZ] {func_name}({args_str}): OK\\n\");\n"
+                ));
+                test_main.push_str("    passed = passed + 1;\n");
+            } else {
+                let expected_str = format_hir_expr_as_axiom(&tc.expected);
+                test_main.push_str(&format!(
+                    "    let {var}: i32 = {func_name}({args_str});\n"
+                ));
+                test_main.push_str(&format!(
+                    "    if {var} == {expected_str} {{\n"
+                ));
+                test_main.push_str(&format!(
+                    "        print(\"[TEST] {func_name}({args_str}) == {expected_str}: PASS\\n\");\n"
+                ));
+                test_main.push_str("        passed = passed + 1;\n");
+                test_main.push_str("    } else {\n");
+                test_main.push_str(&format!(
+                    "        print(\"[TEST] {func_name}({args_str}) == {expected_str}: FAIL\\n\");\n"
+                ));
+                test_main.push_str("        failed = failed + 1;\n");
+                test_main.push_str("    }\n");
+            }
+        }
+    }
+
+    test_main.push_str("    print_i32(passed);\n");
+    test_main.push_str("    print(\" passed, \");\n");
+    test_main.push_str("    print_i32(failed);\n");
+    test_main.push_str("    print(\" failed\\n\");\n");
+    test_main.push_str("    return failed;\n");
+    test_main.push_str("}\n");
+
+    let stripped = strip_main_function(&source);
+    let test_source = format!("{stripped}\n{test_main}");
+
+    let test_path = std::env::temp_dir().join("axiom_fuzz_test_harness.axm");
+    std::fs::write(&test_path, &test_source)
+        .map_err(|e| miette::miette!("Failed to write fuzz test harness: {e}"))?;
+
+    let test_exe = std::env::temp_dir().join(if cfg!(windows) {
+        "axiom_fuzz_test_harness.exe"
+    } else {
+        "axiom_fuzz_test_harness"
+    });
+
+    let test_parse = axiom_parser::parse(&test_source);
+    if test_parse.has_errors() {
+        eprintln!("--- Fuzz Test Harness Parse Errors ---");
+        for err in &test_parse.errors {
+            eprintln!("  {err}");
+        }
+        eprintln!("\n--- Generated source ---");
+        for (i, line) in test_source.lines().enumerate() {
+            eprintln!("{:4} | {}", i + 1, line);
+        }
+        return Err(miette::miette!("fuzz test harness parsing failed"));
+    }
+
+    let test_hir = axiom_hir::lower(&test_parse.module).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("fuzz test harness HIR lowering failed")
+    })?;
+
+    let codegen_opts = axiom_codegen::CodegenOptions {
+        debug_mode: true,
+    };
+    let test_ir = axiom_codegen::codegen_with_options(&test_hir, &codegen_opts).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("fuzz test harness codegen failed")
+    })?;
+
+    compile::compile_to_binary(&test_ir, &test_exe.display().to_string())?;
+
+    let output = std::process::Command::new(&test_exe)
+        .output()
+        .map_err(|e| miette::miette!("Failed to run fuzz test binary: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stdout.is_empty() {
+        print!("{stdout}");
+    }
+    if !stderr.is_empty() {
+        eprint!("{stderr}");
+    }
+
+    let _ = std::fs::remove_file(&test_path);
+    let _ = std::fs::remove_file(&test_exe);
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let code = output.status.code().unwrap_or(1);
+        Err(miette::miette!("fuzz tests failed (exit code {})", code))
+    }
 }
 
 /// Run `axiom test` — collect @test annotations, generate a test harness,

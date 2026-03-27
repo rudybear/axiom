@@ -136,19 +136,44 @@ fn find_compiler_name() -> Option<String> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// The C runtime source, embedded at compile time.
+/// The C runtime source files, embedded at compile time.
+/// The main file `axiom_rt.c` includes the split files via `#include`.
 const AXIOM_RT_C: &str = include_str!("../runtime/axiom_rt.c");
+const AXIOM_RT_CORE_C: &str = include_str!("../runtime/axiom_rt_core.c");
+const AXIOM_RT_IO_C: &str = include_str!("../runtime/axiom_rt_io.c");
+const AXIOM_RT_COROUTINES_C: &str = include_str!("../runtime/axiom_rt_coroutines.c");
+const AXIOM_RT_THREADING_C: &str = include_str!("../runtime/axiom_rt_threading.c");
+const AXIOM_RT_STRINGS_C: &str = include_str!("../runtime/axiom_rt_strings.c");
+const AXIOM_RT_VEC_C: &str = include_str!("../runtime/axiom_rt_vec.c");
 
 
-/// Write the embedded C runtime to a temp file and return its path.
+/// Write the embedded C runtime (and its split include files) to a temp
+/// directory and return the path to the main `axiom_rt.c` file.
 fn write_runtime_c() -> miette::Result<PathBuf> {
     let dir = std::env::temp_dir();
     let pid = std::process::id();
     let tid = std::thread::current().id();
-    let path = dir.join(format!("axiom_rt_{pid}_{tid:?}.c"));
-    std::fs::write(&path, AXIOM_RT_C)
-        .map_err(|e| miette::miette!("failed to write runtime C file {}: {}", path.display(), e))?;
-    Ok(path)
+    let rt_dir = dir.join(format!("axiom_rt_{pid}_{tid:?}"));
+    std::fs::create_dir_all(&rt_dir)
+        .map_err(|e| miette::miette!("failed to create runtime dir {}: {}", rt_dir.display(), e))?;
+
+    // Write all split files into the same directory so #include works.
+    let files: &[(&str, &str)] = &[
+        ("axiom_rt.c", AXIOM_RT_C),
+        ("axiom_rt_core.c", AXIOM_RT_CORE_C),
+        ("axiom_rt_io.c", AXIOM_RT_IO_C),
+        ("axiom_rt_coroutines.c", AXIOM_RT_COROUTINES_C),
+        ("axiom_rt_threading.c", AXIOM_RT_THREADING_C),
+        ("axiom_rt_strings.c", AXIOM_RT_STRINGS_C),
+        ("axiom_rt_vec.c", AXIOM_RT_VEC_C),
+    ];
+    for (name, content) in files {
+        let path = rt_dir.join(name);
+        std::fs::write(&path, content)
+            .map_err(|e| miette::miette!("failed to write runtime file {}: {}", path.display(), e))?;
+    }
+
+    Ok(rt_dir.join("axiom_rt.c"))
 }
 
 /// Check whether a compiler is available by running `<name> --version`.

@@ -246,11 +246,20 @@ fn extract_strategy_from_annotations(
             let info = extract_strategy_block(sb, holes);
             *strategy_info = Some(info);
         }
-        // Walk Precondition/Postcondition expressions for ?holes.
+        // Walk Precondition/Postcondition/Requires/Ensures/Invariant expressions for ?holes.
         if let HirAnnotationKind::Precondition(ref expr) = ann.kind {
             walk_expr_for_holes(expr, holes);
         }
         if let HirAnnotationKind::Postcondition(ref expr) = ann.kind {
+            walk_expr_for_holes(expr, holes);
+        }
+        if let HirAnnotationKind::Requires(ref expr) = ann.kind {
+            walk_expr_for_holes(expr, holes);
+        }
+        if let HirAnnotationKind::Ensures(ref expr) = ann.kind {
+            walk_expr_for_holes(expr, holes);
+        }
+        if let HirAnnotationKind::Invariant(ref expr) = ann.kind {
             walk_expr_for_holes(expr, holes);
         }
     }

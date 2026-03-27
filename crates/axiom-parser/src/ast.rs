@@ -47,6 +47,8 @@ pub struct ExternFunction {
     pub convention: Option<String>,
     /// Whether this extern function accepts variadic arguments (`...`).
     pub is_variadic: bool,
+    /// Whether this extern function is marked `pub` (visible when imported).
+    pub is_public: bool,
 }
 
 /// Function definition
@@ -57,6 +59,8 @@ pub struct Function {
     pub params: Vec<Param>,
     pub return_type: TypeExpr,
     pub body: Block,
+    /// Whether this function is marked `pub` (visible when imported).
+    pub is_public: bool,
 }
 
 /// Function parameter
@@ -231,6 +235,12 @@ pub enum Annotation {
     Link { library: String, kind: Option<String> },
     /// `@trace` — emit ENTER/EXIT printf calls for function tracing.
     Trace,
+    /// `@requires(expr)` — alias for `@precondition`, signals formal verification intent.
+    Requires(Box<Expr>),
+    /// `@ensures(expr)` — alias for `@postcondition`, signals formal verification intent.
+    Ensures(Box<Expr>),
+    /// `@invariant(expr)` — loop invariant (checked at runtime in debug mode).
+    Invariant(Box<Expr>),
     Custom(String, Vec<AnnotationValue>),
 }
 
@@ -342,4 +352,6 @@ pub struct TypeAlias {
 pub struct ImportDecl {
     pub path: Vec<String>,
     pub alias: Option<String>,
+    /// Whether this import is marked `pub` (re-export).
+    pub is_public: bool,
 }

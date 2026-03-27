@@ -573,6 +573,9 @@ impl fmt::Display for HirAnnotation {
                 write!(f, "@link(library: \"{library}\", kind: \"{kind}\")")
             }
             HirAnnotationKind::Trace => write!(f, "@trace"),
+            HirAnnotationKind::Requires(expr) => write!(f, "@requires({expr})"),
+            HirAnnotationKind::Ensures(expr) => write!(f, "@ensures({expr})"),
+            HirAnnotationKind::Invariant(expr) => write!(f, "@invariant({expr})"),
             HirAnnotationKind::Custom(name, args) => {
                 write!(f, "@{name}")?;
                 if !args.is_empty() {

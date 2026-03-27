@@ -41,6 +41,7 @@
 
 pub mod agent_api;
 pub mod benchmark;
+pub mod fuzz;
 pub mod history;
 pub mod llm_optimizer;
 pub mod proposal;
@@ -56,3 +57,4 @@ pub use surface::{
     extract_surfaces, extract_surfaces_from_hir,
 };
 pub use transfer::{Confidence, TransferError, TransferInfo, extract_transfer, generate_transfer};
+pub use fuzz::{FuzzRange, extract_fuzz_ranges, generate_fuzz_inputs};
