@@ -1,0 +1,15 @@
+@module debug_test;
+fn main() -> i32 {
+    // assert
+    assert(1 == 1, "basic truth");
+
+    // debug_print
+    let x: f64 = 3.14;
+    debug_print(x);
+
+    let a: i32 = 42;
+    debug_print(a);
+
+    print("All debug tests passed!\n");
+    return 0;
+}

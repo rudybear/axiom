@@ -34,6 +34,14 @@ enum Commands {
         /// Overrides @target annotation. Defaults to native.
         #[arg(long)]
         target: Option<String>,
+
+        /// Error output format: "text" (default) or "json" for machine-readable diagnostics
+        #[arg(long, value_parser = ["text", "json"])]
+        error_format: Option<String>,
+
+        /// Enable debug mode: runtime bounds checks, assert messages
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Tokenize an AXIOM source file (debug tool)
@@ -438,8 +446,9 @@ fn main() -> miette::Result<()> {
             }
         }
 
-        Commands::Compile { input, output, emit, target } => {
+        Commands::Compile { input, output, emit, target, error_format, debug } => {
             let source = read_source_with_includes(&input)?;
+            let use_json = error_format.as_deref() == Some("json");
 
             match emit.as_deref() {
                 Some("tokens") => {
@@ -495,7 +504,10 @@ fn main() -> miette::Result<()> {
                         }
                         miette::miette!("HIR lowering failed with {} error(s)", errors.len())
                     })?;
-                    let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| {
+                    let codegen_opts = axiom_codegen::CodegenOptions {
+                        debug_mode: debug,
+                    };
+                    let llvm_ir = axiom_codegen::codegen_with_options(&hir_module, &codegen_opts).map_err(|errors| {
                         for err in &errors {
                             eprintln!("  {err}");
                         }
@@ -510,9 +522,17 @@ fn main() -> miette::Result<()> {
                     // Full compilation: .axm -> native binary
                     let result = axiom_parser::parse(&source);
                     if result.has_errors() {
-                        eprintln!("--- Parse Errors ---");
-                        for err in &result.errors {
-                            eprintln!("  {err}");
+                        if use_json {
+                            for err in &result.errors {
+                                let msg = err.to_string().replace('\\', "\\\\").replace('"', "\\\"");
+                                let file = input.replace('\\', "\\\\").replace('"', "\\\"");
+                                eprintln!("{{\"severity\":\"error\",\"message\":\"{msg}\",\"file\":\"{file}\"}}");
+                            }
+                        } else {
+                            eprintln!("--- Parse Errors ---");
+                            for err in &result.errors {
+                                eprintln!("  {err}");
+                            }
                         }
                         return Err(miette::miette!(
                             "parsing failed with {} error(s)",
@@ -521,18 +541,37 @@ fn main() -> miette::Result<()> {
                     }
                     let hir_module =
                         axiom_hir::lower(&result.module).map_err(|errors| {
-                            for err in &errors {
-                                eprintln!("  {err}");
+                            if use_json {
+                                for err in &errors {
+                                    let msg = err.to_string().replace('\\', "\\\\").replace('"', "\\\"");
+                                    let file = input.replace('\\', "\\\\").replace('"', "\\\"");
+                                    eprintln!("{{\"severity\":\"error\",\"message\":\"{msg}\",\"file\":\"{file}\"}}");
+                                }
+                            } else {
+                                for err in &errors {
+                                    eprintln!("  {err}");
+                                }
                             }
                             miette::miette!(
                                 "HIR lowering failed with {} error(s)",
                                 errors.len()
                             )
                         })?;
+                    let codegen_opts = axiom_codegen::CodegenOptions {
+                        debug_mode: debug,
+                    };
                     let llvm_ir =
-                        axiom_codegen::codegen(&hir_module).map_err(|errors| {
-                            for err in &errors {
-                                eprintln!("  {err}");
+                        axiom_codegen::codegen_with_options(&hir_module, &codegen_opts).map_err(|errors| {
+                            if use_json {
+                                for err in &errors {
+                                    let msg = err.to_string().replace('\\', "\\\\").replace('"', "\\\"");
+                                    let file = input.replace('\\', "\\\\").replace('"', "\\\"");
+                                    eprintln!("{{\"severity\":\"error\",\"message\":\"{msg}\",\"file\":\"{file}\"}}");
+                                }
+                            } else {
+                                for err in &errors {
+                                    eprintln!("  {err}");
+                                }
                             }
                             miette::miette!(
                                 "codegen failed with {} error(s)",

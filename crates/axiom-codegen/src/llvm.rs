@@ -174,6 +174,10 @@ struct CodegenContext {
     /// Whether string builtins are used (string_from_literal, string_len, etc.).
     /// When true, string extern declarations are emitted and the runtime is linked.
     needs_strings: bool,
+    /// Whether `@abort` is needed (assert builtin).
+    needs_abort: bool,
+    /// Whether debug mode is active (runtime bounds checking).
+    debug_mode: bool,
     /// Registry of struct types (name → StructInfo).
     struct_registry: HashMap<String, StructInfo>,
     /// Collected errors.
@@ -261,6 +265,8 @@ impl CodegenContext {
             needs_gpu: false,
             needs_vec: false,
             needs_strings: false,
+            needs_abort: false,
+            debug_mode: false,
             struct_registry: HashMap::new(),
             errors: Vec::new(),
             block_terminated: false,
@@ -333,15 +339,42 @@ impl CodegenContext {
     }
 }
 
+/// Options for code generation.
+#[derive(Debug, Clone, Default)]
+pub struct CodegenOptions {
+    /// When true, emit runtime bounds checks for array indexing and assert calls.
+    pub debug_mode: bool,
+}
+
+/// Generate LLVM IR text from an HIR module with custom options.
+///
+/// Returns the complete `.ll` file content on success, or a list of errors.
+pub fn codegen_with_options(
+    module: &HirModule,
+    options: &CodegenOptions,
+) -> Result<String, Vec<CodegenError>> {
+    let mut ctx = CodegenContext::new();
+    ctx.debug_mode = options.debug_mode;
+    codegen_inner(&mut ctx, module)
+}
+
 /// Generate LLVM IR text from an HIR module.
 ///
 /// Returns the complete `.ll` file content on success, or a list of errors.
 pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     let mut ctx = CodegenContext::new();
+    codegen_inner(&mut ctx, module)
+}
+
+/// Inner codegen implementation shared by `codegen` and `codegen_with_options`.
+fn codegen_inner(
+    ctx: &mut CodegenContext,
+    module: &HirModule,
+) -> Result<String, Vec<CodegenError>> {
 
     // Register all struct types in the struct registry.
     for s in &module.structs {
-        register_struct(&mut ctx, s);
+        register_struct(ctx, s);
     }
 
     // Register all function signatures.
@@ -422,7 +455,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     let mut func_output = String::with_capacity(4096);
     for func in &module.functions {
         let saved_output = std::mem::take(&mut ctx.output);
-        emit_function(&mut ctx, func);
+        emit_function(ctx, func);
         let _ = writeln!(func_output, "{}", ctx.output);
         ctx.output = saved_output;
     }
@@ -498,7 +531,7 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
 
     // Emit user-declared extern function declarations.
     for ef in &module.extern_functions {
-        emit_extern_function_decl(&mut ctx, ef);
+        emit_extern_function_decl(ctx, ef);
     }
 
     // Emit external declarations for built-in C functions.
@@ -507,6 +540,9 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     }
     if ctx.needs_printf {
         let _ = writeln!(ctx.output, "declare i32 @printf(ptr, ...)");
+    }
+    if ctx.needs_abort {
+        let _ = writeln!(ctx.output, "declare void @exit(i32) noreturn");
     }
     if ctx.needs_sqrt_f64 {
         let _ = writeln!(ctx.output, "declare double @llvm.sqrt.f64(double)");
@@ -787,6 +823,16 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
             ctx.output,
             "declare void @gpu_draw_mesh(ptr, i32)"
         );
+        // Blit raw RGBA pixel buffer to screen
+        let _ = writeln!(
+            ctx.output,
+            "declare void @gpu_blit_rgba(ptr, ptr, i32, i32)"
+        );
+        // Create mesh from raw triangle data (positions + colors as f32 arrays)
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_create_mesh_triangles(ptr, ptr, ptr, i32)"
+        );
     }
 
     // Emit Vec (dynamic array) runtime extern declarations.
@@ -869,10 +915,10 @@ pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     }
 
     if !ctx.errors.is_empty() {
-        return Err(ctx.errors);
+        return Err(std::mem::take(&mut ctx.errors));
     }
 
-    Ok(ctx.output)
+    Ok(std::mem::take(&mut ctx.output))
 }
 
 /// Check whether the generated LLVM IR requires the AXIOM C runtime to be
@@ -938,6 +984,8 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@gpu_create_sphere")
         || ir.contains("@gpu_set_mesh_transform")
         || ir.contains("@gpu_draw_mesh")
+        || ir.contains("@gpu_create_mesh_triangles")
+        || ir.contains("@gpu_blit_rgba")
         // Vec builtins
         || ir.contains("@axiom_vec_new")
         || ir.contains("@axiom_vec_push_i32")
@@ -1800,6 +1848,26 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
                     load_reg
                 };
 
+                // Bounds check for array write (--debug mode)
+                if ctx.debug_mode {
+                    let check = ctx.fresh_reg();
+                    ctx.emit(&format!("{check} = icmp ult i64 {idx_i64}, {arr_size}"));
+                    let ok = ctx.fresh_label("bounds.ok");
+                    let fail = ctx.fresh_label("bounds.fail");
+                    ctx.emit(&format!("br i1 {check}, label %{ok}, label %{fail}"));
+                    ctx.emit_raw(&format!("{fail}:"));
+                    let msg = format!("Array write out of bounds: index=%lld, size={arr_size}\n");
+                    let msg_idx = ctx.string_literals.len();
+                    ctx.string_literals.push(msg);
+                    ctx.needs_printf = true;
+                    ctx.needs_abort = true;
+                    let _printf = ctx.fresh_reg();
+                    ctx.emit(&format!("{_printf} = call i32 (ptr, ...) @printf(ptr @.str.{msg_idx}, i64 {idx_i64})"));
+                    ctx.emit("call void @exit(i32 1)");
+                    ctx.emit("unreachable");
+                    ctx.emit_raw(&format!("{ok}:"));
+                }
+
                 let gep_reg = ctx.fresh_reg();
                 ctx.emit(&format!(
                     "{gep_reg} = getelementptr inbounds {array_llvm}, ptr {base_ptr}, i64 0, i64 {idx_i64}"
@@ -2610,6 +2678,38 @@ fn emit_array_index_read(
             } else {
                 idx_val.reg.clone()
             };
+
+            // Runtime bounds check in debug mode.
+            if ctx.debug_mode {
+                let check = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{check} = icmp ult i64 {idx_i64}, {arr_size}"
+                ));
+                let ok = ctx.fresh_label("bounds.ok");
+                let fail = ctx.fresh_label("bounds.fail");
+                ctx.emit(&format!(
+                    "br i1 {check}, label %{ok}, label %{fail}"
+                ));
+                ctx.block_terminated = true;
+                ctx.emit_raw(&format!("{fail}:"));
+                ctx.block_terminated = false;
+                let msg = format!(
+                    "Array index out of bounds: index=%lld, size={arr_size}\n"
+                );
+                let msg_idx = ctx.string_literals.len();
+                ctx.string_literals.push(msg);
+                ctx.needs_printf = true;
+                ctx.needs_abort = true;
+                let print_reg = ctx.fresh_reg();
+                ctx.emit(&format!(
+                    "{print_reg} = call i32 (ptr, ...) @printf(ptr @.str.{msg_idx}, i64 {idx_i64})"
+                ));
+                ctx.emit("call void @exit(i32 1)");
+                ctx.emit("unreachable");
+                ctx.block_terminated = true;
+                ctx.emit_raw(&format!("{ok}:"));
+                ctx.block_terminated = false;
+            }
 
             let array_llvm = format!("[{arr_size} x {elem_type}]");
             let base_ptr = if is_local {
@@ -3616,6 +3716,8 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "gpu_create_sphere" => return emit_builtin_gpu_create_sphere(ctx, args),
             "gpu_set_mesh_transform" => return emit_builtin_gpu_set_mesh_transform(ctx, args),
             "gpu_draw_mesh" => return emit_builtin_gpu_draw_mesh(ctx, args),
+            "gpu_create_mesh_triangles" => return emit_builtin_gpu_create_mesh_triangles(ctx, args),
+            "gpu_blit_rgba" => return emit_builtin_gpu_blit_rgba(ctx, args),
             // Option (sum type) builtins -- tagged union packed into i64
             "option_none" => return emit_builtin_option_none(ctx, args),
             "option_some" => return emit_builtin_option_some(ctx, args),
@@ -3670,6 +3772,9 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "normalize" => return emit_builtin_normalize(ctx, args),
             "reflect" => return emit_builtin_reflect(ctx, args),
             "lerp" => return emit_builtin_lerp(ctx, args),
+            // Debug builtins
+            "assert" => return emit_builtin_assert(ctx, args),
+            "debug_print" => return emit_builtin_debug_print(ctx, args),
             _ => {}
         }
 
@@ -6705,6 +6810,70 @@ fn emit_builtin_gpu_draw_mesh(ctx: &mut CodegenContext, args: &[HirExpr]) -> Llv
     }
 }
 
+/// Emit built-in `gpu_create_mesh_triangles(handle: ptr, positions: ptr, colors: ptr, num_verts: i32) -> i32`.
+fn emit_builtin_gpu_create_mesh_triangles(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 4 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_create_mesh_triangles() requires 4 arguments (handle, positions, colors, num_vertices)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let pos_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let col_val = emit_expr(ctx, &args[2], Some("ptr"));
+    let count_val = emit_expr(ctx, &args[3], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_create_mesh_triangles(ptr {}, ptr {}, ptr {}, i32 {})",
+        handle_val.reg, pos_val.reg, col_val.reg, count_val.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `gpu_blit_rgba(handle: ptr, pixels: ptr, width: i32, height: i32)`.
+fn emit_builtin_gpu_blit_rgba(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 4 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_blit_rgba() requires exactly 4 arguments (handle, pixels, width, height)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let pixels_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let width_val = emit_expr(ctx, &args[2], Some("i32"));
+    let height_val = emit_expr(ctx, &args[3], Some("i32"));
+
+    ctx.emit(&format!(
+        "call void @gpu_blit_rgba(ptr {}, ptr {}, i32 {}, i32 {})",
+        handle_val.reg, pixels_val.reg, width_val.reg, height_val.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // F1: Option (sum type) builtins -- tagged union packed into i64
 // ---------------------------------------------------------------------------
@@ -9325,6 +9494,196 @@ fn emit_builtin_lerp(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
     LlvmValue {
         reg: result,
         ty: vec_type,
+    }
+}
+
+/// Emit built-in `assert(condition)` or `assert(condition, "message")`.
+///
+/// If `condition` is false at runtime, prints a failure message and calls `abort()`.
+fn emit_builtin_assert(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.is_empty() || args.len() > 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "assert() requires 1-2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let cond = emit_expr(ctx, &args[0], Some("i1"));
+    // If cond is not i1 (e.g., it's i32 from a comparison), convert
+    let cond_i1 = if cond.ty != "i1" {
+        let cmp = ctx.fresh_reg();
+        ctx.emit(&format!("{cmp} = icmp ne {} {}, 0", cond.ty, cond.reg));
+        cmp
+    } else {
+        cond.reg.clone()
+    };
+
+    let ok_label = ctx.fresh_label("assert.ok");
+    let fail_label = ctx.fresh_label("assert.fail");
+
+    ctx.emit(&format!(
+        "br i1 {cond_i1}, label %{ok_label}, label %{fail_label}"
+    ));
+    ctx.block_terminated = true;
+
+    // Fail block
+    ctx.emit_raw(&format!("{fail_label}:"));
+    ctx.block_terminated = false;
+    ctx.needs_printf = true;
+    ctx.needs_abort = true;
+
+    // Build message
+    let msg = if args.len() == 2 {
+        if let HirExprKind::StringLiteral { value } = &args[1].kind {
+            format!("Assertion failed: {}\n", value)
+        } else {
+            "Assertion failed\n".to_string()
+        }
+    } else {
+        "Assertion failed\n".to_string()
+    };
+
+    let msg_idx = ctx.string_literals.len();
+    ctx.string_literals.push(msg);
+    let print_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{print_reg} = call i32 (ptr, ...) @printf(ptr @.str.{msg_idx})"
+    ));
+    ctx.emit("call void @exit(i32 1)");
+    ctx.emit("unreachable");
+    ctx.block_terminated = true;
+
+    // OK block
+    ctx.emit_raw(&format!("{ok_label}:"));
+    ctx.block_terminated = false;
+
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "i32".to_string(),
+    }
+}
+
+/// Reconstruct a human-readable text representation of an HIR expression.
+///
+/// Used by `debug_print()` to show the source expression alongside its value.
+fn reconstruct_expr_text(expr: &HirExpr) -> String {
+    match &expr.kind {
+        HirExprKind::Ident { name } => name.clone(),
+        HirExprKind::FieldAccess { expr, field } => {
+            format!("{}.{}", reconstruct_expr_text(expr), field)
+        }
+        HirExprKind::IntLiteral { value } => value.to_string(),
+        HirExprKind::FloatLiteral { value } => format!("{value}"),
+        HirExprKind::BoolLiteral { value } => format!("{value}"),
+        HirExprKind::BinaryOp { op, lhs, rhs } => {
+            let op_str = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::Eq => "==",
+                BinOp::NotEq => "!=",
+                BinOp::Lt => "<",
+                BinOp::Gt => ">",
+                BinOp::LtEq => "<=",
+                BinOp::GtEq => ">=",
+                BinOp::And => "&&",
+                BinOp::Or => "||",
+                BinOp::AddWrap => "+%",
+                BinOp::AddSat => "+|",
+                BinOp::SubWrap => "-%",
+                BinOp::SubSat => "-|",
+                BinOp::MulWrap => "*%",
+            };
+            format!(
+                "{} {} {}",
+                reconstruct_expr_text(lhs),
+                op_str,
+                reconstruct_expr_text(rhs)
+            )
+        }
+        HirExprKind::UnaryOp { op, operand } => {
+            let op_str = match op {
+                UnaryOp::Neg => "-",
+                UnaryOp::Not => "!",
+            };
+            format!("{}{}", op_str, reconstruct_expr_text(operand))
+        }
+        HirExprKind::Call { func, args } => {
+            let args_text: Vec<String> = args.iter().map(reconstruct_expr_text).collect();
+            format!("{}({})", reconstruct_expr_text(func), args_text.join(", "))
+        }
+        HirExprKind::Index { expr, indices } => {
+            let idx_text: Vec<String> = indices.iter().map(reconstruct_expr_text).collect();
+            format!("{}[{}]", reconstruct_expr_text(expr), idx_text.join(", "))
+        }
+        HirExprKind::StringLiteral { value } => format!("\"{}\"", value),
+        _ => "expr".to_string(),
+    }
+}
+
+/// Emit built-in `debug_print(expr)` -- prints expression text, type, and value.
+///
+/// Like Rust's `dbg!()` macro: prints the expression, its type and value,
+/// and returns the original value so it can be used in expressions.
+fn emit_builtin_debug_print(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "debug_print() requires 1 argument".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    // Reconstruct expression text from HIR
+    let expr_text = reconstruct_expr_text(&args[0]);
+
+    // Emit the expression to get value + type
+    let val = emit_expr(ctx, &args[0], None);
+
+    // Build format string based on type
+    let (fmt_spec, type_name) = match val.ty.as_str() {
+        "i8" => ("%d", "i8"),
+        "i16" => ("%d", "i16"),
+        "i32" => ("%d", "i32"),
+        "i64" => ("%lld", "i64"),
+        "double" => ("%f", "f64"),
+        "float" => ("%f", "f32"),
+        "i1" => ("%d", "bool"),
+        "ptr" => ("%p", "ptr"),
+        t => ("???", t),
+    };
+    let msg = format!("[debug] {expr_text}: {type_name} = {fmt_spec}\n");
+    let msg_idx = ctx.string_literals.len();
+    ctx.string_literals.push(msg);
+    ctx.needs_printf = true;
+
+    // For float types passed to printf, f32 needs to be promoted to double
+    let (print_val, print_ty) = if val.ty == "float" {
+        let ext = ctx.fresh_reg();
+        ctx.emit(&format!("{ext} = fpext float {} to double", val.reg));
+        (ext, "double".to_string())
+    } else {
+        (val.reg.clone(), val.ty.clone())
+    };
+
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call i32 (ptr, ...) @printf(ptr @.str.{msg_idx}, {print_ty} {print_val})"
+    ));
+
+    // Return the original value (like Rust's dbg!())
+    LlvmValue {
+        reg: val.reg,
+        ty: val.ty,
     }
 }
 

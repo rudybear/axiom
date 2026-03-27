@@ -17,4 +17,6 @@ pub mod llvm;
 
 pub use error::CodegenError;
 pub use llvm::codegen;
+pub use llvm::codegen_with_options;
 pub use llvm::needs_runtime;
+pub use llvm::CodegenOptions;
