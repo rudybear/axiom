@@ -151,7 +151,7 @@ let broadcast: vec3 = v.xxx;        // Broadcast single component
 @optimization_log { ... }      // Optimization history
 ```
 
-### All Builtin Functions (~200 total)
+### All Builtin Functions (~160 total)
 
 #### I/O (4)
 ```
@@ -276,38 +276,6 @@ job_dispatch_after(func, data, total_items, dependency_handle)
 job_wait_handle(handle)
 ```
 
-#### Renderer / Vulkan FFI (12)
-```
-renderer_create(w, h, title) renderer_destroy(r)
-renderer_begin_frame(r) renderer_end_frame(r) renderer_should_close(r)
-renderer_clear(r, r, g, b) renderer_draw_triangles(r, verts, count)
-renderer_draw_points(r, data, count) renderer_get_time(r)
-shader_load(r, path) pipeline_create(r, vert, frag)
-renderer_bind_pipeline(r, pipeline)
-```
-
-#### GPU / PBR / glTF (22)
-```
-gpu_init(w, h, title) gpu_shutdown(r) gpu_begin_frame(r) gpu_end_frame(r)
-gpu_should_close(r) gpu_load_gltf(r, path) gpu_set_camera(r, ...) gpu_render(r)
-gpu_get_frame_time(r) gpu_get_gpu_name(r) gpu_screenshot(r, path)
-gpu_add_light(r, x, y, z, intensity) gpu_clear_lights(r)
-gpu_create_cube(r, ...) gpu_create_sphere(r, ...) gpu_set_mesh_transform(r, mesh, ...)
-gpu_draw_mesh(r, mesh) gpu_upload_texture(r, data, w, h)
-gpu_create_textured_mesh(r, ...) gpu_create_lit_textured_mesh(r, ...)
-gpu_create_mesh_triangles(r, ...) gpu_blit_rgba(r, data, w, h)
-```
-
-#### Input (4)
-```
-is_key_down(key_code) get_mouse_x() get_mouse_y() is_mouse_down(button)
-```
-
-#### Audio (2)
-```
-play_beep(freq, duration) play_sound(path)
-```
-
 #### Option (5)
 ```
 option_none() option_some(val) option_is_some(opt) option_is_none(opt) option_unwrap(opt)
@@ -401,7 +369,7 @@ axiom/
 │   ├── axiom-optimize/             # Optimization protocol + agent API (132 tests)
 │   └── axiom-driver/               # CLI + MCP server + compilation (96 tests)
 │       └── runtime/
-│           └── axiom_rt.c          # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
+│           └── axiom_rt.c          # C runtime (I/O, coroutines, threads, jobs)
 ├── spec/                           # Formal language specification
 │   ├── grammar.ebnf
 │   ├── types.md
@@ -475,12 +443,6 @@ Generics with monomorphization codegen. Module system with `import` declarations
 
 ### Phase H -- CI + Debug Info + Formatter (E1, E2, E3) DONE
 GitHub Actions CI pipeline (`.github/workflows/ci.yml`): runs `cargo test --workspace` on every push. DWARF debug info: source file and line metadata emitted in LLVM IR for debugger support. `axiom fmt` command: parse -> HIR -> pretty-print. `axiom profile` command: compile, benchmark, extract optimization surfaces, suggest tuning.
-
-### Phase I -- Real Vulkan Renderer (R1-R5) DONE
-Vulkan bootstrap via Rust `ash` crate with `winit` windowing and `gpu-allocator` memory management. AXIOM arrays uploaded to GPU buffers. Lux-compiled SPIR-V shaders loaded as real VkShaderModule + VkPipeline. Descriptor sets and uniforms for MVP matrix, time, etc. Production renderer with instancing (`gpu_draw_instanced`), depth buffer, compute shaders, and multi-light support (`gpu_add_light`).
-
-### Phase J -- Game Engine (G1-G5) DONE
-Proper archetype-based ECS with real component storage (`lib/ecs.axm`). Input system with keyboard/mouse from Win32/Vulkan surface events (`input_key_pressed`, `input_mouse_x`, `input_mouse_y`, `input_mouse_button`). Audio with WAV playback via C runtime (`audio_play`, `audio_stop`). Hot reload for recompiling functions while program runs. Killer Demo v2: 10K particles with real Vulkan + Lux shaders + parallel jobs (`examples/killer_demo/`).
 
 ### Phase K -- Self-Improvement (S1-S3) DONE
 Self-hosted AXIOM parser written in AXIOM (`examples/self_host/`). Compiler self-optimization via PGO bootstrap (`axiom pgo`): profile the compiler, recompile with profile data, iterate. Source-to-source AI optimizer (`axiom rewrite`): LLM rewrites AXIOM source code (not just ?params).

@@ -403,45 +403,11 @@ get_argv(i)                   // Argument string
 cpu_features()                // CPUID feature bitmask
 ```
 
-### Input System
-```axiom
-is_key_down(key_code)          // Check if key is currently pressed
-get_mouse_x()                  // Mouse X position
-get_mouse_y()                  // Mouse Y position
-is_mouse_down(button)          // Mouse button state
-```
-
-### Audio
-```axiom
-play_beep(freq, duration)      // Play tone at frequency
-play_sound(path)               // Play sound file
-```
-
 ### Function Pointers
 ```axiom
 let fp: ptr[i32] = fn_ptr(my_function);
 let result: i32 = call_fn_ptr_i32(fp, arg);
 let result: f64 = call_fn_ptr_f64(fp, arg);
-```
-
-### Renderer (Vulkan)
-```axiom
-// Core renderer (12)
-renderer_create(width, height, title) renderer_destroy(r)
-renderer_begin_frame(r) renderer_end_frame(r) renderer_should_close(r)
-renderer_clear(r, r, g, b) renderer_draw_triangles(r, verts, count)
-renderer_draw_points(r, data, count) renderer_get_time(r)
-shader_load(r, path) pipeline_create(r, vert, frag) renderer_bind_pipeline(r, pipeline)
-
-// GPU / PBR / glTF (22)
-gpu_init(w, h, title) gpu_shutdown(r) gpu_begin_frame(r) gpu_end_frame(r)
-gpu_should_close(r) gpu_load_gltf(r, path) gpu_set_camera(r, ...)
-gpu_render(r) gpu_get_frame_time(r) gpu_get_gpu_name(r) gpu_screenshot(r, path)
-gpu_add_light(r, x, y, z, intensity) gpu_clear_lights(r)
-gpu_create_cube(r, ...) gpu_create_sphere(r, ...) gpu_set_mesh_transform(r, mesh, ...)
-gpu_draw_mesh(r, mesh) gpu_upload_texture(r, data, w, h)
-gpu_create_textured_mesh(r, ...) gpu_create_lit_textured_mesh(r, ...)
-gpu_create_mesh_triangles(r, ...) gpu_blit_rgba(r, data, w, h)
 ```
 
 ### C Interop / FFI
@@ -528,7 +494,7 @@ axiom/
 │   ├── axiom-mir/              # Mid-level IR (stub)
 │   └── axiom-driver/           # CLI + MCP server + compilation (96 tests)
 │       └── runtime/
-│           └── axiom_rt.c      # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
+│           └── axiom_rt.c      # C runtime (I/O, coroutines, threads, jobs)
 ├── spec/                       # Formal language specification
 │   ├── grammar.ebnf            # EBNF grammar
 │   ├── types.md                # Type system
@@ -583,7 +549,7 @@ axiom/
 - **~39,500 lines of Rust** across 7 crates
 - **532 tests** (all passing)
 - **115/115 benchmarks pass** (1.01x avg ratio vs C)
-- **~200 builtin functions** (I/O, math, vector math, matrix ops, memory, concurrency, rendering, GPU, collections, input, audio, debug, slices)
+- **~160 builtin functions** (I/O, math, vector math, matrix ops, memory, concurrency, collections, debug, slices)
 - **16 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test, replay
 - **16 example programs**, **24 sample programs**
 - **5 formal specification documents**
@@ -602,8 +568,6 @@ axiom/
 - **Phase F:** L2, P2, P3 -- Hardware counter integration (perf data fed to LLM), `cpu_features()` CPUID detection, SIMD width metadata on vectorizable loops
 - **Phase G:** F4, F6, F7, F8 -- Generics with monomorphization, module system with separate compilation, Result type builtins, while-let/if-let codegen
 - **Phase H:** E1, E2, E3 -- GitHub Actions CI (`ci.yml`), DWARF debug info in LLVM IR, `axiom fmt` formatter, `axiom profile` profiler
-- **Phase I:** R1-R5 -- Real Vulkan renderer (ash + winit + gpu-allocator, GPU buffers, SPIR-V shaders, descriptor sets, production renderer with instancing and multi-light)
-- **Phase J:** G1-G5 -- Game engine (archetype ECS, input system, audio, hot reload, 10K particle killer demo with real Vulkan + Lux shaders + parallel jobs)
 - **Phase K:** S1-S3 -- Self-improvement (self-hosted parser, compiler self-optimization via PGO bootstrap, source-to-source AI optimizer with `axiom rewrite`)
 - **Phase L:** V1-V4 -- Verified development pipeline (`@strict` annotation enforcement, `@precondition`/`@postcondition` runtime checks, `@test` inline test cases, `axiom verify`, `axiom test --fuzz`)
 
