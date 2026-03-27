@@ -81,6 +81,8 @@ struct FuncInfo {
     /// Calling convention for extern functions (e.g., "C", "fastcall", "stdcall", "win64").
     /// Empty string means default (C) calling convention.
     convention: String,
+    /// Whether this is a variadic function (extern with `...`).
+    is_variadic: bool,
 }
 
 /// Codegen metadata for a user-defined struct type.
@@ -173,6 +175,8 @@ struct CodegenContext {
     needs_strings: bool,
     /// Whether `@abort` is needed (assert builtin).
     needs_abort: bool,
+    /// Whether the crash handler should be installed (debug mode + main function present).
+    needs_crash_handler: bool,
     /// Whether debug mode is active (runtime bounds checking).
     debug_mode: bool,
     /// Registry of struct types (name → StructInfo).
@@ -218,6 +222,10 @@ struct CodegenContext {
     /// Postcondition expressions for the current function (debug mode only).
     /// Each entry is (function_name, postcondition_expr).
     postconditions: Vec<(String, HirExpr)>,
+    /// Whether the current function has `@trace` annotation.
+    current_func_has_trace: bool,
+    /// Name of the current function for `@trace` EXIT messages.
+    current_func_name_for_trace: String,
 }
 
 /// Ownership kind for pointer parameters, used for access validation.
@@ -264,6 +272,7 @@ impl CodegenContext {
             needs_vec: false,
             needs_strings: false,
             needs_abort: false,
+            needs_crash_handler: false,
             debug_mode: false,
             struct_registry: HashMap::new(),
             errors: Vec::new(),
@@ -285,6 +294,8 @@ impl CodegenContext {
             current_loop_exit: None,
             stack_promoted_vars: std::collections::HashSet::new(),
             postconditions: Vec::new(),
+            current_func_has_trace: false,
+            current_func_name_for_trace: String::new(),
         }
     }
 
@@ -408,6 +419,7 @@ fn codegen_inner(
                 uses_fastcc,
                 annotations: func_annots,
                 convention: String::new(),
+                is_variadic: false,
             },
         );
     }
@@ -436,6 +448,7 @@ fn codegen_inner(
                 uses_fastcc: false,
                 annotations: FuncAnnotations::default(),
                 convention: ef.convention.clone(),
+                is_variadic: ef.is_variadic,
             },
         );
     }
@@ -711,6 +724,11 @@ fn codegen_inner(
         let _ = writeln!(ctx.output, "declare void @axiom_string_print(i64)");
     }
 
+    // Emit crash handler declaration (debug mode stack traces).
+    if ctx.needs_crash_handler {
+        let _ = writeln!(ctx.output, "declare void @axiom_install_crash_handler()");
+    }
+
     // Emit attribute groups.
     if !ctx.attribute_groups.is_empty() {
         ctx.emit_blank();
@@ -824,6 +842,8 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_string_print")
         // CPUID feature detection
         || ir.contains("@axiom_cpu_features")
+        // Debug crash handler
+        || ir.contains("@axiom_install_crash_handler")
 }
 
 /// Register a struct type in the codegen context.
@@ -1105,6 +1125,12 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     // Alloca + store for each parameter.
     emit_param_allocas(ctx, &func.params);
 
+    // In debug mode, install the crash handler at the start of main().
+    if is_main && ctx.debug_mode {
+        ctx.emit("call void @axiom_install_crash_handler()");
+        ctx.needs_crash_handler = true;
+    }
+
     // Emit precondition checks in debug mode.
     if ctx.debug_mode {
         for ann in &func.annotations {
@@ -1122,6 +1148,19 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
                 ctx.postconditions.push((func.name.clone(), (**expr).clone()));
             }
         }
+    }
+
+    // Check for @trace annotation and emit ENTER message.
+    let has_trace = func.annotations.iter().any(|a| matches!(a.kind, HirAnnotationKind::Trace));
+    ctx.current_func_has_trace = has_trace;
+    ctx.current_func_name_for_trace = func.name.clone();
+    if has_trace {
+        let msg = format!("ENTER {}\n", func.name);
+        let msg_idx = ctx.string_literals.len();
+        ctx.string_literals.push(msg);
+        ctx.needs_printf = true;
+        let _p = ctx.fresh_reg();
+        ctx.emit(&format!("{_p} = call i32 (ptr, ...) @printf(ptr @.str.{msg_idx})"));
     }
 
     // Emit function body.
@@ -1145,6 +1184,8 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     ctx.current_func_is_const = false;
     ctx.current_func_is_vectorizable = false;
     ctx.current_func_reads_argmem = false;
+    ctx.current_func_has_trace = false;
+    ctx.current_func_name_for_trace.clear();
 }
 
 /// Build the function attribute suffix string (e.g., ` #0`).
@@ -1230,7 +1271,14 @@ fn emit_extern_function_decl(ctx: &mut CodegenContext, ef: &HirExternFunction) {
         _ => "",
     };
 
-    let params_str = param_types_str.join(", ");
+    let mut params_str = param_types_str.join(", ");
+    if ef.is_variadic {
+        if !params_str.is_empty() {
+            params_str.push_str(", ...");
+        } else {
+            params_str.push_str("...");
+        }
+    }
     let _ = writeln!(
         ctx.output,
         "declare {cc}{ret_type} @{}({params_str})",
@@ -1397,6 +1445,9 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
                     // Remove "result" variable.
                     ctx.variables.remove("result");
 
+                    // Emit @trace EXIT before returning.
+                    emit_trace_exit(ctx);
+
                     // Load the result and return it.
                     let ret_val = ctx.fresh_reg();
                     ctx.emit(&format!("{ret_val} = load {ty}, ptr {result_alloca}"));
@@ -1406,6 +1457,8 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
                     emit_return(ctx, value);
                 }
             } else {
+                // Emit @trace EXIT before returning void.
+                emit_trace_exit(ctx);
                 ctx.emit("ret void");
                 ctx.block_terminated = true;
             }
@@ -1988,12 +2041,27 @@ fn emit_return(ctx: &mut CodegenContext, value: &HirExpr) {
     if ty.starts_with("%struct.") {
         let load_reg = ctx.fresh_reg();
         ctx.emit(&format!("{load_reg} = load {ty}, ptr {}", val.reg));
+        emit_trace_exit(ctx);
         ctx.emit(&format!("ret {ty} {load_reg}"));
         ctx.block_terminated = true;
         return;
     }
+    emit_trace_exit(ctx);
     ctx.emit(&format!("ret {ty} {}", val.reg));
     ctx.block_terminated = true;
+}
+
+/// Emit @trace EXIT message if the current function has the @trace annotation.
+fn emit_trace_exit(ctx: &mut CodegenContext) {
+    if ctx.current_func_has_trace {
+        let func_name = ctx.current_func_name_for_trace.clone();
+        let msg = format!("EXIT  {}\n", func_name);
+        let msg_idx = ctx.string_literals.len();
+        ctx.string_literals.push(msg);
+        ctx.needs_printf = true;
+        let _p = ctx.fresh_reg();
+        ctx.emit(&format!("{_p} = call i32 (ptr, ...) @printf(ptr @.str.{msg_idx})"));
+    }
 }
 
 /// Emit if/else control flow.
@@ -3668,6 +3736,13 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "normalize" => return emit_builtin_normalize(ctx, args),
             "reflect" => return emit_builtin_reflect(ctx, args),
             "lerp" => return emit_builtin_lerp(ctx, args),
+            // Slice builtins -- fat pointer { ptr, i64 }
+            "slice_from" => return emit_builtin_slice_from(ctx, args),
+            "slice_len" => return emit_builtin_slice_len(ctx, args),
+            "slice_get" => return emit_builtin_slice_get(ctx, args),
+            "slice_set" => return emit_builtin_slice_set(ctx, args),
+            "slice_sub" => return emit_builtin_slice_sub(ctx, args),
+            "slice_ptr" => return emit_builtin_slice_ptr(ctx, args),
             // Debug builtins
             "assert" => return emit_builtin_assert(ctx, args),
             "debug_print" => return emit_builtin_debug_print(ctx, args),
@@ -3793,16 +3868,40 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             }
         };
         if func_info.return_type == "void" {
-            ctx.emit(&format!("call {cc}void @{name}({args_str})"));
+            if func_info.is_variadic {
+                // Variadic calls require the full function type in LLVM IR.
+                let param_types_str = func_info.param_types.join(", ");
+                let fn_type = if param_types_str.is_empty() {
+                    "void (...)".to_string()
+                } else {
+                    format!("void ({param_types_str}, ...)")
+                };
+                ctx.emit(&format!("call {cc}{fn_type} @{name}({args_str})"));
+            } else {
+                ctx.emit(&format!("call {cc}void @{name}({args_str})"));
+            }
             LlvmValue {
                 reg: "0".to_string(),
                 ty: "void".to_string(),
             }
         } else {
-            ctx.emit(&format!(
-                "{result_reg} = call {cc}{} @{name}({args_str})",
-                func_info.return_type
-            ));
+            if func_info.is_variadic {
+                // Variadic calls require the full function type in LLVM IR.
+                let param_types_str = func_info.param_types.join(", ");
+                let fn_type = if param_types_str.is_empty() {
+                    format!("{} (...)", func_info.return_type)
+                } else {
+                    format!("{} ({param_types_str}, ...)", func_info.return_type)
+                };
+                ctx.emit(&format!(
+                    "{result_reg} = call {cc}{fn_type} @{name}({args_str})"
+                ));
+            } else {
+                ctx.emit(&format!(
+                    "{result_reg} = call {cc}{} @{name}({args_str})",
+                    func_info.return_type
+                ));
+            }
             // For struct return types, the call returns an aggregate value.
             // Store it into a temp alloca so downstream code can treat it as
             // a pointer (consistent with struct literal representation).
@@ -7357,10 +7456,7 @@ fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError> {
             let elem_llvm = hir_type_to_llvm(element)?;
             Ok(format!("[{size} x {elem_llvm}]"))
         }
-        HirType::Slice { .. } => Err(CodegenError::UnsupportedType {
-            ty: "slice".to_string(),
-            context: "slice types not yet supported".to_string(),
-        }),
+        HirType::Slice { .. } => Ok("{ ptr, i64 }".to_string()),
         HirType::Ptr { .. } => Ok("ptr".to_string()),
         HirType::ReadonlyPtr { .. } => Ok("ptr".to_string()),
         HirType::WriteonlyPtr { .. } => Ok("ptr".to_string()),
@@ -8504,6 +8600,277 @@ fn emit_builtin_debug_print(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmV
     LlvmValue {
         reg: val.reg,
         ty: val.ty,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Slice builtins -- fat pointer { ptr, i64 }
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `slice_from(ptr, len) -> slice[T]`.
+///
+/// Constructs a fat pointer `{ ptr, i64 }` from a raw pointer and a length.
+fn emit_builtin_slice_from(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "slice_from() requires exactly 2 arguments (ptr, len)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "undef".to_string(),
+            ty: "{ ptr, i64 }".to_string(),
+        };
+    }
+
+    let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let len_val = emit_expr(ctx, &args[1], Some("i64"));
+
+    // Build the fat pointer struct via insertvalue.
+    let tmp = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{tmp} = insertvalue {{ ptr, i64 }} undef, ptr {}, 0",
+        ptr_val.reg
+    ));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = insertvalue {{ ptr, i64 }} {tmp}, i64 {}, 1",
+        len_val.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "{ ptr, i64 }".to_string(),
+    }
+}
+
+/// Emit built-in `slice_len(s) -> i64`.
+///
+/// Extracts the length field from a slice fat pointer.
+fn emit_builtin_slice_len(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "slice_len() requires exactly 1 argument (slice)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i64".to_string(),
+        };
+    }
+
+    let s = emit_expr(ctx, &args[0], None);
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = extractvalue {{ ptr, i64 }} {}, 1",
+        s.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "i64".to_string(),
+    }
+}
+
+/// Emit built-in `slice_get(s, idx) -> f64`.
+///
+/// Extracts the pointer from a slice, GEPs to the element, and loads it.
+/// Currently assumes f64 element type (double).
+fn emit_builtin_slice_get(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "slice_get() requires exactly 2 arguments (slice, index)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "double".to_string(),
+        };
+    }
+
+    let s = emit_expr(ctx, &args[0], None);
+    let idx = emit_expr(ctx, &args[1], Some("i64"));
+
+    // Debug mode: runtime bounds checking.
+    if ctx.debug_mode {
+        let len_reg = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{len_reg} = extractvalue {{ ptr, i64 }} {}, 1",
+            s.reg
+        ));
+        let in_bounds = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{in_bounds} = icmp ult i64 {}, {len_reg}",
+            idx.reg
+        ));
+        let ok_label = ctx.fresh_label("slice_get_ok");
+        let fail_label = ctx.fresh_label("slice_get_oob");
+        ctx.emit(&format!(
+            "br i1 {in_bounds}, label %{ok_label}, label %{fail_label}"
+        ));
+        ctx.emit_raw(&format!("{fail_label}:"));
+        ctx.needs_abort = true;
+        ctx.emit("call void @abort()");
+        ctx.emit("unreachable");
+        ctx.emit_raw(&format!("{ok_label}:"));
+    }
+
+    // Extract the pointer.
+    let ptr_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{ptr_reg} = extractvalue {{ ptr, i64 }} {}, 0",
+        s.reg
+    ));
+    // GEP to element.
+    let gep = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{gep} = getelementptr double, ptr {ptr_reg}, i64 {}",
+        idx.reg
+    ));
+    let val = ctx.fresh_reg();
+    ctx.emit(&format!("{val} = load double, ptr {gep}"));
+    LlvmValue {
+        reg: val,
+        ty: "double".to_string(),
+    }
+}
+
+/// Emit built-in `slice_set(s, idx, val)`.
+///
+/// Extracts the pointer from a slice, GEPs to the element, and stores.
+/// Currently assumes f64 element type (double).
+fn emit_builtin_slice_set(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "slice_set() requires exactly 3 arguments (slice, index, value)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let s = emit_expr(ctx, &args[0], None);
+    let idx = emit_expr(ctx, &args[1], Some("i64"));
+    let val = emit_expr(ctx, &args[2], Some("double"));
+
+    // Debug mode: runtime bounds checking.
+    if ctx.debug_mode {
+        let len_reg = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{len_reg} = extractvalue {{ ptr, i64 }} {}, 1",
+            s.reg
+        ));
+        let in_bounds = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{in_bounds} = icmp ult i64 {}, {len_reg}",
+            idx.reg
+        ));
+        let ok_label = ctx.fresh_label("slice_set_ok");
+        let fail_label = ctx.fresh_label("slice_set_oob");
+        ctx.emit(&format!(
+            "br i1 {in_bounds}, label %{ok_label}, label %{fail_label}"
+        ));
+        ctx.emit_raw(&format!("{fail_label}:"));
+        ctx.needs_abort = true;
+        ctx.emit("call void @abort()");
+        ctx.emit("unreachable");
+        ctx.emit_raw(&format!("{ok_label}:"));
+    }
+
+    // Extract the pointer.
+    let ptr_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{ptr_reg} = extractvalue {{ ptr, i64 }} {}, 0",
+        s.reg
+    ));
+    // GEP to element.
+    let gep = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{gep} = getelementptr double, ptr {ptr_reg}, i64 {}",
+        idx.reg
+    ));
+    ctx.emit(&format!("store double {}, ptr {gep}", val.reg));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
+    }
+}
+
+/// Emit built-in `slice_sub(s, start, end) -> slice[T]`.
+///
+/// Creates a sub-slice from `start` (inclusive) to `end` (exclusive).
+fn emit_builtin_slice_sub(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "slice_sub() requires exactly 3 arguments (slice, start, end)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "undef".to_string(),
+            ty: "{ ptr, i64 }".to_string(),
+        };
+    }
+
+    let s = emit_expr(ctx, &args[0], None);
+    let start = emit_expr(ctx, &args[1], Some("i64"));
+    let end = emit_expr(ctx, &args[2], Some("i64"));
+
+    // Extract the pointer.
+    let ptr_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{ptr_reg} = extractvalue {{ ptr, i64 }} {}, 0",
+        s.reg
+    ));
+    // GEP to start element (use i8 GEP with byte offset since we assume double = 8 bytes).
+    let new_ptr = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{new_ptr} = getelementptr double, ptr {ptr_reg}, i64 {}",
+        start.reg
+    ));
+    // Compute new length = end - start.
+    let new_len = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{new_len} = sub i64 {}, {}",
+        end.reg, start.reg
+    ));
+    // Build the new fat pointer.
+    let tmp = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{tmp} = insertvalue {{ ptr, i64 }} undef, ptr {new_ptr}, 0"
+    ));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = insertvalue {{ ptr, i64 }} {tmp}, i64 {new_len}, 1"
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "{ ptr, i64 }".to_string(),
+    }
+}
+
+/// Emit built-in `slice_ptr(s) -> ptr`.
+///
+/// Extracts the raw pointer from a slice fat pointer.
+fn emit_builtin_slice_ptr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "slice_ptr() requires exactly 1 argument (slice)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    let s = emit_expr(ctx, &args[0], None);
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = extractvalue {{ ptr, i64 }} {}, 0",
+        s.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: "ptr".to_string(),
     }
 }
 

@@ -1932,3 +1932,101 @@ int axiom_cpu_features(void) {
     return 0;
 }
 #endif
+
+/* ── Crash Handler (debug mode only) ────────────────────────────── */
+
+#ifdef AXIOM_DEBUG_MODE
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <dbghelp.h>
+
+static LONG WINAPI axiom_crash_handler(EXCEPTION_POINTERS *ep) {
+    fprintf(stderr, "\n=== AXIOM CRASH ===\n");
+    fprintf(stderr, "Exception code: 0x%08lX\n",
+            (unsigned long)ep->ExceptionRecord->ExceptionCode);
+
+    HANDLE process = GetCurrentProcess();
+    SymInitialize(process, NULL, TRUE);
+
+    CONTEXT *ctx = ep->ContextRecord;
+    STACKFRAME64 frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.AddrPC.Offset    = ctx->Rip;
+    frame.AddrPC.Mode      = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx->Rbp;
+    frame.AddrFrame.Mode   = AddrModeFlat;
+    frame.AddrStack.Offset = ctx->Rsp;
+    frame.AddrStack.Mode   = AddrModeFlat;
+
+    fprintf(stderr, "Stack trace:\n");
+    for (int i = 0; i < 32; i++) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process,
+                         GetCurrentThread(), &frame, ctx, NULL,
+                         SymFunctionTableAccess64, SymGetModuleBase64,
+                         NULL))
+            break;
+
+        char symbol_buf[sizeof(SYMBOL_INFO) + 256];
+        SYMBOL_INFO *symbol = (SYMBOL_INFO *)symbol_buf;
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        symbol->MaxNameLen   = 255;
+
+        DWORD64 displacement;
+        if (SymFromAddr(process, frame.AddrPC.Offset, &displacement,
+                        symbol)) {
+            fprintf(stderr, "  [%d] %s + 0x%llx\n", i, symbol->Name,
+                    (unsigned long long)displacement);
+        } else {
+            fprintf(stderr, "  [%d] 0x%llx\n", i,
+                    (unsigned long long)frame.AddrPC.Offset);
+        }
+    }
+
+    SymCleanup(process);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void axiom_install_crash_handler(void) {
+    SetUnhandledExceptionFilter(axiom_crash_handler);
+}
+
+#else /* POSIX */
+
+#include <signal.h>
+#if defined(__GLIBC__)
+#include <execinfo.h>
+#endif
+
+static void axiom_crash_handler(int sig) {
+    fprintf(stderr, "\n=== AXIOM CRASH (signal %d) ===\n", sig);
+#if defined(__GLIBC__)
+    void *frames[64];
+    int n = backtrace(frames, 64);
+    char **symbols = backtrace_symbols(frames, n);
+    fprintf(stderr, "Stack trace:\n");
+    for (int i = 0; i < n; i++) {
+        fprintf(stderr, "  [%d] %s\n", i, symbols[i]);
+    }
+    free(symbols);
+#else
+    fprintf(stderr, "(stack trace not available on this platform)\n");
+#endif
+    _exit(128 + sig);
+}
+
+void axiom_install_crash_handler(void) {
+    signal(SIGSEGV, axiom_crash_handler);
+    signal(SIGABRT, axiom_crash_handler);
+    signal(SIGFPE,  axiom_crash_handler);
+}
+
+#endif /* _WIN32 */
+
+#else /* !AXIOM_DEBUG_MODE -- provide a stub so the linker is happy */
+
+void axiom_install_crash_handler(void) {
+    /* no-op when debug mode is not enabled */
+}
+
+#endif /* AXIOM_DEBUG_MODE */

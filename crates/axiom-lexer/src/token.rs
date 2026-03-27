@@ -237,6 +237,7 @@ pub enum TokenKind {
     FatArrow,       // =>
     Dot,            // .
     DotDot,         // ..
+    Ellipsis,       // ...
     Colon,          // :
     ColonColon,     // ::
     Comma,          // ,

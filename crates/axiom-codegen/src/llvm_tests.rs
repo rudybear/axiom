@@ -1388,6 +1388,7 @@ fn test_extern_decl() {
         return_type: HirType::Primitive(PrimitiveType::F64),
         span: span(),
         convention: "C".to_string(),
+        is_variadic: false,
     };
 
     let m = module_with_externs(Some("test"), vec![], vec![ef]);
@@ -1409,6 +1410,7 @@ fn test_extern_call() {
         return_type: HirType::Primitive(PrimitiveType::I64),
         span: span(),
         convention: "C".to_string(),
+        is_variadic: false,
     };
 
     let main_func = func(
@@ -6986,5 +6988,36 @@ fn main() -> i32 {
     assert!(
         ir.contains("extractelement"),
         "should extractelement for nested vec3 field access: {ir}"
+    );
+}
+
+#[test]
+fn test_debug_mode_crash_handler() {
+    let source = "fn main() -> i32 { return 0; }";
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let opts = CodegenOptions { debug_mode: true };
+    let ir = codegen_with_options(&hir, &opts).expect("codegen should succeed");
+    assert!(
+        ir.contains("call void @axiom_install_crash_handler()"),
+        "debug mode should emit crash handler call in main: {ir}"
+    );
+    assert!(
+        ir.contains("declare void @axiom_install_crash_handler()"),
+        "debug mode should declare crash handler: {ir}"
+    );
+}
+
+#[test]
+fn test_no_crash_handler_without_debug() {
+    let source = "fn main() -> i32 { return 0; }";
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        !ir.contains("axiom_install_crash_handler"),
+        "non-debug mode should not emit crash handler: {ir}"
     );
 }

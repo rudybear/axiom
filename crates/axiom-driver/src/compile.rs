@@ -44,6 +44,21 @@ pub struct CompileOptions {
 
     /// Additional library search directories (passed as `-L` to clang).
     pub link_dirs: Vec<String>,
+
+    /// When true, pass `-fsave-optimization-record` to clang to produce
+    /// a `.opt.yaml` file alongside the output binary. The YAML file
+    /// contains LLVM optimization remarks (applied and missed).
+    pub opt_report: bool,
+
+    /// Sanitizer to enable: `"address"`, `"thread"`, `"undefined"`, or `"memory"`.
+    /// When set, `-fsanitize=<value>` and `-g` are passed to clang.
+    pub sanitize: Option<String>,
+
+    /// When true, compile the C runtime with `-DAXIOM_DEBUG_MODE` to enable
+    /// the crash handler (stack traces on crash), and add `-g` and
+    /// `-fno-omit-frame-pointer` for reliable stack walking.
+    /// On Windows, also links `-ldbghelp`.
+    pub debug_mode: bool,
 }
 
 /// Compile LLVM IR text to a native executable binary with default options.
@@ -249,6 +264,22 @@ fn invoke_clang_core(
         cmd.arg("-fno-exceptions");
     }
 
+    // Pass sanitizer flags if requested.
+    if let Some(ref san) = options.sanitize {
+        cmd.arg(format!("-fsanitize={san}"));
+        cmd.arg("-g");  // Sanitizers need debug info for useful output.
+    }
+
+    // Debug mode: enable crash handler in C runtime, debug symbols, and
+    // reliable stack walking.
+    if options.debug_mode {
+        cmd.arg("-DAXIOM_DEBUG_MODE");
+        cmd.arg("-g");
+        cmd.arg("-fno-omit-frame-pointer");
+        #[cfg(target_os = "windows")]
+        cmd.arg("-ldbghelp");
+    }
+
     // Link the C runtime if needed.
     if let Some(rt) = runtime_c {
         cmd.arg(rt);
@@ -308,6 +339,15 @@ fn invoke_clang_core(
     // Add user-specified library search paths
     for dir in &options.link_dirs {
         cmd.arg(format!("-L{dir}"));
+    }
+
+    // OPT-REPORT: pass -fsave-optimization-record to emit a .opt.yaml file
+    // containing LLVM optimization remarks (applied, missed, analysis).
+    // Use -foptimization-record-file= to place the yaml next to the output binary.
+    if options.opt_report {
+        cmd.arg("-fsave-optimization-record");
+        let yaml_path = format!("{}.opt.yaml", output.trim_end_matches(".exe"));
+        cmd.arg(format!("-foptimization-record-file={yaml_path}"));
     }
 
     cmd.arg("-o")

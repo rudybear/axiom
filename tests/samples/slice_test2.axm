@@ -1,0 +1,31 @@
+@module slice_test2;
+fn main() -> i32 {
+    let data: ptr[f64] = heap_alloc(10, 8);
+    ptr_write_f64(data, 0, 10.0);
+    ptr_write_f64(data, 1, 20.0);
+    ptr_write_f64(data, 2, 30.0);
+    ptr_write_f64(data, 3, 40.0);
+    ptr_write_f64(data, 4, 50.0);
+
+    let s: slice[f64] = slice_from(data, 5);
+
+    // Test slice_set: overwrite element 1
+    slice_set(s, 1, 99.0);
+    print_f64(slice_get(s, 1));
+
+    // Test slice_len
+    print_i64(slice_len(s));
+
+    // Test slice_sub: sub-slice [1..4) = {99.0, 30.0, 40.0}
+    let sub: slice[f64] = slice_sub(s, 1, 4);
+    print_i64(slice_len(sub));
+    print_f64(slice_get(sub, 0));
+    print_f64(slice_get(sub, 2));
+
+    // Test slice_ptr: get raw pointer and read via ptr_read
+    let raw: ptr[f64] = slice_ptr(s);
+    print_f64(ptr_read_f64(raw, 0));
+
+    heap_free(data);
+    return 0;
+}

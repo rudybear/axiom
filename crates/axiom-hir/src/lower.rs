@@ -289,6 +289,7 @@ impl LoweringContext {
             return_type,
             span,
             convention,
+            is_variadic: ef.is_variadic,
         }
     }
 
@@ -731,6 +732,7 @@ impl LoweringContext {
                     kind: kind.clone().unwrap_or_else(|| "dylib".to_string()),
                 }
             }
+            ast::Annotation::Trace => HirAnnotationKind::Trace,
             ast::Annotation::Custom(name, args) => {
                 HirAnnotationKind::Custom(name.clone(), args.clone())
             }
@@ -830,6 +832,7 @@ fn annotation_valid_targets(kind: &HirAnnotationKind) -> (&str, Vec<AnnotationTa
         HirAnnotationKind::Postcondition(_) => ("postcondition", vec![Function]),
         HirAnnotationKind::Test(_) => ("test", vec![Function]),
         HirAnnotationKind::Link { .. } => ("link", vec![Function]),
+        HirAnnotationKind::Trace => ("trace", vec![Function]),
         HirAnnotationKind::Custom(_, _) => (
             "custom",
             vec![Function, Module, Param, StructDef, StructField, Block],

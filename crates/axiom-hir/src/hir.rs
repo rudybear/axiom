@@ -105,6 +105,8 @@ pub struct HirExternFunction {
     /// Calling convention (e.g., `"C"`, `"fastcall"`, `"stdcall"`, `"win64"`).
     /// Defaults to `"C"`.
     pub convention: String,
+    /// Whether this extern function accepts variadic arguments (`...`).
+    pub is_variadic: bool,
 }
 
 /// A function with validated annotations.
@@ -565,6 +567,8 @@ pub enum HirAnnotationKind {
     Test(HirTestCase),
     /// `@link("library", "kind")` - link against a native library.
     Link { library: String, kind: String },
+    /// `@trace` — emit ENTER/EXIT printf calls for function tracing.
+    Trace,
     /// `@custom(name, args)` - extensibility.
     Custom(String, Vec<AnnotationValue>),
 }

@@ -1,0 +1,11 @@
+@module trace_test;
+
+@trace
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+fn main() -> i32 {
+    print_i32(add(3, 4));
+    return 0;
+}

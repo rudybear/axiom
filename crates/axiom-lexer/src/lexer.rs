@@ -149,7 +149,11 @@ impl<'src> Lexer<'src> {
             }
             b'.' => {
                 if self.match_byte(b'.') {
-                    Token::new(TokenKind::DotDot, Span::new(start, self.pos))
+                    if self.match_byte(b'.') {
+                        Token::new(TokenKind::Ellipsis, Span::new(start, self.pos))
+                    } else {
+                        Token::new(TokenKind::DotDot, Span::new(start, self.pos))
+                    }
                 } else {
                     Token::new(TokenKind::Dot, Span::new(start, self.pos))
                 }

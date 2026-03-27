@@ -1,0 +1,13 @@
+@module slice_test;
+fn main() -> i32 {
+    let data: ptr[f64] = heap_alloc(10, 8);
+    ptr_write_f64(data, 0, 1.0);
+    ptr_write_f64(data, 1, 2.0);
+    ptr_write_f64(data, 2, 3.0);
+    let s: slice[f64] = slice_from(data, 3);
+    print_f64(slice_get(s, 0));
+    print_f64(slice_get(s, 2));
+    print_i64(slice_len(s));
+    heap_free(data);
+    return 0;
+}

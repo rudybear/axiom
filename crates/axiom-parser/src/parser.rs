@@ -766,6 +766,7 @@ impl<'src> Parser<'src> {
                 }
             }
             "strict" => Annotation::Strict,
+            "trace" => Annotation::Trace,
             "precondition" => {
                 // @precondition(expr)
                 self.expect(&TokenKind::LParen, "'('");
@@ -1266,9 +1267,29 @@ impl<'src> Parser<'src> {
             Spanned::new("_error_".to_string(), self.current_span())
         };
 
-        // Parse parameter list
+        // Parse parameter list, checking for variadic `...`
+        let mut is_variadic = false;
         let params = if self.eat(&TokenKind::LParen) {
-            let params = self.parse_param_list();
+            let mut params = Vec::new();
+            loop {
+                if self.check(&TokenKind::RParen) || self.at_end() {
+                    break;
+                }
+                // Check for variadic `...` before trying to parse a param
+                if self.check(&TokenKind::Ellipsis) {
+                    is_variadic = true;
+                    self.advance(); // consume `...`
+                    break;
+                }
+                if let Some(param) = self.parse_param() {
+                    params.push(param);
+                } else {
+                    break;
+                }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
             self.expect(&TokenKind::RParen, "')'");
             params
         } else {
@@ -1298,6 +1319,7 @@ impl<'src> Parser<'src> {
                 params,
                 return_type,
                 convention,
+                is_variadic,
             }),
             start_span.merge(end_span),
         )

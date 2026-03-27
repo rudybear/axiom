@@ -111,6 +111,12 @@ impl fmt::Display for HirExternFunction {
             }
             write!(f, "{param}")?;
         }
+        if self.is_variadic {
+            if !self.params.is_empty() {
+                write!(f, ", ")?;
+            }
+            write!(f, "...")?;
+        }
         writeln!(f, ") -> {};  // [node:{}]", self.return_type, self.id)?;
         Ok(())
     }
@@ -558,6 +564,7 @@ impl fmt::Display for HirAnnotation {
             HirAnnotationKind::Link { library, kind } => {
                 write!(f, "@link(library: \"{library}\", kind: \"{kind}\")")
             }
+            HirAnnotationKind::Trace => write!(f, "@trace"),
             HirAnnotationKind::Custom(name, args) => {
                 write!(f, "@{name}")?;
                 if !args.is_empty() {

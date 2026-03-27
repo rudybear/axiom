@@ -1,0 +1,11 @@
+@module variadic_test;
+
+extern "C" fn snprintf(buf: ptr[i8], size: i64, fmt: ptr[i8], ...) -> i32;
+
+fn main() -> i32 {
+    let buf: ptr[i64] = heap_alloc(256, 1);
+    snprintf(buf, 255, "hello %d", 42);
+    print(buf);
+    heap_free(buf);
+    return 0;
+}

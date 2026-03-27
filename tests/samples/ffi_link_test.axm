@@ -1,0 +1,14 @@
+@module ffi_link_test;
+@intent("Test Rust-style FFI: calling convention + @link annotation");
+
+// Test 1: extern "C" with default CRT function (no @link needed)
+extern "C" fn _time64(t: ptr[i64]) -> i64;
+
+// Test 2: extern "C" with explicit calling convention
+extern "C" fn puts(s: ptr[i8]) -> i32;
+
+fn main() -> i32 {
+    let t: i64 = _time64(0);
+    print_i64(t);
+    return 0;
+}

@@ -1,0 +1,10 @@
+@module convention_test;
+
+extern "stdcall" fn MessageBoxA(hwnd: ptr[i64], text: ptr[i8], caption: ptr[i8], flags: i32) -> i32;
+extern "fastcall" fn fast_func(x: i32) -> i32;
+extern fn default_func(x: i32) -> i32;
+extern "C" fn c_func(x: i32) -> i32;
+
+fn main() -> i32 {
+    return 0;
+}

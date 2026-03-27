@@ -45,6 +45,8 @@ pub struct ExternFunction {
     /// Calling convention string (e.g., `"C"`, `"fastcall"`, `"stdcall"`, `"win64"`).
     /// `None` means the default C calling convention.
     pub convention: Option<String>,
+    /// Whether this extern function accepts variadic arguments (`...`).
+    pub is_variadic: bool,
 }
 
 /// Function definition
@@ -227,6 +229,8 @@ pub enum Annotation {
     Test(TestCase),
     /// `@link("library_name")` or `@link("library_name", "kind")` — specifies a library to link.
     Link { library: String, kind: Option<String> },
+    /// `@trace` — emit ENTER/EXIT printf calls for function tracing.
+    Trace,
     Custom(String, Vec<AnnotationValue>),
 }
 

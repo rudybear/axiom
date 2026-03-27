@@ -46,6 +46,15 @@ enum Commands {
         /// Additional library search directories (passed as -L to linker)
         #[arg(long = "link-dir", short = 'L')]
         link_dirs: Vec<String>,
+
+        /// Produce an LLVM optimization report (.opt.yaml) showing which
+        /// optimizations were applied or missed
+        #[arg(long)]
+        opt_report: bool,
+
+        /// Enable a sanitizer: address, thread, undefined, or memory
+        #[arg(long, value_parser = ["address", "thread", "undefined", "memory"])]
+        sanitize: Option<String>,
     },
 
     /// Tokenize an AXIOM source file (debug tool)
@@ -585,7 +594,7 @@ fn main() -> miette::Result<()> {
             }
         }
 
-        Commands::Compile { input, output, emit, target, error_format, debug, link_dirs } => {
+        Commands::Compile { input, output, emit, target, error_format, debug, link_dirs, opt_report, sanitize } => {
             let source = read_source_with_includes(&input)?;
             let use_json = error_format.as_deref() == Some("json");
 
@@ -739,10 +748,38 @@ fn main() -> miette::Result<()> {
                         optimize_for,
                         ir_text: Some(llvm_ir.clone()),
                         link_dirs: link_dirs.clone(),
+                        opt_report,
+                        sanitize: sanitize.clone(),
+                        debug_mode: debug,
                     };
 
                     compile::compile_to_binary_with_options(&llvm_ir, &output_path, &compile_opts)?;
                     eprintln!("compiled {} -> {}", input, output_path);
+
+                    // If --opt-report was requested, print the path to the .opt.yaml
+                    // file produced by -fsave-optimization-record.
+                    if opt_report {
+                        let opt_yaml_path = format!("{}.opt.yaml", output_path.trim_end_matches(".exe"));
+                        let opt_yaml = std::path::Path::new(&opt_yaml_path);
+                        if opt_yaml.exists() {
+                            eprintln!("[OPT-REPORT] Optimization remarks written to: {}", opt_yaml.display());
+                            // Print a summary of the optimization remarks.
+                            if let Ok(contents) = std::fs::read_to_string(opt_yaml) {
+                                let mut applied = 0u32;
+                                let mut missed = 0u32;
+                                for line in contents.lines() {
+                                    if line.starts_with("--- !Passed") {
+                                        applied += 1;
+                                    } else if line.starts_with("--- !Missed") {
+                                        missed += 1;
+                                    }
+                                }
+                                eprintln!("[OPT-REPORT] Summary: {} optimizations applied, {} missed", applied, missed);
+                            }
+                        } else {
+                            eprintln!("[OPT-REPORT] No .opt.yaml file produced (clang may not support -fsave-optimization-record)");
+                        }
+                    }
                 }
             }
 
@@ -909,6 +946,9 @@ fn try_compile(input: &str, output_path: &str) -> miette::Result<()> {
         optimize_for,
         ir_text: Some(llvm_ir.clone()),
         link_dirs: Vec::new(),
+        opt_report: false,
+        sanitize: None,
+        debug_mode: false,
     };
 
     compile::compile_to_binary_with_options(&llvm_ir, output_path, &compile_opts)
@@ -1876,6 +1916,9 @@ fn run_verified_build(input: &str) -> miette::Result<()> {
         optimize_for,
         ir_text: Some(llvm_ir.clone()),
         link_dirs: Vec::new(),
+        opt_report: false,
+        sanitize: None,
+        debug_mode: false,
     };
 
     compile::compile_to_binary_with_options(&llvm_ir, &output_path, &compile_opts)?;
