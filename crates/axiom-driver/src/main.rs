@@ -186,6 +186,10 @@ enum Commands {
         /// Write rewritten source to this output file
         #[arg(short, long)]
         output: Option<String>,
+
+        /// Analyze LLVM optimization remarks and print suggestions (no LLM needed)
+        #[arg(long)]
+        analyze: bool,
     },
 
     /// Verify annotations in an AXIOM source file
@@ -840,8 +844,8 @@ fn main() -> miette::Result<()> {
         }
 
         // S3: Source-to-Source AI Rewrite
-        Commands::Rewrite { input, dry_run, api_key, output } => {
-            run_rewrite(&input, dry_run, api_key.as_deref(), output.as_deref())
+        Commands::Rewrite { input, dry_run, api_key, output, analyze } => {
+            run_rewrite(&input, dry_run, api_key.as_deref(), output.as_deref(), analyze)
         }
 
         // Verified Development Pipeline: verify annotations
@@ -1696,7 +1700,7 @@ fn get_timestamp() -> String {
 // S3: Source-to-Source AI Rewrite
 // ---------------------------------------------------------------------------
 
-fn run_rewrite(input: &str, dry_run: bool, api_key: Option<&str>, output: Option<&str>) -> miette::Result<()> {
+fn run_rewrite(input: &str, dry_run: bool, api_key: Option<&str>, output: Option<&str>, analyze: bool) -> miette::Result<()> {
     use axiom_optimize::llm_optimizer::{self, LlmResult};
 
     // Resolve API key
@@ -1711,7 +1715,9 @@ fn run_rewrite(input: &str, dry_run: bool, api_key: Option<&str>, output: Option
     eprintln!("Source: {input} ({} bytes)", source.len());
     eprintln!(
         "Mode: {}",
-        if dry_run {
+        if analyze {
+            "analyze (LLVM optimization remarks)"
+        } else if dry_run {
             "dry-run (prompt only)"
         } else if resolved_api_key.is_some() {
             "Claude API"
@@ -1722,7 +1728,7 @@ fn run_rewrite(input: &str, dry_run: bool, api_key: Option<&str>, output: Option
     eprintln!();
 
     // Verify source parses correctly
-    let result = axiom_parser::parse(&source);
+    let mut result = axiom_parser::parse(&source);
     if result.has_errors() {
         eprintln!("Warning: source has parse errors:");
         for err in &result.errors {
@@ -1741,11 +1747,50 @@ fn run_rewrite(input: &str, dry_run: bool, api_key: Option<&str>, output: Option
         eprintln!();
     }
 
-    // Run rewrite
-    let rewrite_result = llm_optimizer::run_rewrite(
+    // -----------------------------------------------------------------------
+    // CompilerGPT: extract LLVM optimization remarks
+    // -----------------------------------------------------------------------
+    let missed_opts = if analyze || !dry_run {
+        // Compile the source to a temp binary with --opt-report to collect
+        // LLVM optimization remarks.
+        match compile_for_opt_remarks(input, &mut result, &constraints) {
+            Ok(missed) => missed,
+            Err(e) => {
+                eprintln!("[REWRITE] Could not collect optimization remarks: {e}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    // --analyze mode: just print remarks and suggestions, no LLM needed
+    if analyze {
+        if missed_opts.is_empty() {
+            eprintln!("[REWRITE] No missed optimizations found -- LLVM applied all optimizations.");
+        } else {
+            eprintln!("[REWRITE] {} missed optimizations found:", missed_opts.len());
+            for m in &missed_opts {
+                eprintln!("  {m}");
+            }
+
+            let suggestions = llm_optimizer::suggest_actions_for_missed(&missed_opts);
+            if !suggestions.is_empty() {
+                eprintln!("\nSuggested actions:");
+                for s in &suggestions {
+                    eprintln!("  -> {s}");
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    // Run rewrite (with remarks if we collected any)
+    let rewrite_result = llm_optimizer::run_rewrite_with_remarks(
         &source,
         resolved_api_key.as_deref(),
         dry_run,
+        &missed_opts,
     );
 
     match rewrite_result {
@@ -1791,6 +1836,90 @@ fn run_rewrite(input: &str, dry_run: bool, api_key: Option<&str>, output: Option
     }
 
     Ok(())
+}
+
+/// Compile an AXIOM source file with `-fsave-optimization-record` and extract
+/// missed optimization remarks from the resulting `.opt.yaml` file.
+fn compile_for_opt_remarks(
+    input: &str,
+    parse_result: &mut axiom_parser::ParseResult,
+    constraints: &[axiom_optimize::llm_optimizer::ConstraintInfo],
+) -> miette::Result<Vec<String>> {
+    use axiom_optimize::llm_optimizer;
+
+    // Need a successful parse to generate IR
+    if parse_result.has_errors() {
+        return Err(miette::miette!("Cannot compile for remarks: source has parse errors"));
+    }
+
+    resolve_imports(&mut parse_result.module, input);
+    let hir_module = axiom_hir::lower(&parse_result.module).map_err(|errors| {
+        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+        miette::miette!("HIR errors:\n  {}", msgs.join("\n  "))
+    })?;
+    let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| {
+        let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
+        miette::miette!("codegen errors:\n  {}", msgs.join("\n  "))
+    })?;
+
+    let optimize_for = constraints.iter()
+        .find(|c| c.key == "optimize_for")
+        .map(|c| c.value.clone());
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_bin = if cfg!(windows) {
+        tmp_dir.join("axiom_analyze.exe")
+    } else {
+        tmp_dir.join("axiom_analyze")
+    };
+
+    let compile_opts = compile::CompileOptions {
+        target_arch: None,
+        optimize_for,
+        ir_text: Some(llvm_ir.clone()),
+        link_dirs: Vec::new(),
+        opt_report: true,
+        sanitize: None,
+        debug_mode: false,
+    };
+
+    eprintln!("[REWRITE] Compiling with optimization remarks...");
+    compile::compile_to_binary_with_options(&llvm_ir, tmp_bin.to_str().unwrap(), &compile_opts)?;
+
+    // The .opt.yaml file is placed next to the output binary.
+    // clang names it based on the input .ll file, so we need to search for it.
+    let yaml_path = format!("{}.opt.yaml", tmp_bin.display());
+
+    // Also check for the yaml file based on the .ll temp file name
+    // (clang sometimes names it after the input file, not the output).
+    let missed = if std::path::Path::new(&yaml_path).exists() {
+        llm_optimizer::extract_missed_optimizations(&yaml_path)
+    } else {
+        // Try to find .opt.yaml files in the temp directory
+        let mut found = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.ends_with(".opt.yaml") && name.contains("axiom") {
+                        found = llm_optimizer::extract_missed_optimizations(
+                            path.to_str().unwrap_or_default(),
+                        );
+                        // Clean up the found yaml file
+                        std::fs::remove_file(&path).ok();
+                        break;
+                    }
+                }
+            }
+        }
+        found
+    };
+
+    // Cleanup
+    std::fs::remove_file(&tmp_bin).ok();
+    std::fs::remove_file(&yaml_path).ok();
+
+    Ok(missed)
 }
 
 // ---------------------------------------------------------------------------

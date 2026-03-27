@@ -1032,6 +1032,15 @@ fn truncate_ir(ir: &str, max_lines: usize) -> String {
 /// `@pure` functions, using `heap_alloc_zeroed`, adding `@inline(always)` to
 /// hot helpers, restructuring loops for vectorization, etc.
 pub fn build_rewrite_prompt(source: &str) -> String {
+    build_rewrite_prompt_with_remarks(source, &[])
+}
+
+/// Build a rewrite prompt with optional LLVM optimization remarks.
+///
+/// When `missed_opts` is non-empty, the prompt includes a section listing the
+/// specific optimizations that LLVM attempted but could not apply, so the LLM
+/// can address them directly in its rewrite.
+pub fn build_rewrite_prompt_with_remarks(source: &str, missed_opts: &[String]) -> String {
     let mut p = String::with_capacity(4096);
 
     p.push_str("# AXIOM Source-to-Source Rewrite Request\n\n");
@@ -1061,6 +1070,17 @@ pub fn build_rewrite_prompt(source: &str) -> String {
     p.push_str("7. **Minimize pointer reads in loops**: Hoist `ptr_read_*` calls out of inner loops\n");
     p.push_str("   when the value doesn't change between iterations.\n\n");
 
+    // LLVM optimization remarks (CompilerGPT feedback loop)
+    if !missed_opts.is_empty() {
+        p.push_str("## LLVM Optimization Remarks (missed)\n\n");
+        p.push_str("The following optimizations were attempted by LLVM but failed. ");
+        p.push_str("Your rewrite should address these specific issues:\n\n");
+        for opt in missed_opts {
+            p.push_str(&format!("- {opt}\n"));
+        }
+        p.push('\n');
+    }
+
     // Include constraints if present
     let constraints = extract_constraints_from_source(source);
     if !constraints.is_empty() {
@@ -1086,7 +1106,11 @@ pub fn build_rewrite_prompt(source: &str) -> String {
     p.push_str("2. Adding `@inline(always)` to small hot helpers\n");
     p.push_str("3. Replacing `heap_alloc` + zero loops with `heap_alloc_zeroed`\n");
     p.push_str("4. Hoisting invariant `ptr_read_*` calls out of inner loops\n");
-    p.push_str("5. Any other code-level improvements from the knowledge base\n\n");
+    p.push_str("5. Any other code-level improvements from the knowledge base\n");
+    if !missed_opts.is_empty() {
+        p.push_str("6. Addressing the LLVM missed optimization remarks listed above\n");
+    }
+    p.push('\n');
 
     // Response format
     p.push_str("## Required Response Format\n\n");
@@ -1175,7 +1199,21 @@ pub fn run_rewrite(
     api_key: Option<&str>,
     dry_run: bool,
 ) -> LlmResult {
-    let prompt = build_rewrite_prompt(source);
+    run_rewrite_with_remarks(source, api_key, dry_run, &[])
+}
+
+/// Run the source-to-source rewrite pipeline with LLVM optimization remarks.
+///
+/// When `missed_opts` is non-empty, the remarks are included in the prompt
+/// so the LLM knows exactly which optimizations LLVM could not apply and can
+/// address them in the rewrite (CompilerGPT feedback loop).
+pub fn run_rewrite_with_remarks(
+    source: &str,
+    api_key: Option<&str>,
+    dry_run: bool,
+    missed_opts: &[String],
+) -> LlmResult {
+    let prompt = build_rewrite_prompt_with_remarks(source, missed_opts);
 
     if dry_run {
         let prompt_path = write_prompt_to_temp(&prompt, 0);
@@ -1243,6 +1281,112 @@ pub fn run_rewrite(
         prompt_path,
         prompt,
     }
+}
+
+// ---------------------------------------------------------------------------
+// CompilerGPT: LLVM optimization remarks extraction
+// ---------------------------------------------------------------------------
+
+/// Extract missed optimization remarks from a `.opt.yaml` file produced by
+/// clang's `-fsave-optimization-record` flag.
+///
+/// Each returned string has the form:
+/// `"MISSED: <name> in <function> (pass: <pass>)"`
+pub fn extract_missed_optimizations(yaml_path: &str) -> Vec<String> {
+    let content = match std::fs::read_to_string(yaml_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut missed = Vec::new();
+    let mut in_missed = false;
+    let mut current_pass = String::new();
+    let mut current_name = String::new();
+    let mut current_function = String::new();
+
+    for line in content.lines() {
+        if line.starts_with("--- !Missed") {
+            in_missed = true;
+            current_pass.clear();
+            current_name.clear();
+            current_function.clear();
+        } else if line.starts_with("---") {
+            if in_missed && !current_name.is_empty() {
+                missed.push(format!(
+                    "MISSED: {} in {} (pass: {})",
+                    current_name, current_function, current_pass
+                ));
+            }
+            in_missed = false;
+        } else if in_missed {
+            if let Some(val) = line.strip_prefix("Pass:") {
+                current_pass = val.trim().trim_matches('\'').to_string();
+            } else if let Some(val) = line.strip_prefix("Name:") {
+                current_name = val.trim().trim_matches('\'').to_string();
+            } else if let Some(val) = line.strip_prefix("Function:") {
+                current_function = val.trim().trim_matches('\'').to_string();
+            }
+        }
+    }
+    // Catch last entry if file doesn't end with `---`
+    if in_missed && !current_name.is_empty() {
+        missed.push(format!(
+            "MISSED: {} in {} (pass: {})",
+            current_name, current_function, current_pass
+        ));
+    }
+
+    missed
+}
+
+/// Generate actionable suggestions from missed optimization remarks.
+///
+/// Maps common LLVM pass names to concrete AXIOM-level actions.
+pub fn suggest_actions_for_missed(missed: &[String]) -> Vec<String> {
+    let mut suggestions = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for m in missed {
+        let lower = m.to_lowercase();
+        if lower.contains("loop-vectorize") || lower.contains("vectoriz") {
+            let s = "Add @vectorizable to the function containing the loop".to_string();
+            if seen.insert(s.clone()) {
+                suggestions.push(s);
+            }
+        }
+        if lower.contains("inline") {
+            let s = "Consider @inline(always) for small hot functions".to_string();
+            if seen.insert(s.clone()) {
+                suggestions.push(s);
+            }
+        }
+        if lower.contains("licm") || lower.contains("loop-invariant") {
+            let s = "Move loop-invariant computations outside the loop".to_string();
+            if seen.insert(s.clone()) {
+                suggestions.push(s);
+            }
+        }
+        if lower.contains("unroll") {
+            let s = "Consider @strategy { unroll: N } to help the loop unroller".to_string();
+            if seen.insert(s.clone()) {
+                suggestions.push(s);
+            }
+        }
+        if lower.contains("slp") || lower.contains("superword") {
+            let s = "Restructure adjacent scalar operations to enable SLP vectorization".to_string();
+            if seen.insert(s.clone()) {
+                suggestions.push(s);
+            }
+        }
+        if lower.contains("alias") || lower.contains("noalias") {
+            let s = "Mark @pure on functions that don't alias memory, or use readonly_ptr/writeonly_ptr".to_string();
+            if seen.insert(s.clone()) {
+                suggestions.push(s);
+            }
+        }
+    }
+
+    suggestions
 }
 
 // ---------------------------------------------------------------------------
@@ -1798,5 +1942,118 @@ fn fast() -> i32 { return 0; }"#;
         let result = parse_rewrite_response(response);
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("rewritten_source"));
+    }
+
+    // -----------------------------------------------------------------------
+    // CompilerGPT: optimization remarks extraction tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_missed_optimizations_empty() {
+        let missed = extract_missed_optimizations("/nonexistent/path.opt.yaml");
+        assert!(missed.is_empty());
+    }
+
+    #[test]
+    fn test_extract_missed_optimizations_parses_yaml() {
+        let yaml = r#"--- !Missed
+Pass:            loop-vectorize
+Name:            CantVectorizeMemory
+Function:        compute
+--- !Passed
+Pass:            inline
+Name:            Inlined
+Function:        helper
+--- !Missed
+Pass:            licm
+Name:            LoopInvariantCondition
+Function:        render
+---
+"#;
+        let tmp = std::env::temp_dir().join("axiom_test_opt_remarks.opt.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let missed = extract_missed_optimizations(tmp.to_str().unwrap());
+        std::fs::remove_file(&tmp).ok();
+
+        assert_eq!(missed.len(), 2);
+        assert!(missed[0].contains("CantVectorizeMemory"));
+        assert!(missed[0].contains("compute"));
+        assert!(missed[0].contains("loop-vectorize"));
+        assert!(missed[1].contains("LoopInvariantCondition"));
+        assert!(missed[1].contains("render"));
+        assert!(missed[1].contains("licm"));
+    }
+
+    #[test]
+    fn test_extract_missed_optimizations_last_entry_no_trailing_separator() {
+        let yaml = r#"--- !Missed
+Pass:            inline
+Name:            TooCostly
+Function:        big_func
+"#;
+        let tmp = std::env::temp_dir().join("axiom_test_opt_remarks_last.opt.yaml");
+        std::fs::write(&tmp, yaml).unwrap();
+        let missed = extract_missed_optimizations(tmp.to_str().unwrap());
+        std::fs::remove_file(&tmp).ok();
+
+        assert_eq!(missed.len(), 1);
+        assert!(missed[0].contains("TooCostly"));
+        assert!(missed[0].contains("big_func"));
+        assert!(missed[0].contains("inline"));
+    }
+
+    #[test]
+    fn test_build_rewrite_prompt_with_remarks_includes_section() {
+        let source = "fn add(a: i32, b: i32) -> i32 { return a + b; }";
+        let missed = vec![
+            "MISSED: CantVectorizeMemory in compute (pass: loop-vectorize)".to_string(),
+            "MISSED: TooCostly in render (pass: inline)".to_string(),
+        ];
+        let prompt = build_rewrite_prompt_with_remarks(source, &missed);
+
+        assert!(prompt.contains("## LLVM Optimization Remarks (missed)"));
+        assert!(prompt.contains("CantVectorizeMemory"));
+        assert!(prompt.contains("TooCostly"));
+        assert!(prompt.contains("Addressing the LLVM missed optimization remarks"));
+    }
+
+    #[test]
+    fn test_build_rewrite_prompt_with_remarks_empty_no_section() {
+        let source = "fn add(a: i32, b: i32) -> i32 { return a + b; }";
+        let prompt = build_rewrite_prompt_with_remarks(source, &[]);
+
+        assert!(!prompt.contains("## LLVM Optimization Remarks"));
+        assert!(!prompt.contains("Addressing the LLVM missed"));
+    }
+
+    #[test]
+    fn test_suggest_actions_for_missed() {
+        let missed = vec![
+            "MISSED: CantVectorizeMemory in compute (pass: loop-vectorize)".to_string(),
+            "MISSED: TooCostly in helper (pass: inline)".to_string(),
+            "MISSED: LoopInvariantCondition in render (pass: licm)".to_string(),
+            "MISSED: UnrollFailed in tight_loop (pass: loop-unroll)".to_string(),
+        ];
+        let suggestions = suggest_actions_for_missed(&missed);
+
+        assert!(suggestions.iter().any(|s| s.contains("@vectorizable")));
+        assert!(suggestions.iter().any(|s| s.contains("@inline(always)")));
+        assert!(suggestions.iter().any(|s| s.contains("loop-invariant")));
+        assert!(suggestions.iter().any(|s| s.contains("@strategy")));
+    }
+
+    #[test]
+    fn test_suggest_actions_deduplicates() {
+        let missed = vec![
+            "MISSED: CantVectorize1 in f1 (pass: loop-vectorize)".to_string(),
+            "MISSED: CantVectorize2 in f2 (pass: loop-vectorize)".to_string(),
+        ];
+        let suggestions = suggest_actions_for_missed(&missed);
+
+        // Should only have one vectorization suggestion, not two
+        let vectorize_count = suggestions.iter()
+            .filter(|s| s.contains("@vectorizable"))
+            .count();
+        assert_eq!(vectorize_count, 1);
     }
 }
