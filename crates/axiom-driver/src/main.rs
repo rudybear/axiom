@@ -42,6 +42,10 @@ enum Commands {
         /// Enable debug mode: runtime bounds checks, assert messages
         #[arg(long)]
         debug: bool,
+
+        /// Additional library search directories (passed as -L to linker)
+        #[arg(long = "link-dir", short = 'L')]
+        link_dirs: Vec<String>,
     },
 
     /// Tokenize an AXIOM source file (debug tool)
@@ -581,7 +585,7 @@ fn main() -> miette::Result<()> {
             }
         }
 
-        Commands::Compile { input, output, emit, target, error_format, debug } => {
+        Commands::Compile { input, output, emit, target, error_format, debug, link_dirs } => {
             let source = read_source_with_includes(&input)?;
             let use_json = error_format.as_deref() == Some("json");
 
@@ -734,6 +738,7 @@ fn main() -> miette::Result<()> {
                         target_arch: target.clone(),
                         optimize_for,
                         ir_text: Some(llvm_ir.clone()),
+                        link_dirs: link_dirs.clone(),
                     };
 
                     compile::compile_to_binary_with_options(&llvm_ir, &output_path, &compile_opts)?;
@@ -903,6 +908,7 @@ fn try_compile(input: &str, output_path: &str) -> miette::Result<()> {
         target_arch: None,
         optimize_for,
         ir_text: Some(llvm_ir.clone()),
+        link_dirs: Vec::new(),
     };
 
     compile::compile_to_binary_with_options(&llvm_ir, output_path, &compile_opts)
@@ -1869,6 +1875,7 @@ fn run_verified_build(input: &str) -> miette::Result<()> {
         target_arch: None,
         optimize_for,
         ir_text: Some(llvm_ir.clone()),
+        link_dirs: Vec::new(),
     };
 
     compile::compile_to_binary_with_options(&llvm_ir, &output_path, &compile_opts)?;

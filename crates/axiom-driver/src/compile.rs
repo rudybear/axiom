@@ -41,6 +41,9 @@ pub struct CompileOptions {
     /// The LLVM IR text, used to detect which features are needed (e.g.,
     /// renderer functions) for linking decisions.
     pub ir_text: Option<String>,
+
+    /// Additional library search directories (passed as `-L` to clang).
+    pub link_dirs: Vec<String>,
 }
 
 /// Compile LLVM IR text to a native executable binary with default options.
@@ -260,6 +263,7 @@ fn invoke_clang_core(
 
     // Scan IR for @axiom_link comments and add -l flags for each library.
     if let Some(ref ir_text) = options.ir_text {
+        let mut link_dirs_added = std::collections::HashSet::new();
         for line in ir_text.lines() {
             if let Some(rest) = line.strip_prefix("; @axiom_link: ") {
                 let parts: Vec<&str> = rest.split_whitespace().collect();
@@ -268,6 +272,42 @@ fn invoke_clang_core(
                 }
             }
         }
+
+        // Auto-discover library search paths:
+        // 1. Directory of the compiler binary (target/release/)
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let dir = exe_dir.to_string_lossy().to_string();
+                if link_dirs_added.insert(dir.clone()) {
+                    cmd.arg(format!("-L{dir}"));
+                }
+            }
+        }
+        // 2. target/release/ relative to cwd (common for development)
+        for search_dir in &["target/release", "target/debug", "."] {
+            let path = std::path::Path::new(search_dir);
+            if path.is_dir() {
+                let dir = path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+                    .to_string_lossy().to_string();
+                if link_dirs_added.insert(dir.clone()) {
+                    cmd.arg(format!("-L{dir}"));
+                }
+            }
+        }
+        // 3. Directory of the source file being compiled
+        if let Some(source_dir) = std::path::Path::new(output).parent() {
+            if source_dir.is_dir() {
+                let dir = source_dir.to_string_lossy().to_string();
+                if link_dirs_added.insert(dir.clone()) {
+                    cmd.arg(format!("-L{dir}"));
+                }
+            }
+        }
+    }
+
+    // Add user-specified library search paths
+    for dir in &options.link_dirs {
+        cmd.arg(format!("-L{dir}"));
     }
 
     cmd.arg("-o")
