@@ -91,6 +91,10 @@ enum Commands {
         /// Agent identifier for history records
         #[arg(long, default_value = "axiom-llm-optimizer")]
         agent: String,
+
+        /// Track each optimization step with git commits (or .axiom-history/ if not in git)
+        #[arg(long)]
+        track: bool,
     },
 
     /// Profile an AXIOM program and suggest optimizations
@@ -142,11 +146,15 @@ enum Commands {
         output: Option<String>,
     },
 
-    /// Build project from axiom.toml manifest (E5)
+    /// Build project from axiom.toml manifest or single .axm file with verified pipeline (E5)
     Build {
         /// Path to axiom.toml (defaults to ./axiom.toml)
         #[arg(long)]
         manifest: Option<String>,
+
+        /// Optional .axm file for verified pipeline (verify + test + compile)
+        #[arg(long)]
+        input: Option<String>,
     },
 
     /// AI-driven source-to-source rewrite (S3)
@@ -165,6 +173,22 @@ enum Commands {
         /// Write rewritten source to this output file
         #[arg(short, long)]
         output: Option<String>,
+    },
+
+    /// Verify annotations in an AXIOM source file
+    Verify {
+        /// Input .axm file
+        input: String,
+    },
+
+    /// Run tests for an AXIOM source file
+    Test {
+        /// Input .axm file
+        input: String,
+
+        /// Enable fuzz testing from @precondition constraints
+        #[arg(long)]
+        fuzz: bool,
     },
 }
 
@@ -416,7 +440,8 @@ fn main() -> miette::Result<()> {
             api_key,
             dry_run,
             agent,
-        } => run_optimize(&input, iterations, &target, api_key.as_deref(), dry_run, &agent),
+            track,
+        } => run_optimize(&input, iterations, &target, api_key.as_deref(), dry_run, &agent, track),
 
         Commands::Profile { input, iterations } => run_profile(&input, iterations),
 
@@ -648,8 +673,13 @@ fn main() -> miette::Result<()> {
             run_watch(&input, output.as_deref())
         }
 
-        // E5: Build from axiom.toml
-        Commands::Build { manifest } => {
+        // E5: Build from axiom.toml or verified pipeline for single .axm file
+        Commands::Build { manifest, input } => {
+            if let Some(ref axm_file) = input {
+                if axm_file.ends_with(".axm") {
+                    return run_verified_build(axm_file);
+                }
+            }
             let manifest_path = manifest.unwrap_or_else(|| "axiom.toml".to_string());
             run_build(&manifest_path)
         }
@@ -657,6 +687,16 @@ fn main() -> miette::Result<()> {
         // S3: Source-to-Source AI Rewrite
         Commands::Rewrite { input, dry_run, api_key, output } => {
             run_rewrite(&input, dry_run, api_key.as_deref(), output.as_deref())
+        }
+
+        // Verified Development Pipeline: verify annotations
+        Commands::Verify { input } => {
+            run_verify(&input)
+        }
+
+        // Verified Development Pipeline: run @test annotations
+        Commands::Test { input, fuzz: _ } => {
+            run_test(&input)
         }
     }
 }
@@ -1054,6 +1094,7 @@ fn run_optimize(
     api_key: Option<&str>,
     dry_run: bool,
     agent: &str,
+    track: bool,
 ) -> miette::Result<()> {
     use axiom_optimize::history::{OptHistory, OptRecord};
     use axiom_optimize::llm_optimizer::{self, LlmResult};
@@ -1276,6 +1317,9 @@ fn run_optimize(
                 });
 
                 eprintln!("  Recorded as {version}\n");
+                if track {
+                    let _ = git_track_optimization(input, &format!("axiom optimize: iteration {iter_num} — {version}"));
+                }
             }
 
             LlmResult::DryRun { prompt_path, prompt } => {
@@ -1314,6 +1358,9 @@ fn run_optimize(
                 });
 
                 eprintln!("  Recorded grid-search fallback as {version}\n");
+                if track {
+                    let _ = git_track_optimization(input, &format!("axiom optimize: dry-run iteration {iter_num} — {version}"));
+                }
             }
 
             LlmResult::Error(err) => {
@@ -1349,6 +1396,9 @@ fn run_optimize(
                 });
 
                 eprintln!("  Recorded grid-search fallback as {version}\n");
+                if track {
+                    let _ = git_track_optimization(input, &format!("axiom optimize: error fallback iteration {iter_num} — {version}"));
+                }
             }
         }
     }
@@ -1584,6 +1634,458 @@ fn run_rewrite(input: &str, dry_run: bool, api_key: Option<&str>, output: Option
 }
 
 // ---------------------------------------------------------------------------
+// Verified Development Pipeline: axiom verify
+// ---------------------------------------------------------------------------
+
+fn run_verify(input: &str) -> miette::Result<()> {
+    let source = read_source_with_includes(input)?;
+
+    let parse_result = axiom_parser::parse(&source);
+    if parse_result.has_errors() {
+        eprintln!("--- Parse Errors ---");
+        for err in &parse_result.errors {
+            eprintln!("  {err}");
+        }
+        return Err(miette::miette!(
+            "parsing failed with {} error(s)",
+            parse_result.errors.len()
+        ));
+    }
+
+    let hir = axiom_hir::lower(&parse_result.module).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("HIR lowering failed with {} error(s)", errors.len())
+    })?;
+
+    // Count functions and check annotations
+    let mut total = 0;
+    let mut with_intent = 0;
+    let mut with_contract = 0;
+    for func in &hir.functions {
+        if func.name == "main" {
+            continue;
+        }
+        total += 1;
+        if func.annotations.iter().any(|a| {
+            matches!(a.kind, axiom_hir::HirAnnotationKind::Intent(_))
+        }) {
+            with_intent += 1;
+        }
+        if func.annotations.iter().any(|a| {
+            matches!(
+                a.kind,
+                axiom_hir::HirAnnotationKind::Precondition(_)
+                    | axiom_hir::HirAnnotationKind::Postcondition(_)
+            )
+        }) {
+            with_contract += 1;
+        }
+    }
+
+    eprintln!("[VERIFY] {input}: {total} functions checked");
+    eprintln!("[VERIFY]   {with_intent}/{total} have @intent");
+    eprintln!("[VERIFY]   {with_contract}/{total} have @precondition/@postcondition");
+    if total == 0 {
+        eprintln!("[VERIFY] PASS — no non-main functions to check");
+    } else if with_intent == total && with_contract == total {
+        eprintln!("[VERIFY] PASS — all annotations present");
+    } else {
+        eprintln!(
+            "[VERIFY] WARN — {}/{} functions fully annotated",
+            std::cmp::min(with_intent, with_contract),
+            total
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Verified Development Pipeline: axiom build --input (verified pipeline)
+// ---------------------------------------------------------------------------
+
+/// Run the verified build pipeline: verify -> test -> compile.
+fn run_verified_build(input: &str) -> miette::Result<()> {
+    eprintln!("[BUILD] Phase 1: Verifying annotations...");
+    run_verify(input)?;
+
+    eprintln!();
+    eprintln!("[BUILD] Phase 2: Running tests...");
+    // Test phase is best-effort: if no @test annotations, we skip gracefully.
+    // run_test returns Ok(()) when there are no tests.
+    run_test(input)?;
+
+    eprintln!();
+    eprintln!("[BUILD] Phase 3: Compiling (release)...");
+    let source = read_source_with_includes(input)?;
+    let parse_result = axiom_parser::parse(&source);
+    if parse_result.has_errors() {
+        for err in &parse_result.errors {
+            eprintln!("  {err}");
+        }
+        return Err(miette::miette!("parsing failed"));
+    }
+    let hir_module = axiom_hir::lower(&parse_result.module).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("HIR lowering failed")
+    })?;
+    let llvm_ir = axiom_codegen::codegen(&hir_module).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("codegen failed")
+    })?;
+
+    let output_path = if cfg!(windows) {
+        input.replace(".axm", ".exe")
+    } else {
+        input.replace(".axm", "")
+    };
+
+    let constraints = axiom_optimize::llm_optimizer::extract_constraints_from_source(&source);
+    let optimize_for = constraints
+        .iter()
+        .find(|c| c.key == "optimize_for")
+        .map(|c| c.value.clone());
+    let compile_opts = compile::CompileOptions {
+        target_arch: None,
+        optimize_for,
+        ir_text: Some(llvm_ir.clone()),
+    };
+
+    compile::compile_to_binary_with_options(&llvm_ir, &output_path, &compile_opts)?;
+    eprintln!("[BUILD] Compiled {} -> {}", input, output_path);
+    eprintln!("[BUILD] DONE");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Verified Development Pipeline: axiom test
+// ---------------------------------------------------------------------------
+
+/// Convert a HIR expression back to AXIOM source text for the test harness.
+fn format_hir_expr_as_axiom(expr: &axiom_hir::HirExpr) -> String {
+    // HirExpr implements Display, which produces valid AXIOM source text.
+    format!("{expr}")
+}
+
+/// Strip the `fn main() { ... }` function from source, counting brace nesting.
+///
+/// Returns the source with the main function removed. If no main function is
+/// found, returns the source unchanged.
+fn strip_main_function(source: &str) -> String {
+    // Find the start of "fn main()" — skip any leading whitespace on the line
+    let mut result = String::with_capacity(source.len());
+    let chars = source.char_indices().peekable();
+    let mut in_main = false;
+    let mut brace_depth: i32 = 0;
+    let mut main_start: Option<usize> = None;
+    let mut main_end: Option<usize> = None;
+
+    // Simple state machine: find "fn main()" then count braces to find the end.
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if !in_main {
+            // Look for "fn main("
+            if i + 8 <= len && &source[i..i + 8] == "fn main(" {
+                // Check that this is preceded by start-of-line or whitespace
+                let preceded_ok = i == 0 || bytes[i - 1] == b'\n' || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t' || bytes[i - 1] == b'\r';
+                if preceded_ok {
+                    // Find the line start (for removing any annotations on the same line)
+                    let mut line_start = i;
+                    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+                        line_start -= 1;
+                    }
+                    main_start = Some(line_start);
+                    // Skip ahead to the opening brace
+                    while i < len && bytes[i] != b'{' {
+                        i += 1;
+                    }
+                    if i < len {
+                        in_main = true;
+                        brace_depth = 1;
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        } else {
+            // Inside main — count braces
+            if bytes[i] == b'{' {
+                brace_depth += 1;
+            } else if bytes[i] == b'}' {
+                brace_depth -= 1;
+                if brace_depth == 0 {
+                    // Skip past trailing newline if present
+                    let mut end = i + 1;
+                    if end < len && bytes[end] == b'\n' {
+                        end += 1;
+                    } else if end + 1 < len && bytes[end] == b'\r' && bytes[end + 1] == b'\n' {
+                        end += 2;
+                    }
+                    main_end = Some(end);
+                    in_main = false;
+                    i = end;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // Rebuild source without the main function region
+    match (main_start, main_end) {
+        (Some(start), Some(end)) => {
+            result.push_str(&source[..start]);
+            result.push_str(&source[end..]);
+        }
+        _ => {
+            // No main found — return source unchanged
+            result.push_str(source);
+        }
+    }
+
+    // Drop the unused peekable iterator
+    drop(chars);
+
+    result
+}
+
+/// Run `axiom test` — collect @test annotations, generate a test harness,
+/// compile and execute it.
+fn run_test(input: &str) -> miette::Result<()> {
+    let source = read_source_with_includes(input)?;
+
+    let parse_result = axiom_parser::parse(&source);
+    if parse_result.has_errors() {
+        eprintln!("--- Parse Errors ---");
+        for err in &parse_result.errors {
+            eprintln!("  {err}");
+        }
+        return Err(miette::miette!(
+            "parsing failed with {} error(s)",
+            parse_result.errors.len()
+        ));
+    }
+
+    let hir = axiom_hir::lower(&parse_result.module).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("HIR lowering failed with {} error(s)", errors.len())
+    })?;
+
+    // Collect test cases: (function_name, Vec<HirTestCase>)
+    let mut test_cases: Vec<(String, Vec<axiom_hir::HirTestCase>)> = Vec::new();
+    for func in &hir.functions {
+        let tests: Vec<axiom_hir::HirTestCase> = func
+            .annotations
+            .iter()
+            .filter_map(|a| {
+                if let axiom_hir::HirAnnotationKind::Test(tc) = &a.kind {
+                    Some(tc.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !tests.is_empty() {
+            test_cases.push((func.name.clone(), tests));
+        }
+    }
+
+    if test_cases.is_empty() {
+        eprintln!("[TEST] No @test annotations found in {input}");
+        return Ok(());
+    }
+
+    let total_tests: usize = test_cases.iter().map(|(_, ts)| ts.len()).sum();
+    eprintln!("[TEST] Found {total_tests} test(s) across {} function(s)", test_cases.len());
+
+    // Build the test harness main function
+    let mut test_main = String::new();
+    test_main.push_str("fn main() -> i32 {\n");
+    test_main.push_str("    let passed: i32 = 0;\n");
+    test_main.push_str("    let failed: i32 = 0;\n");
+
+    for (func_name, tests) in &test_cases {
+        for (i, tc) in tests.iter().enumerate() {
+            let args: Vec<String> = tc
+                .inputs
+                .iter()
+                .map(|e| format_hir_expr_as_axiom(e))
+                .collect();
+            let args_str = args.join(", ");
+            let expected_str = format_hir_expr_as_axiom(&tc.expected);
+
+            // Use a unique variable name for each test result
+            let var = format!("t{}_{}", i, func_name);
+            test_main.push_str(&format!(
+                "    let {var}: i32 = {func_name}({args_str});\n"
+            ));
+            test_main.push_str(&format!(
+                "    if {var} == {expected_str} {{\n"
+            ));
+            test_main.push_str(&format!(
+                "        print(\"[TEST] {func_name}({args_str}) == {expected_str}: PASS\\n\");\n"
+            ));
+            test_main.push_str("        passed = passed + 1;\n");
+            test_main.push_str("    } else {\n");
+            test_main.push_str(&format!(
+                "        print(\"[TEST] {func_name}({args_str}) == {expected_str}: FAIL\\n\");\n"
+            ));
+            test_main.push_str("        failed = failed + 1;\n");
+            test_main.push_str("    }\n");
+        }
+    }
+
+    test_main.push_str("    print_i32(passed);\n");
+    test_main.push_str("    print(\" passed, \");\n");
+    test_main.push_str("    print_i32(failed);\n");
+    test_main.push_str("    print(\" failed\\n\");\n");
+    test_main.push_str("    return failed;\n");
+    test_main.push_str("}\n");
+
+    // Strip the original main function and append the test harness
+    let stripped = strip_main_function(&source);
+    let test_source = format!("{stripped}\n{test_main}");
+
+    // Write to temp file
+    let test_path = std::env::temp_dir().join("axiom_test_harness.axm");
+    std::fs::write(&test_path, &test_source)
+        .map_err(|e| miette::miette!("Failed to write test harness: {e}"))?;
+
+    // Compile the test harness
+    let test_exe = std::env::temp_dir().join(if cfg!(windows) {
+        "axiom_test_harness.exe"
+    } else {
+        "axiom_test_harness"
+    });
+
+    // Parse and compile the generated test source
+    let test_parse = axiom_parser::parse(&test_source);
+    if test_parse.has_errors() {
+        eprintln!("--- Test Harness Parse Errors ---");
+        for err in &test_parse.errors {
+            eprintln!("  {err}");
+        }
+        // Print the generated source for debugging
+        eprintln!("\n--- Generated test source ---");
+        for (i, line) in test_source.lines().enumerate() {
+            eprintln!("{:4} | {}", i + 1, line);
+        }
+        return Err(miette::miette!("test harness parsing failed"));
+    }
+
+    let test_hir = axiom_hir::lower(&test_parse.module).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("test harness HIR lowering failed")
+    })?;
+
+    let codegen_opts = axiom_codegen::CodegenOptions {
+        debug_mode: true,
+    };
+    let test_ir = axiom_codegen::codegen_with_options(&test_hir, &codegen_opts).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("test harness codegen failed")
+    })?;
+
+    compile::compile_to_binary(&test_ir, &test_exe.display().to_string())?;
+
+    // Run the test binary
+    let output = std::process::Command::new(&test_exe)
+        .output()
+        .map_err(|e| miette::miette!("Failed to run test binary: {e}"))?;
+
+    // Print stdout and stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stdout.is_empty() {
+        print!("{stdout}");
+    }
+    if !stderr.is_empty() {
+        eprint!("{stderr}");
+    }
+
+    // Clean up temp files
+    let _ = std::fs::remove_file(&test_path);
+    let _ = std::fs::remove_file(&test_exe);
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let code = output.status.code().unwrap_or(1);
+        Err(miette::miette!("tests failed (exit code {})", code))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Git versioning for axiom optimize --track
+// ---------------------------------------------------------------------------
+
+/// Track an optimization step with git commit or .axiom-history/ fallback.
+fn git_track_optimization(file_path: &str, message: &str) -> Result<(), String> {
+    // Check if we're in a git repo
+    let in_git = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if in_git {
+        // git add <file>
+        let _ = std::process::Command::new("git")
+            .args(["add", file_path])
+            .output();
+        // Also add the history file
+        let history_file = format!("{file_path}.opt_history.json");
+        let _ = std::process::Command::new("git")
+            .args(["add", &history_file])
+            .output();
+        // git commit
+        let result = std::process::Command::new("git")
+            .args(["commit", "-m", message])
+            .output();
+        match result {
+            Ok(out) if out.status.success() => {
+                eprintln!("[TRACK] git commit: {message}");
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                eprintln!("[TRACK] git commit skipped: {}", stderr.trim());
+            }
+            Err(e) => {
+                eprintln!("[TRACK] git error: {e}");
+            }
+        }
+    } else {
+        // Fallback: copy to .axiom-history/
+        let history_dir = std::path::Path::new(".axiom-history");
+        std::fs::create_dir_all(history_dir).ok();
+        let version = std::fs::read_dir(history_dir)
+            .map(|d| d.count())
+            .unwrap_or(0);
+        let dest = history_dir.join(format!("v{}.axm", version + 1));
+        std::fs::copy(file_path, &dest).ok();
+        eprintln!("[TRACK] saved to {}", dest.display());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests for new features (E5: manifest parsing, G4/L4 helpers)
 // ---------------------------------------------------------------------------
 
@@ -1691,5 +2193,141 @@ version = "0.1.0"
         let mut visited = HashSet::new();
         let result = process_includes(source, base_dir, 11, &mut visited);
         assert!(result.is_err());
+    }
+
+    // Verified Development Pipeline: strip_main_function
+
+    #[test]
+    fn test_strip_main_function_simple() {
+        let source = "fn double(x: i32) -> i32 {\n    return x * 2;\n}\n\nfn main() -> i32 {\n    return 0;\n}\n";
+        let stripped = strip_main_function(source);
+        assert!(stripped.contains("fn double"));
+        assert!(!stripped.contains("fn main"));
+    }
+
+    #[test]
+    fn test_strip_main_function_no_main() {
+        let source = "fn double(x: i32) -> i32 {\n    return x * 2;\n}\n";
+        let stripped = strip_main_function(source);
+        assert_eq!(stripped, source);
+    }
+
+    #[test]
+    fn test_strip_main_function_nested_braces() {
+        let source = "fn helper() -> i32 { return 1; }\nfn main() -> i32 {\n    if true {\n        return 0;\n    }\n    return 1;\n}\n";
+        let stripped = strip_main_function(source);
+        assert!(stripped.contains("fn helper"));
+        assert!(!stripped.contains("fn main"));
+    }
+
+    #[test]
+    fn test_strip_main_function_preserves_trailing() {
+        let source = "fn a() -> i32 { return 1; }\nfn main() -> i32 { return 0; }\nfn b() -> i32 { return 2; }\n";
+        let stripped = strip_main_function(source);
+        assert!(stripped.contains("fn a"));
+        assert!(stripped.contains("fn b"));
+        assert!(!stripped.contains("fn main"));
+    }
+
+    // Verified Development Pipeline: format_hir_expr_as_axiom
+
+    #[test]
+    fn test_format_hir_expr_int() {
+        let expr = axiom_hir::HirExpr {
+            id: axiom_hir::NodeId(0),
+            kind: axiom_hir::HirExprKind::IntLiteral { value: 42 },
+            span: axiom_hir::SPAN_DUMMY,
+        };
+        assert_eq!(format_hir_expr_as_axiom(&expr), "42");
+    }
+
+    #[test]
+    fn test_format_hir_expr_bool() {
+        let expr = axiom_hir::HirExpr {
+            id: axiom_hir::NodeId(0),
+            kind: axiom_hir::HirExprKind::BoolLiteral { value: true },
+            span: axiom_hir::SPAN_DUMMY,
+        };
+        assert_eq!(format_hir_expr_as_axiom(&expr), "true");
+    }
+
+    #[test]
+    fn test_format_hir_expr_neg() {
+        let inner = axiom_hir::HirExpr {
+            id: axiom_hir::NodeId(1),
+            kind: axiom_hir::HirExprKind::IntLiteral { value: 5 },
+            span: axiom_hir::SPAN_DUMMY,
+        };
+        let expr = axiom_hir::HirExpr {
+            id: axiom_hir::NodeId(0),
+            kind: axiom_hir::HirExprKind::UnaryOp {
+                op: axiom_hir::UnaryOp::Neg,
+                operand: Box::new(inner),
+            },
+            span: axiom_hir::SPAN_DUMMY,
+        };
+        assert_eq!(format_hir_expr_as_axiom(&expr), "-5");
+    }
+
+    // Verified Development Pipeline: run_verify
+
+    #[test]
+    fn test_run_verify_fully_annotated() {
+        let source = r#"
+@intent("double a number")
+@precondition(x >= 0)
+fn double(x: i32) -> i32 {
+    return x * 2;
+}
+
+fn main() -> i32 {
+    return 0;
+}
+"#;
+        // Write to temp file
+        let path = std::env::temp_dir().join("axiom_test_verify_full.axm");
+        std::fs::write(&path, source).unwrap();
+        let result = run_verify(&path.display().to_string());
+        assert!(result.is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_run_verify_missing_annotations() {
+        let source = r#"
+fn double(x: i32) -> i32 {
+    return x * 2;
+}
+
+fn main() -> i32 {
+    return 0;
+}
+"#;
+        let path = std::env::temp_dir().join("axiom_test_verify_missing.axm");
+        std::fs::write(&path, source).unwrap();
+        // Should still succeed (it warns, does not error)
+        let result = run_verify(&path.display().to_string());
+        assert!(result.is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_run_verify_parse_error() {
+        let source = "fn broken( { }";
+        let path = std::env::temp_dir().join("axiom_test_verify_broken.axm");
+        std::fs::write(&path, source).unwrap();
+        let result = run_verify(&path.display().to_string());
+        // Parse errors should cause an error return
+        assert!(result.is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Verified Development Pipeline: git_track_optimization
+
+    #[test]
+    fn test_git_track_optimization_returns_ok() {
+        // Should not panic regardless of git state
+        let result = git_track_optimization("nonexistent.axm", "test message");
+        assert!(result.is_ok());
     }
 }

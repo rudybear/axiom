@@ -1,0 +1,16 @@
+@module test_demo;
+
+@intent("double a number")
+@precondition(x >= 0)
+@postcondition(result >= 0)
+@test { input: (5), expect: 10 }
+@test { input: (0), expect: 0 }
+@test { input: (100), expect: 200 }
+fn double(x: i32) -> i32 {
+    return x * 2;
+}
+
+fn main() -> i32 {
+    print_i32(double(21));
+    return 0;
+}

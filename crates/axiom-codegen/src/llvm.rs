@@ -847,6 +847,11 @@ fn codegen_inner(
             ctx.output,
             "declare i32 @gpu_create_textured_mesh(ptr, ptr, ptr, i32, i32)"
         );
+        // Create lit textured mesh (positions + UVs + vertex colors + texture_id)
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_create_lit_textured_mesh(ptr, ptr, ptr, ptr, i32, i32)"
+        );
     }
 
     // Emit Vec (dynamic array) runtime extern declarations.
@@ -1001,6 +1006,7 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@gpu_create_mesh_triangles")
         || ir.contains("@gpu_upload_texture")
         || ir.contains("@gpu_create_textured_mesh")
+        || ir.contains("@gpu_create_lit_textured_mesh")
         || ir.contains("@gpu_blit_rgba")
         // Vec builtins
         || ir.contains("@axiom_vec_new")
@@ -3837,6 +3843,7 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "gpu_create_mesh_triangles" => return emit_builtin_gpu_create_mesh_triangles(ctx, args),
             "gpu_upload_texture" => return emit_builtin_gpu_upload_texture(ctx, args),
             "gpu_create_textured_mesh" => return emit_builtin_gpu_create_textured_mesh(ctx, args),
+            "gpu_create_lit_textured_mesh" => return emit_builtin_gpu_create_lit_textured_mesh(ctx, args),
             "gpu_blit_rgba" => return emit_builtin_gpu_blit_rgba(ctx, args),
             // Option (sum type) builtins -- tagged union packed into i64
             "option_none" => return emit_builtin_option_none(ctx, args),
@@ -7011,6 +7018,34 @@ fn emit_builtin_gpu_create_textured_mesh(ctx: &mut CodegenContext, args: &[HirEx
     ctx.emit(&format!(
         "{result_reg} = call i32 @gpu_create_textured_mesh(ptr {}, ptr {}, ptr {}, i32 {}, i32 {})",
         handle_val.reg, pos_val.reg, uv_val.reg, count_val.reg, tex_val.reg
+    ));
+    LlvmValue { reg: result_reg, ty: "i32".to_string() }
+}
+
+/// Emit built-in `gpu_create_lit_textured_mesh(handle, positions, normals, uvs, num_verts, texture_id) -> i32`.
+fn emit_builtin_gpu_create_lit_textured_mesh(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 6 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_create_lit_textured_mesh() requires 6 arguments (handle, positions, normals, uvs, num_vertices, texture_id)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue { reg: "0".to_string(), ty: "i32".to_string() };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let pos_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let norm_val = emit_expr(ctx, &args[2], Some("ptr"));
+    let uv_val = emit_expr(ctx, &args[3], Some("ptr"));
+    let count_val = emit_expr(ctx, &args[4], Some("i32"));
+    let tex_val = emit_expr(ctx, &args[5], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_create_lit_textured_mesh(ptr {}, ptr {}, ptr {}, ptr {}, i32 {}, i32 {})",
+        handle_val.reg, pos_val.reg, norm_val.reg, uv_val.reg, count_val.reg, tex_val.reg
     ));
     LlvmValue { reg: result_reg, ty: "i32".to_string() }
 }
