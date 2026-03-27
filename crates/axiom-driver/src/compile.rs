@@ -174,7 +174,6 @@ fn write_runtime_c() -> miette::Result<PathBuf> {
         ("axiom_rt_threading.c", AXIOM_RT_THREADING_C),
         ("axiom_rt_strings.c", AXIOM_RT_STRINGS_C),
         ("axiom_rt_vec.c", AXIOM_RT_VEC_C),
-        ("axiom_rt_trace.c", AXIOM_RT_TRACE_C),
     ];
     for (name, content) in files {
         let path = rt_dir.join(name);
@@ -314,11 +313,6 @@ fn invoke_clang_core(
         cmd.arg("-ldbghelp");
     }
 
-    // Record mode: enable execution trace recording in C runtime.
-    if options.record_mode {
-        cmd.arg("-DAXIOM_RECORD_MODE");
-    }
-
     // Link the C runtime if needed.
     if let Some(rt) = runtime_c {
         cmd.arg(rt);
@@ -334,22 +328,13 @@ fn invoke_clang_core(
     // Scan IR for @axiom_link comments and add -l flags for each library.
     if let Some(ref ir_text) = options.ir_text {
         let mut link_dirs_added = std::collections::HashSet::new();
-        let mut links_renderer = false;
         for line in ir_text.lines() {
             if let Some(rest) = line.strip_prefix("; @axiom_link: ") {
                 let parts: Vec<&str> = rest.split_whitespace().collect();
                 if let Some(lib_name) = parts.first() {
                     cmd.arg(format!("-l{lib_name}"));
-                    if *lib_name == "axiom_renderer" {
-                        links_renderer = true;
-                    }
                 }
             }
-        }
-        // When linking axiom_renderer, exclude the C runtime's input stubs
-        // (they shadow the DLL's implementations which actually receive events).
-        if links_renderer {
-            cmd.arg("-DAXIOM_USE_WGPU_RENDERER");
         }
 
         // Auto-discover library search paths:
