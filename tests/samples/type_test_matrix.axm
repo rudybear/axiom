@@ -1,0 +1,20 @@
+@module type_test;
+fn main() -> i32 {
+    // ivec
+    let iv: ivec3 = ivec3(1, 2, 3);
+    print_i32(iv.x);
+
+    // fvec
+    let fv: fvec3 = fvec3(1.0, 2.0, 3.0);
+    let v: vec3 = fvec3_to_vec3(fv);
+    print_f64(v.x);
+
+    // mat4
+    let m: mat4 = mat4_identity();
+    let v4: vec4 = vec4(1.0, 2.0, 3.0, 1.0);
+    let result: vec4 = mat4_mul_vec4(m, v4);
+    print_f64(result.x);
+    print_f64(result.y);
+
+    return 0;
+}

@@ -1706,6 +1706,44 @@ fn emit_let(
         }
     };
 
+    // Special handling for matrix types: alloca + memset (aggregate, like arrays/structs).
+    if is_matrix_type(&llvm_type) {
+        let uid = ctx.next_reg;
+        ctx.next_reg += 1;
+        let alloca_name = format!("%{name}.{uid}");
+        let mat_align = vector_align(&llvm_type);
+        let mat_size = llvm_type_size(&llvm_type);
+        ctx.emit(&format!("{alloca_name} = alloca {llvm_type}, align {mat_align}"));
+
+        // Zero-initialize via memset.
+        ctx.needs_memset = true;
+        ctx.emit(&format!(
+            "call void @llvm.memset.p0.i64(ptr {alloca_name}, i8 0, i64 {mat_size}, i1 false)"
+        ));
+
+        // If there is an initializer, it returns a ptr to a temporary alloca.
+        // memcpy from that temporary into this variable's alloca.
+        if let Some(value) = value {
+            let val = emit_expr(ctx, value, Some(&llvm_type));
+            // The matrix builtins return LlvmValue with reg = ptr to alloca.
+            ctx.needs_memcpy = true;
+            ctx.emit(&format!(
+                "call void @llvm.memcpy.p0.p0.i64(ptr {alloca_name}, ptr {}, i64 {mat_size}, i1 false)",
+                val.reg
+            ));
+        }
+
+        ctx.variables.insert(
+            name.to_string(),
+            VarInfo {
+                alloca_name,
+                llvm_type,
+                array_info: None,
+            },
+        );
+        return;
+    }
+
     // Use unique suffix to avoid collisions when the same variable name
     // appears in multiple scopes (e.g., `sum` in nested blocks).
     let uid = ctx.next_reg;
@@ -1906,18 +1944,20 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
                     }
                 };
                 let vec_type = &var_info.llvm_type;
+                let elem_ty = vector_element_type(vec_type);
+                let vec_lanes = vector_lanes(vec_type);
 
-                // Reject out-of-bounds field assignment on vec2 (<2 x double>).
-                if vec_type == "<2 x double>" && idx > 1 {
+                // Reject out-of-bounds field assignment on 2-lane vectors.
+                if vec_lanes == 2 && idx > 1 {
                     ctx.errors.push(CodegenError::UnsupportedExpression {
-                        expr: format!("field '.{}' is not valid for vec2 (only .x, .y)", field),
+                        expr: format!("field '.{}' is not valid for 2-component vector (only .x, .y)", field),
                         context: "field assignment".to_string(),
                     });
                     return;
                 }
 
                 let align = vector_align(vec_type);
-                let rhs_val = emit_expr(ctx, value, Some("double"));
+                let rhs_val = emit_expr(ctx, value, Some(elem_ty));
                 let load_reg = ctx.fresh_reg();
                 ctx.emit(&format!(
                     "{load_reg} = load {vec_type}, ptr {}, align {align}",
@@ -1925,7 +1965,7 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
                 ));
                 let new_vec = ctx.fresh_reg();
                 ctx.emit(&format!(
-                    "{new_vec} = insertelement {vec_type} {load_reg}, double {}, i32 {idx}",
+                    "{new_vec} = insertelement {vec_type} {load_reg}, {elem_ty} {}, i32 {idx}",
                     rhs_val.reg
                 ));
                 ctx.emit(&format!(
@@ -2622,6 +2662,14 @@ fn emit_ident(ctx: &mut CodegenContext, name: &str) -> LlvmValue {
         };
     }
 
+    // For matrix variables, return a pointer (matrices are aggregates, passed by pointer).
+    if is_matrix_type(&var_info.llvm_type) {
+        return LlvmValue {
+            reg: var_info.alloca_name,
+            ty: var_info.llvm_type,
+        };
+    }
+
     let reg = ctx.fresh_reg();
     let align_suffix = match vector_align(&var_info.llvm_type) {
         0 => String::new(),
@@ -2943,7 +2991,9 @@ fn emit_field_access(
         // Vector field access: v.x → extractelement, v.zyx → shufflevector
         if is_vector_type(&var_info.llvm_type) {
             let vec_type = &var_info.llvm_type;
-            let max_idx: u32 = if vec_type == "<2 x double>" { 1 } else { 3 };
+            let elem_ty = vector_element_type(vec_type);
+            let lanes = vector_lanes(vec_type);
+            let max_idx: u32 = if lanes == 2 { 1 } else { 3 };
 
             // Single-component access: v.x, v.y, etc. → extractelement
             if field.len() == 1 {
@@ -2959,20 +3009,20 @@ fn emit_field_access(
                         });
                         return LlvmValue {
                             reg: "0.0".to_string(),
-                            ty: "double".to_string(),
+                            ty: elem_ty.to_string(),
                         };
                     }
                 };
 
-                // Reject out-of-bounds field access on vec2 (<2 x double>).
-                if vec_type == "<2 x double>" && idx > 1 {
+                // Reject out-of-bounds field access on 2-lane vectors.
+                if lanes == 2 && idx > 1 {
                     ctx.errors.push(CodegenError::UnsupportedExpression {
-                        expr: format!("field '.{}' is not valid for vec2 (only .x, .y)", field),
+                        expr: format!("field '.{}' is not valid for 2-component vector (only .x, .y)", field),
                         context: "field access".to_string(),
                     });
                     return LlvmValue {
                         reg: "0.0".to_string(),
-                        ty: "double".to_string(),
+                        ty: elem_ty.to_string(),
                     };
                 }
 
@@ -2988,7 +3038,7 @@ fn emit_field_access(
                 ));
                 return LlvmValue {
                     reg: result,
-                    ty: "double".to_string(),
+                    ty: elem_ty.to_string(),
                 };
             }
 
@@ -3001,13 +3051,13 @@ fn emit_field_access(
                             expr: format!(
                                 "swizzle '.{}' has out-of-bounds component for {}",
                                 field,
-                                if vec_type == "<2 x double>" { "vec2" } else { "vec3/vec4" }
+                                if lanes == 2 { "2-component vector" } else { "3/4-component vector" }
                             ),
                             context: "vector swizzle".to_string(),
                         });
                         return LlvmValue {
                             reg: "0.0".to_string(),
-                            ty: "double".to_string(),
+                            ty: elem_ty.to_string(),
                         };
                     }
                 }
@@ -3020,10 +3070,13 @@ fn emit_field_access(
                 ));
 
                 let swizzle_len = indices.len();
+                // Determine result types based on source vector element type
+                let result_ty_2 = format!("<2 x {elem_ty}>");
+                let result_ty_4 = format!("<4 x {elem_ty}>");
+                let zero_val = if elem_ty == "i32" { "0" } else { "0.0" };
 
                 match swizzle_len {
                     2 => {
-                        // Narrowing to vec2: <2 x double>
                         let mask = format!("<2 x i32> <i32 {}, i32 {}>", indices[0], indices[1]);
                         let result = ctx.fresh_reg();
                         ctx.emit(&format!(
@@ -3031,11 +3084,10 @@ fn emit_field_access(
                         ));
                         return LlvmValue {
                             reg: result,
-                            ty: "<2 x double>".to_string(),
+                            ty: result_ty_2,
                         };
                     }
                     3 => {
-                        // Swizzle to vec3: stored as <4 x double>, w lane zeroed.
                         let mask = format!(
                             "<4 x i32> <i32 {}, i32 {}, i32 {}, i32 undef>",
                             indices[0], indices[1], indices[2]
@@ -3044,18 +3096,17 @@ fn emit_field_access(
                         ctx.emit(&format!(
                             "{shuf_reg} = shufflevector {vec_type} {load_reg}, {vec_type} poison, {mask}"
                         ));
-                        // Zero the w lane for clean vec3.
+                        // Zero the w lane for clean 3-component vector.
                         let result = ctx.fresh_reg();
                         ctx.emit(&format!(
-                            "{result} = insertelement <4 x double> {shuf_reg}, double 0.0, i32 3"
+                            "{result} = insertelement {result_ty_4} {shuf_reg}, {elem_ty} {zero_val}, i32 3"
                         ));
                         return LlvmValue {
                             reg: result,
-                            ty: "<4 x double>".to_string(),
+                            ty: result_ty_4,
                         };
                     }
                     4 => {
-                        // Swizzle to vec4: <4 x double>
                         let mask = format!(
                             "<4 x i32> <i32 {}, i32 {}, i32 {}, i32 {}>",
                             indices[0], indices[1], indices[2], indices[3]
@@ -3066,7 +3117,7 @@ fn emit_field_access(
                         ));
                         return LlvmValue {
                             reg: result,
-                            ty: "<4 x double>".to_string(),
+                            ty: result_ty_4,
                         };
                     }
                     _ => unreachable!("parse_swizzle_indices guarantees 2..=4 length"),
@@ -3080,7 +3131,7 @@ fn emit_field_access(
             });
             return LlvmValue {
                 reg: "0.0".to_string(),
-                ty: "double".to_string(),
+                ty: elem_ty.to_string(),
             };
         }
 
@@ -3176,6 +3227,7 @@ fn emit_field_access(
 
         // If the result is a vector, handle component access (e.g., .x, .y, .z)
         if is_vector_type(&inner_val.ty) {
+            let nested_elem_ty = vector_element_type(&inner_val.ty);
             let idx = match field {
                 "x" | "r" => 0i32,
                 "y" | "g" => 1,
@@ -3188,7 +3240,7 @@ fn emit_field_access(
                     });
                     return LlvmValue {
                         reg: "0.0".to_string(),
-                        ty: "double".to_string(),
+                        ty: nested_elem_ty.to_string(),
                     };
                 }
             };
@@ -3199,7 +3251,7 @@ fn emit_field_access(
             ));
             return LlvmValue {
                 reg: result,
-                ty: "double".to_string(),
+                ty: nested_elem_ty.to_string(),
             };
         }
 
@@ -3234,25 +3286,30 @@ fn emit_binary_op(
     // scalar, broadcast the scalar to match the vector width.
     // Handles both float scalars and integer literals (e.g., `v * 2`).
     if is_vector_type(&lhs_val.ty) && !is_vector_type(&rhs_val.ty) {
-        // Convert integer scalar to double if needed.
-        if !is_float_type(&rhs_val.ty) {
+        let vec_elem = vector_element_type(&lhs_val.ty);
+        // Convert scalar to match vector element type if needed.
+        if is_float_vector_type(&lhs_val.ty) && !is_float_type(&rhs_val.ty) {
             if is_literal_reg(&rhs_val.reg) {
-                // Integer literal — reinterpret as double constant.
-                rhs_val.ty = "double".to_string();
+                rhs_val.ty = vec_elem.to_string();
             } else {
                 let conv_reg = ctx.fresh_reg();
                 ctx.emit(&format!(
-                    "{conv_reg} = sitofp {} {} to double",
+                    "{conv_reg} = sitofp {} {} to {vec_elem}",
                     rhs_val.ty, rhs_val.reg
                 ));
                 rhs_val.reg = conv_reg;
-                rhs_val.ty = "double".to_string();
+                rhs_val.ty = vec_elem.to_string();
+            }
+        } else if is_int_vector_type(&lhs_val.ty) {
+            // For integer vectors, just adopt the element type for literals.
+            if is_literal_reg(&rhs_val.reg) {
+                rhs_val.ty = vec_elem.to_string();
             }
         }
         let lanes = vector_lanes(&lhs_val.ty);
         let splat0 = ctx.fresh_reg();
         ctx.emit(&format!(
-            "{splat0} = insertelement {} poison, double {}, i32 0",
+            "{splat0} = insertelement {} poison, {vec_elem} {}, i32 0",
             lhs_val.ty, rhs_val.reg
         ));
         let splat = ctx.fresh_reg();
@@ -3263,25 +3320,29 @@ fn emit_binary_op(
         rhs_val.reg = splat;
         rhs_val.ty = lhs_val.ty.clone();
     } else if is_vector_type(&rhs_val.ty) && !is_vector_type(&lhs_val.ty) {
-        // Convert integer scalar to double if needed.
-        if !is_float_type(&lhs_val.ty) {
+        let vec_elem = vector_element_type(&rhs_val.ty);
+        // Convert scalar to match vector element type if needed.
+        if is_float_vector_type(&rhs_val.ty) && !is_float_type(&lhs_val.ty) {
             if is_literal_reg(&lhs_val.reg) {
-                // Integer literal — reinterpret as double constant.
-                lhs_val.ty = "double".to_string();
+                lhs_val.ty = vec_elem.to_string();
             } else {
                 let conv_reg = ctx.fresh_reg();
                 ctx.emit(&format!(
-                    "{conv_reg} = sitofp {} {} to double",
+                    "{conv_reg} = sitofp {} {} to {vec_elem}",
                     lhs_val.ty, lhs_val.reg
                 ));
                 lhs_val.reg = conv_reg;
-                lhs_val.ty = "double".to_string();
+                lhs_val.ty = vec_elem.to_string();
+            }
+        } else if is_int_vector_type(&rhs_val.ty) {
+            if is_literal_reg(&lhs_val.reg) {
+                lhs_val.ty = vec_elem.to_string();
             }
         }
         let lanes = vector_lanes(&rhs_val.ty);
         let splat0 = ctx.fresh_reg();
         ctx.emit(&format!(
-            "{splat0} = insertelement {} poison, double {}, i32 0",
+            "{splat0} = insertelement {} poison, {vec_elem} {}, i32 0",
             rhs_val.ty, lhs_val.reg
         ));
         let splat = ctx.fresh_reg();
@@ -3729,6 +3790,27 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "vec2" => return emit_builtin_vec_construct(ctx, args, 2),
             "vec3" => return emit_builtin_vec_construct(ctx, args, 3),
             "vec4" => return emit_builtin_vec_construct(ctx, args, 4),
+            // Integer vector constructors
+            "ivec2" => return emit_builtin_typed_vec_construct(ctx, args, 2, "i32", "<2 x i32>"),
+            "ivec3" => return emit_builtin_typed_vec_construct(ctx, args, 3, "i32", "<4 x i32>"),
+            "ivec4" => return emit_builtin_typed_vec_construct(ctx, args, 4, "i32", "<4 x i32>"),
+            // Float (f32) vector constructors
+            "fvec2" => return emit_builtin_typed_vec_construct(ctx, args, 2, "float", "<2 x float>"),
+            "fvec3" => return emit_builtin_typed_vec_construct(ctx, args, 3, "float", "<4 x float>"),
+            "fvec4" => return emit_builtin_typed_vec_construct(ctx, args, 4, "float", "<4 x float>"),
+            // Vector conversion builtins
+            "ivec3_to_vec3" => return emit_builtin_vec_cast(ctx, args, "sitofp", "<4 x i32>", "<4 x double>"),
+            "vec3_to_ivec3" => return emit_builtin_vec_cast(ctx, args, "fptosi", "<4 x double>", "<4 x i32>"),
+            "fvec3_to_vec3" => return emit_builtin_vec_cast(ctx, args, "fpext", "<4 x float>", "<4 x double>"),
+            "vec3_to_fvec3" => return emit_builtin_vec_cast(ctx, args, "fptrunc", "<4 x double>", "<4 x float>"),
+            "ivec2_to_vec2" => return emit_builtin_vec_cast(ctx, args, "sitofp", "<2 x i32>", "<2 x double>"),
+            "vec2_to_ivec2" => return emit_builtin_vec_cast(ctx, args, "fptosi", "<2 x double>", "<2 x i32>"),
+            "fvec2_to_vec2" => return emit_builtin_vec_cast(ctx, args, "fpext", "<2 x float>", "<2 x double>"),
+            "vec2_to_fvec2" => return emit_builtin_vec_cast(ctx, args, "fptrunc", "<2 x double>", "<2 x float>"),
+            "ivec4_to_vec4" => return emit_builtin_vec_cast(ctx, args, "sitofp", "<4 x i32>", "<4 x double>"),
+            "vec4_to_ivec4" => return emit_builtin_vec_cast(ctx, args, "fptosi", "<4 x double>", "<4 x i32>"),
+            "fvec4_to_vec4" => return emit_builtin_vec_cast(ctx, args, "fpext", "<4 x float>", "<4 x double>"),
+            "vec4_to_fvec4" => return emit_builtin_vec_cast(ctx, args, "fptrunc", "<4 x double>", "<4 x float>"),
             // Vector math builtins
             "dot" => return emit_builtin_dot(ctx, args),
             "cross" => return emit_builtin_cross(ctx, args),
@@ -3736,6 +3818,22 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "normalize" => return emit_builtin_normalize(ctx, args),
             "reflect" => return emit_builtin_reflect(ctx, args),
             "lerp" => return emit_builtin_lerp(ctx, args),
+            // Matrix builtins
+            "mat4_identity" => return emit_builtin_mat4_identity(ctx, args),
+            "mat3_identity" => return emit_builtin_mat3_identity(ctx, args),
+            "mat4_mul_vec4" => return emit_builtin_mat4_mul_vec4(ctx, args),
+            "mat3_mul_vec3" => return emit_builtin_mat3_mul_vec3(ctx, args),
+            "mat4_mul" => return emit_builtin_mat4_mul(ctx, args),
+            "mat4_row" => return emit_builtin_mat4_row(ctx, args),
+            "mat4_set_row" => return emit_builtin_mat4_set_row(ctx, args),
+            "mat4_transpose" => return emit_builtin_mat4_transpose(ctx, args),
+            "mat4_translate" => return emit_builtin_mat4_translate(ctx, args),
+            "mat4_rotate_x" => return emit_builtin_mat4_rotate_x(ctx, args),
+            "mat4_rotate_y" => return emit_builtin_mat4_rotate_y(ctx, args),
+            "mat4_rotate_z" => return emit_builtin_mat4_rotate_z(ctx, args),
+            "mat4_scale" => return emit_builtin_mat4_scale(ctx, args),
+            "mat4_perspective" => return emit_builtin_mat4_perspective(ctx, args),
+            "mat4_look_at" => return emit_builtin_mat4_look_at(ctx, args),
             // Slice builtins -- fat pointer { ptr, i64 }
             "slice_from" => return emit_builtin_slice_from(ctx, args),
             "slice_len" => return emit_builtin_slice_len(ctx, args),
@@ -7406,6 +7504,12 @@ fn llvm_type_size(ty: &str) -> u64 {
         "ptr" => 8,
         "<2 x double>" => 16,
         "<4 x double>" => 32,
+        "<2 x float>" => 8,
+        "<4 x float>" => 16,
+        "<2 x i32>" => 8,
+        "<4 x i32>" => 16,
+        "[3 x <4 x double>]" => 96,
+        "[4 x <4 x double>]" => 128,
         _ => 8, // conservative default
     }
 }
@@ -7417,6 +7521,13 @@ fn hir_type_to_llvm_param(ty: &HirType) -> Result<String, CodegenError> {
     if matches!(ty, HirType::Array { .. } | HirType::UserDefined(_)) {
         // Arrays and structs are passed by pointer (C ABI for aggregates).
         Ok("ptr".to_string())
+    } else if let HirType::Primitive(p) = ty {
+        if matches!(p, PrimitiveType::Mat3 | PrimitiveType::Mat4) {
+            // Matrices are aggregates — passed by pointer.
+            Ok("ptr".to_string())
+        } else {
+            hir_type_to_llvm(ty)
+        }
     } else {
         hir_type_to_llvm(ty)
     }
@@ -7492,17 +7603,55 @@ fn primitive_to_llvm(p: PrimitiveType) -> String {
         PrimitiveType::Vec2 => "<2 x double>".to_string(),
         PrimitiveType::Vec3 => "<4 x double>".to_string(),
         PrimitiveType::Vec4 => "<4 x double>".to_string(),
+        PrimitiveType::IVec2 => "<2 x i32>".to_string(),
+        PrimitiveType::IVec3 => "<4 x i32>".to_string(),
+        PrimitiveType::IVec4 => "<4 x i32>".to_string(),
+        PrimitiveType::FVec2 => "<2 x float>".to_string(),
+        PrimitiveType::FVec3 => "<4 x float>".to_string(),
+        PrimitiveType::FVec4 => "<4 x float>".to_string(),
+        PrimitiveType::Mat3 => "[3 x <4 x double>]".to_string(),
+        PrimitiveType::Mat4 => "[4 x <4 x double>]".to_string(),
     }
 }
 
 /// Check whether an LLVM type string represents a floating-point type.
 fn is_float_type(ty: &str) -> bool {
-    matches!(ty, "float" | "double" | "half" | "bfloat" | "<2 x double>" | "<4 x double>")
+    matches!(ty, "float" | "double" | "half" | "bfloat" | "<2 x double>" | "<4 x double>" | "<2 x float>" | "<4 x float>")
 }
 
-/// Check whether an LLVM type string represents a SIMD vector type (vec2/vec3/vec4).
+/// Check whether an LLVM type string represents a SIMD vector type (vec2/vec3/vec4/ivec/fvec).
 fn is_vector_type(ty: &str) -> bool {
-    matches!(ty, "<2 x double>" | "<4 x double>")
+    matches!(ty, "<2 x double>" | "<4 x double>" | "<2 x float>" | "<4 x float>" | "<2 x i32>" | "<4 x i32>")
+}
+
+/// Return the element type string for a given LLVM vector type.
+fn vector_element_type(ty: &str) -> &str {
+    match ty {
+        "<2 x double>" | "<4 x double>" => "double",
+        "<2 x float>" | "<4 x float>" => "float",
+        "<2 x i32>" | "<4 x i32>" => "i32",
+        _ => "double",
+    }
+}
+
+/// Check whether an LLVM type string represents a float vector type.
+fn is_float_vector_type(ty: &str) -> bool {
+    matches!(ty, "<2 x double>" | "<4 x double>" | "<2 x float>" | "<4 x float>")
+}
+
+/// Check whether an LLVM type string represents an integer vector type.
+fn is_int_vector_type(ty: &str) -> bool {
+    matches!(ty, "<2 x i32>" | "<4 x i32>")
+}
+
+/// Check whether an LLVM type string represents a matrix type (mat3/mat4).
+fn is_matrix_type(ty: &str) -> bool {
+    matches!(ty, "[3 x <4 x double>]" | "[4 x <4 x double>]")
+}
+
+/// Return the number of rows in a matrix LLVM type.
+fn matrix_rows(ty: &str) -> usize {
+    match ty { "[3 x <4 x double>]" => 3, "[4 x <4 x double>]" => 4, _ => 0 }
 }
 
 /// Return the number of lanes in an LLVM vector type.
@@ -7510,15 +7659,25 @@ fn vector_lanes(ty: &str) -> usize {
     match ty {
         "<2 x double>" => 2,
         "<4 x double>" => 4,
+        "<2 x float>" => 2,
+        "<4 x float>" => 4,
+        "<2 x i32>" => 2,
+        "<4 x i32>" => 4,
         _ => 0,
     }
 }
 
-/// Return the required alignment for a vector LLVM type, or 0 for non-vector types.
+/// Return the required alignment for a vector or matrix LLVM type, or 0 for non-vector types.
 fn vector_align(ty: &str) -> usize {
     match ty {
         "<2 x double>" => 16,
         "<4 x double>" => 32,
+        "<2 x float>" => 8,
+        "<4 x float>" => 16,
+        "<2 x i32>" => 8,
+        "<4 x i32>" => 16,
+        "[3 x <4 x double>]" => 32,
+        "[4 x <4 x double>]" => 32,
         _ => 0,
     }
 }
@@ -7878,6 +8037,1176 @@ fn emit_builtin_vec_construct(
     LlvmValue {
         reg: current,
         ty: llvm_type.to_string(),
+    }
+}
+
+/// Emit a typed vector constructor (ivec2/3/4, fvec2/3/4).
+fn emit_builtin_typed_vec_construct(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+    lanes: usize,
+    elem_type: &str,
+    llvm_type: &str,
+) -> LlvmValue {
+    let actual_lanes: usize = if llvm_type.starts_with("<4") { 4 } else { 2 };
+    if args.len() != lanes {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!(
+                "typed vector constructor requires {} arguments, got {}",
+                lanes,
+                args.len()
+            ),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: llvm_type.to_string(),
+        };
+    }
+
+    let zero = if elem_type == "i32" { "0" } else { "0.0" };
+    let mut current = "poison".to_string();
+    for i in 0..lanes {
+        let val = emit_expr(ctx, &args[i], Some(elem_type));
+        let result = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{result} = insertelement {llvm_type} {current}, {elem_type} {}, i32 {i}",
+            val.reg
+        ));
+        current = result;
+    }
+
+    // Zero padding for 3-component types (lanes 3 stored in 4-wide vector)
+    if lanes == 3 && actual_lanes == 4 {
+        let result = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{result} = insertelement {llvm_type} {current}, {elem_type} {zero}, i32 3"
+        ));
+        current = result;
+    }
+
+    LlvmValue {
+        reg: current,
+        ty: llvm_type.to_string(),
+    }
+}
+
+/// Emit a vector type cast (e.g., sitofp, fptosi, fpext, fptrunc on vector types).
+fn emit_builtin_vec_cast(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+    cast_op: &str,
+    from_ty: &str,
+    to_ty: &str,
+) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("vector cast requires 1 argument, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: to_ty.to_string(),
+        };
+    }
+    let val = emit_expr(ctx, &args[0], Some(from_ty));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = {cast_op} {from_ty} {} to {to_ty}",
+        val.reg
+    ));
+    LlvmValue {
+        reg: result,
+        ty: to_ty.to_string(),
+    }
+}
+
+/// Emit mat4_identity() -> [4 x <4 x double>] with 1.0 on diagonal.
+fn emit_builtin_mat4_identity(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    let _ = args;
+    let ty = "[4 x <4 x double>]";
+    let tmp = ctx.fresh_reg();
+    ctx.emit(&format!("{tmp} = alloca {ty}, align 32"));
+    ctx.needs_memset = true;
+    ctx.emit(&format!(
+        "call void @llvm.memset.p0.i64(ptr {tmp}, i8 0, i64 128, i1 false)"
+    ));
+    // Set diagonal: row[i][i] = 1.0
+    for i in 0..4 {
+        let row_ptr = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{row_ptr} = getelementptr inbounds {ty}, ptr {tmp}, i32 0, i32 {i}"
+        ));
+        let row = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{row} = load <4 x double>, ptr {row_ptr}, align 32"
+        ));
+        let new_row = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{new_row} = insertelement <4 x double> {row}, double 1.0, i32 {i}"
+        ));
+        ctx.emit(&format!(
+            "store <4 x double> {new_row}, ptr {row_ptr}, align 32"
+        ));
+    }
+    LlvmValue {
+        reg: tmp,
+        ty: ty.to_string(),
+    }
+}
+
+/// Emit mat3_identity() -> [3 x <4 x double>] with 1.0 on diagonal.
+fn emit_builtin_mat3_identity(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    let _ = args;
+    let ty = "[3 x <4 x double>]";
+    let tmp = ctx.fresh_reg();
+    ctx.emit(&format!("{tmp} = alloca {ty}, align 32"));
+    ctx.needs_memset = true;
+    ctx.emit(&format!(
+        "call void @llvm.memset.p0.i64(ptr {tmp}, i8 0, i64 96, i1 false)"
+    ));
+    for i in 0..3 {
+        let row_ptr = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{row_ptr} = getelementptr inbounds {ty}, ptr {tmp}, i32 0, i32 {i}"
+        ));
+        let row = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{row} = load <4 x double>, ptr {row_ptr}, align 32"
+        ));
+        let new_row = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{new_row} = insertelement <4 x double> {row}, double 1.0, i32 {i}"
+        ));
+        ctx.emit(&format!(
+            "store <4 x double> {new_row}, ptr {row_ptr}, align 32"
+        ));
+    }
+    LlvmValue {
+        reg: tmp,
+        ty: ty.to_string(),
+    }
+}
+
+/// Emit mat4_mul_vec4(m, v) -> vec4 (matrix-vector multiply).
+fn emit_builtin_mat4_mul_vec4(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_mul_vec4 requires 2 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+    let m = emit_expr(ctx, &args[0], None);
+    let v = emit_expr(ctx, &args[1], None);
+    let mat_ty = "[4 x <4 x double>]";
+    let vt = "<4 x double>";
+
+    // result[i] = dot(row[i], v) for i in 0..4
+    let mut components = Vec::new();
+    for i in 0..4 {
+        let row_ptr = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{row_ptr} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 {i}",
+            m.reg
+        ));
+        let row = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{row} = load {vt}, ptr {row_ptr}, align 32"
+        ));
+        let mul = ctx.fresh_reg();
+        ctx.emit(&format!("{mul} = fmul {vt} {row}, {}", v.reg));
+        // Horizontal sum of 4 components
+        let e0 = ctx.fresh_reg();
+        ctx.emit(&format!("{e0} = extractelement {vt} {mul}, i32 0"));
+        let e1 = ctx.fresh_reg();
+        ctx.emit(&format!("{e1} = extractelement {vt} {mul}, i32 1"));
+        let e2 = ctx.fresh_reg();
+        ctx.emit(&format!("{e2} = extractelement {vt} {mul}, i32 2"));
+        let e3 = ctx.fresh_reg();
+        ctx.emit(&format!("{e3} = extractelement {vt} {mul}, i32 3"));
+        let s01 = ctx.fresh_reg();
+        ctx.emit(&format!("{s01} = fadd double {e0}, {e1}"));
+        let s23 = ctx.fresh_reg();
+        ctx.emit(&format!("{s23} = fadd double {e2}, {e3}"));
+        let dot = ctx.fresh_reg();
+        ctx.emit(&format!("{dot} = fadd double {s01}, {s23}"));
+        components.push(dot);
+    }
+
+    // Build result vec4
+    let mut current = "poison".to_string();
+    for (i, comp) in components.iter().enumerate() {
+        let result = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{result} = insertelement {vt} {current}, double {comp}, i32 {i}"
+        ));
+        current = result;
+    }
+    LlvmValue {
+        reg: current,
+        ty: vt.to_string(),
+    }
+}
+
+/// Emit mat3_mul_vec3(m, v) -> vec3 (3x3 matrix-vector multiply).
+fn emit_builtin_mat3_mul_vec3(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat3_mul_vec3 requires 2 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+    let m = emit_expr(ctx, &args[0], None);
+    let v = emit_expr(ctx, &args[1], None);
+    let mat_ty = "[3 x <4 x double>]";
+    let vt = "<4 x double>";
+
+    let mut components = Vec::new();
+    for i in 0..3 {
+        let row_ptr = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{row_ptr} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 {i}",
+            m.reg
+        ));
+        let row = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{row} = load {vt}, ptr {row_ptr}, align 32"
+        ));
+        let mul = ctx.fresh_reg();
+        ctx.emit(&format!("{mul} = fmul {vt} {row}, {}", v.reg));
+        // Sum first 3 components (w is 0 for vec3)
+        let e0 = ctx.fresh_reg();
+        ctx.emit(&format!("{e0} = extractelement {vt} {mul}, i32 0"));
+        let e1 = ctx.fresh_reg();
+        ctx.emit(&format!("{e1} = extractelement {vt} {mul}, i32 1"));
+        let e2 = ctx.fresh_reg();
+        ctx.emit(&format!("{e2} = extractelement {vt} {mul}, i32 2"));
+        let s01 = ctx.fresh_reg();
+        ctx.emit(&format!("{s01} = fadd double {e0}, {e1}"));
+        let dot = ctx.fresh_reg();
+        ctx.emit(&format!("{dot} = fadd double {s01}, {e2}"));
+        components.push(dot);
+    }
+
+    // Build result vec3 (padded to 4 lanes, w=0)
+    let mut current = "poison".to_string();
+    for (i, comp) in components.iter().enumerate() {
+        let result = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{result} = insertelement {vt} {current}, double {comp}, i32 {i}"
+        ));
+        current = result;
+    }
+    // Zero the w lane
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = insertelement {vt} {current}, double 0.0, i32 3"
+    ));
+    LlvmValue {
+        reg: result,
+        ty: vt.to_string(),
+    }
+}
+
+/// Emit mat4_mul(a, b) -> mat4 (4x4 matrix multiply).
+fn emit_builtin_mat4_mul(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_mul requires 2 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "[4 x <4 x double>]".to_string(),
+        };
+    }
+    let a = emit_expr(ctx, &args[0], None);
+    let b = emit_expr(ctx, &args[1], None);
+    let mat_ty = "[4 x <4 x double>]";
+    let vt = "<4 x double>";
+
+    // Result alloca
+    let result_ptr = ctx.fresh_reg();
+    ctx.emit(&format!("{result_ptr} = alloca {mat_ty}, align 32"));
+    ctx.needs_memset = true;
+    ctx.emit(&format!(
+        "call void @llvm.memset.p0.i64(ptr {result_ptr}, i8 0, i64 128, i1 false)"
+    ));
+
+    // Load all rows of B
+    let mut b_rows = Vec::new();
+    for j in 0..4 {
+        let bp = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{bp} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 {j}",
+            b.reg
+        ));
+        let br = ctx.fresh_reg();
+        ctx.emit(&format!("{br} = load {vt}, ptr {bp}, align 32"));
+        b_rows.push(br);
+    }
+
+    // For each row i of the result: result[i] = a[i][0]*b[0] + a[i][1]*b[1] + a[i][2]*b[2] + a[i][3]*b[3]
+    for i in 0..4 {
+        let a_row_ptr = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{a_row_ptr} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 {i}",
+            a.reg
+        ));
+        let a_row = ctx.fresh_reg();
+        ctx.emit(&format!("{a_row} = load {vt}, ptr {a_row_ptr}, align 32"));
+
+        let mut accum = String::new();
+        for j in 0..4 {
+            // Extract a[i][j] and broadcast
+            let aij = ctx.fresh_reg();
+            ctx.emit(&format!("{aij} = extractelement {vt} {a_row}, i32 {j}"));
+            let splat0 = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{splat0} = insertelement {vt} poison, double {aij}, i32 0"
+            ));
+            let splat = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{splat} = shufflevector {vt} {splat0}, {vt} poison, <4 x i32> zeroinitializer"
+            ));
+            let prod = ctx.fresh_reg();
+            ctx.emit(&format!("{prod} = fmul {vt} {splat}, {}", b_rows[j]));
+            if accum.is_empty() {
+                accum = prod;
+            } else {
+                let sum = ctx.fresh_reg();
+                ctx.emit(&format!("{sum} = fadd {vt} {accum}, {prod}"));
+                accum = sum;
+            }
+        }
+
+        // Store result row
+        let res_row_ptr = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{res_row_ptr} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, i32 {i}"
+        ));
+        ctx.emit(&format!(
+            "store {vt} {accum}, ptr {res_row_ptr}, align 32"
+        ));
+    }
+
+    LlvmValue {
+        reg: result_ptr,
+        ty: mat_ty.to_string(),
+    }
+}
+
+/// Emit mat4_row(m, index) -> vec4.
+fn emit_builtin_mat4_row(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_row requires 2 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "<4 x double>".to_string(),
+        };
+    }
+    let m = emit_expr(ctx, &args[0], None);
+    let idx = emit_expr(ctx, &args[1], Some("i32"));
+    let mat_ty = "[4 x <4 x double>]";
+    let vt = "<4 x double>";
+
+    let row_ptr = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{row_ptr} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, {} {}",
+        m.reg, idx.ty, idx.reg
+    ));
+    let row = ctx.fresh_reg();
+    ctx.emit(&format!("{row} = load {vt}, ptr {row_ptr}, align 32"));
+    LlvmValue {
+        reg: row,
+        ty: vt.to_string(),
+    }
+}
+
+/// Emit mat4_set_row(m, index, row_vec) -> mat4 (returns new matrix with one row replaced).
+fn emit_builtin_mat4_set_row(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_set_row requires 3 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "[4 x <4 x double>]".to_string(),
+        };
+    }
+    let m = emit_expr(ctx, &args[0], None);
+    let idx = emit_expr(ctx, &args[1], Some("i32"));
+    let row_val = emit_expr(ctx, &args[2], None);
+    let mat_ty = "[4 x <4 x double>]";
+    let vt = "<4 x double>";
+
+    // Copy source matrix to new alloca
+    let result_ptr = ctx.fresh_reg();
+    ctx.emit(&format!("{result_ptr} = alloca {mat_ty}, align 32"));
+    ctx.needs_memcpy = true;
+    ctx.emit(&format!(
+        "call void @llvm.memcpy.p0.p0.i64(ptr {result_ptr}, ptr {}, i64 128, i1 false)",
+        m.reg
+    ));
+
+    // Overwrite the specified row
+    let row_ptr = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{row_ptr} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, {} {}",
+        idx.ty, idx.reg
+    ));
+    ctx.emit(&format!(
+        "store {vt} {}, ptr {row_ptr}, align 32",
+        row_val.reg
+    ));
+
+    LlvmValue {
+        reg: result_ptr,
+        ty: mat_ty.to_string(),
+    }
+}
+
+/// Emit mat4_transpose(m) -> mat4.
+fn emit_builtin_mat4_transpose(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_transpose requires 1 argument, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "[4 x <4 x double>]".to_string(),
+        };
+    }
+    let m = emit_expr(ctx, &args[0], None);
+    let mat_ty = "[4 x <4 x double>]";
+    let vt = "<4 x double>";
+
+    // Load all 4 rows
+    let mut rows = Vec::new();
+    for i in 0..4 {
+        let rp = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{rp} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 {i}",
+            m.reg
+        ));
+        let r = ctx.fresh_reg();
+        ctx.emit(&format!("{r} = load {vt}, ptr {rp}, align 32"));
+        rows.push(r);
+    }
+
+    // Build transposed rows: result[i][j] = m[j][i]
+    let result_ptr = ctx.fresh_reg();
+    ctx.emit(&format!("{result_ptr} = alloca {mat_ty}, align 32"));
+
+    for i in 0..4 {
+        // Build column i from all rows
+        let mut col = "poison".to_string();
+        for j in 0..4 {
+            let elem = ctx.fresh_reg();
+            ctx.emit(&format!("{elem} = extractelement {vt} {}, i32 {i}", rows[j]));
+            let next = ctx.fresh_reg();
+            ctx.emit(&format!(
+                "{next} = insertelement {vt} {col}, double {elem}, i32 {j}"
+            ));
+            col = next;
+        }
+        let rp = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{rp} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, i32 {i}"
+        ));
+        ctx.emit(&format!("store {vt} {col}, ptr {rp}, align 32"));
+    }
+
+    LlvmValue {
+        reg: result_ptr,
+        ty: mat_ty.to_string(),
+    }
+}
+
+/// Emit mat4_translate(x, y, z) -> mat4 (translation matrix).
+fn emit_builtin_mat4_translate(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_translate requires 3 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "[4 x <4 x double>]".to_string(),
+        };
+    }
+    let tx = emit_expr(ctx, &args[0], Some("double"));
+    let ty_val = emit_expr(ctx, &args[1], Some("double"));
+    let tz = emit_expr(ctx, &args[2], Some("double"));
+    let mat_ty = "[4 x <4 x double>]";
+
+    // Start with identity
+    let ident = emit_builtin_mat4_identity(ctx, &[]);
+
+    // Set row[0][3] = tx, row[1][3] = ty, row[2][3] = tz
+    let translations = [(&tx, 0), (&ty_val, 1), (&tz, 2)];
+    for (val, row_idx) in &translations {
+        let rp = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{rp} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 {row_idx}",
+            ident.reg
+        ));
+        let row = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{row} = load <4 x double>, ptr {rp}, align 32"
+        ));
+        let new_row = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{new_row} = insertelement <4 x double> {row}, double {}, i32 3",
+            val.reg
+        ));
+        ctx.emit(&format!(
+            "store <4 x double> {new_row}, ptr {rp}, align 32"
+        ));
+    }
+
+    LlvmValue {
+        reg: ident.reg,
+        ty: mat_ty.to_string(),
+    }
+}
+
+/// Helper: Emit sin/cos intrinsic calls.
+fn emit_sin_cos(ctx: &mut CodegenContext, angle_reg: &str) -> (String, String) {
+    ctx.math_decls.insert("declare double @llvm.sin.f64(double)".to_string());
+    ctx.math_decls.insert("declare double @llvm.cos.f64(double)".to_string());
+    let sin_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{sin_reg} = call double @llvm.sin.f64(double {angle_reg})"
+    ));
+    let cos_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{cos_reg} = call double @llvm.cos.f64(double {angle_reg})"
+    ));
+    (sin_reg, cos_reg)
+}
+
+/// Emit mat4_rotate_x(angle) -> mat4.
+fn emit_builtin_mat4_rotate_x(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_rotate_x requires 1 argument, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "[4 x <4 x double>]".to_string(),
+        };
+    }
+    let angle = emit_expr(ctx, &args[0], Some("double"));
+    let (s, c) = emit_sin_cos(ctx, &angle.reg);
+    let neg_s = ctx.fresh_reg();
+    ctx.emit(&format!("{neg_s} = fneg double {s}"));
+
+    let mat_ty = "[4 x <4 x double>]";
+    let ident = emit_builtin_mat4_identity(ctx, &[]);
+
+    // Row 1: [0, c, -s, 0]
+    let rp1 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp1} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 1",
+        ident.reg
+    ));
+    let r1 = ctx.fresh_reg();
+    ctx.emit(&format!("{r1} = load <4 x double>, ptr {rp1}, align 32"));
+    let r1a = ctx.fresh_reg();
+    ctx.emit(&format!("{r1a} = insertelement <4 x double> {r1}, double {c}, i32 1"));
+    let r1b = ctx.fresh_reg();
+    ctx.emit(&format!("{r1b} = insertelement <4 x double> {r1a}, double {neg_s}, i32 2"));
+    ctx.emit(&format!("store <4 x double> {r1b}, ptr {rp1}, align 32"));
+
+    // Row 2: [0, s, c, 0]
+    let rp2 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp2} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 2",
+        ident.reg
+    ));
+    let r2 = ctx.fresh_reg();
+    ctx.emit(&format!("{r2} = load <4 x double>, ptr {rp2}, align 32"));
+    let r2a = ctx.fresh_reg();
+    ctx.emit(&format!("{r2a} = insertelement <4 x double> {r2}, double {s}, i32 1"));
+    let r2b = ctx.fresh_reg();
+    ctx.emit(&format!("{r2b} = insertelement <4 x double> {r2a}, double {c}, i32 2"));
+    ctx.emit(&format!("store <4 x double> {r2b}, ptr {rp2}, align 32"));
+
+    LlvmValue {
+        reg: ident.reg,
+        ty: mat_ty.to_string(),
+    }
+}
+
+/// Emit mat4_rotate_y(angle) -> mat4.
+fn emit_builtin_mat4_rotate_y(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_rotate_y requires 1 argument, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "[4 x <4 x double>]".to_string(),
+        };
+    }
+    let angle = emit_expr(ctx, &args[0], Some("double"));
+    let (s, c) = emit_sin_cos(ctx, &angle.reg);
+    let neg_s = ctx.fresh_reg();
+    ctx.emit(&format!("{neg_s} = fneg double {s}"));
+
+    let mat_ty = "[4 x <4 x double>]";
+    let ident = emit_builtin_mat4_identity(ctx, &[]);
+
+    // Row 0: [c, 0, s, 0]
+    let rp0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp0} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 0",
+        ident.reg
+    ));
+    let r0 = ctx.fresh_reg();
+    ctx.emit(&format!("{r0} = load <4 x double>, ptr {rp0}, align 32"));
+    let r0a = ctx.fresh_reg();
+    ctx.emit(&format!("{r0a} = insertelement <4 x double> {r0}, double {c}, i32 0"));
+    let r0b = ctx.fresh_reg();
+    ctx.emit(&format!("{r0b} = insertelement <4 x double> {r0a}, double {s}, i32 2"));
+    ctx.emit(&format!("store <4 x double> {r0b}, ptr {rp0}, align 32"));
+
+    // Row 2: [-s, 0, c, 0]
+    let rp2 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp2} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 2",
+        ident.reg
+    ));
+    let r2 = ctx.fresh_reg();
+    ctx.emit(&format!("{r2} = load <4 x double>, ptr {rp2}, align 32"));
+    let r2a = ctx.fresh_reg();
+    ctx.emit(&format!("{r2a} = insertelement <4 x double> {r2}, double {neg_s}, i32 0"));
+    let r2b = ctx.fresh_reg();
+    ctx.emit(&format!("{r2b} = insertelement <4 x double> {r2a}, double {c}, i32 2"));
+    ctx.emit(&format!("store <4 x double> {r2b}, ptr {rp2}, align 32"));
+
+    LlvmValue {
+        reg: ident.reg,
+        ty: mat_ty.to_string(),
+    }
+}
+
+/// Emit mat4_rotate_z(angle) -> mat4.
+fn emit_builtin_mat4_rotate_z(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_rotate_z requires 1 argument, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "[4 x <4 x double>]".to_string(),
+        };
+    }
+    let angle = emit_expr(ctx, &args[0], Some("double"));
+    let (s, c) = emit_sin_cos(ctx, &angle.reg);
+    let neg_s = ctx.fresh_reg();
+    ctx.emit(&format!("{neg_s} = fneg double {s}"));
+
+    let mat_ty = "[4 x <4 x double>]";
+    let ident = emit_builtin_mat4_identity(ctx, &[]);
+
+    // Row 0: [c, -s, 0, 0]
+    let rp0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp0} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 0",
+        ident.reg
+    ));
+    let r0 = ctx.fresh_reg();
+    ctx.emit(&format!("{r0} = load <4 x double>, ptr {rp0}, align 32"));
+    let r0a = ctx.fresh_reg();
+    ctx.emit(&format!("{r0a} = insertelement <4 x double> {r0}, double {c}, i32 0"));
+    let r0b = ctx.fresh_reg();
+    ctx.emit(&format!("{r0b} = insertelement <4 x double> {r0a}, double {neg_s}, i32 1"));
+    ctx.emit(&format!("store <4 x double> {r0b}, ptr {rp0}, align 32"));
+
+    // Row 1: [s, c, 0, 0]
+    let rp1 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp1} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 1",
+        ident.reg
+    ));
+    let r1 = ctx.fresh_reg();
+    ctx.emit(&format!("{r1} = load <4 x double>, ptr {rp1}, align 32"));
+    let r1a = ctx.fresh_reg();
+    ctx.emit(&format!("{r1a} = insertelement <4 x double> {r1}, double {s}, i32 0"));
+    let r1b = ctx.fresh_reg();
+    ctx.emit(&format!("{r1b} = insertelement <4 x double> {r1a}, double {c}, i32 1"));
+    ctx.emit(&format!("store <4 x double> {r1b}, ptr {rp1}, align 32"));
+
+    LlvmValue {
+        reg: ident.reg,
+        ty: mat_ty.to_string(),
+    }
+}
+
+/// Emit mat4_scale(sx, sy, sz) -> mat4.
+fn emit_builtin_mat4_scale(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_scale requires 3 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "[4 x <4 x double>]".to_string(),
+        };
+    }
+    let sx = emit_expr(ctx, &args[0], Some("double"));
+    let sy = emit_expr(ctx, &args[1], Some("double"));
+    let sz = emit_expr(ctx, &args[2], Some("double"));
+    let mat_ty = "[4 x <4 x double>]";
+
+    let ident = emit_builtin_mat4_identity(ctx, &[]);
+
+    // Set diagonal: m[0][0]=sx, m[1][1]=sy, m[2][2]=sz
+    let scales = [(&sx, 0, 0), (&sy, 1, 1), (&sz, 2, 2)];
+    for (val, row_idx, col_idx) in &scales {
+        let rp = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{rp} = getelementptr inbounds {mat_ty}, ptr {}, i32 0, i32 {row_idx}",
+            ident.reg
+        ));
+        let row = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{row} = load <4 x double>, ptr {rp}, align 32"
+        ));
+        let new_row = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{new_row} = insertelement <4 x double> {row}, double {}, i32 {col_idx}",
+            val.reg
+        ));
+        ctx.emit(&format!(
+            "store <4 x double> {new_row}, ptr {rp}, align 32"
+        ));
+    }
+
+    LlvmValue {
+        reg: ident.reg,
+        ty: mat_ty.to_string(),
+    }
+}
+
+/// Emit mat4_perspective(fov, aspect, near, far) -> mat4.
+fn emit_builtin_mat4_perspective(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 4 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_perspective requires 4 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "[4 x <4 x double>]".to_string(),
+        };
+    }
+    let fov = emit_expr(ctx, &args[0], Some("double"));
+    let aspect = emit_expr(ctx, &args[1], Some("double"));
+    let near = emit_expr(ctx, &args[2], Some("double"));
+    let far = emit_expr(ctx, &args[3], Some("double"));
+    let mat_ty = "[4 x <4 x double>]";
+
+    // tan_half_fov = tan(fov / 2.0)
+    // We compute: half_fov = fov * 0.5, then tan = sin/cos
+    let half_fov = ctx.fresh_reg();
+    ctx.emit(&format!("{half_fov} = fmul double {}, 0.5", fov.reg));
+    let (sin_hf, cos_hf) = emit_sin_cos(ctx, &half_fov);
+    let tan_hf = ctx.fresh_reg();
+    ctx.emit(&format!("{tan_hf} = fdiv double {sin_hf}, {cos_hf}"));
+
+    // m[0][0] = 1.0 / (aspect * tan_half_fov)
+    let at = ctx.fresh_reg();
+    ctx.emit(&format!("{at} = fmul double {}, {tan_hf}", aspect.reg));
+    let m00 = ctx.fresh_reg();
+    ctx.emit(&format!("{m00} = fdiv double 1.0, {at}"));
+
+    // m[1][1] = 1.0 / tan_half_fov
+    let m11 = ctx.fresh_reg();
+    ctx.emit(&format!("{m11} = fdiv double 1.0, {tan_hf}"));
+
+    // m[2][2] = -(far + near) / (far - near)
+    let fpn = ctx.fresh_reg();
+    ctx.emit(&format!("{fpn} = fadd double {}, {}", far.reg, near.reg));
+    let fmn = ctx.fresh_reg();
+    ctx.emit(&format!("{fmn} = fsub double {}, {}", far.reg, near.reg));
+    let neg_fpn = ctx.fresh_reg();
+    ctx.emit(&format!("{neg_fpn} = fneg double {fpn}"));
+    let m22 = ctx.fresh_reg();
+    ctx.emit(&format!("{m22} = fdiv double {neg_fpn}, {fmn}"));
+
+    // m[2][3] = -(2 * far * near) / (far - near)
+    let fn2 = ctx.fresh_reg();
+    ctx.emit(&format!("{fn2} = fmul double {}, {}", far.reg, near.reg));
+    let fn2x2 = ctx.fresh_reg();
+    ctx.emit(&format!("{fn2x2} = fmul double {fn2}, 2.0"));
+    let neg_fn2x2 = ctx.fresh_reg();
+    ctx.emit(&format!("{neg_fn2x2} = fneg double {fn2x2}"));
+    let m23 = ctx.fresh_reg();
+    ctx.emit(&format!("{m23} = fdiv double {neg_fn2x2}, {fmn}"));
+
+    // Build the matrix (start with zeroed)
+    let result_ptr = ctx.fresh_reg();
+    ctx.emit(&format!("{result_ptr} = alloca {mat_ty}, align 32"));
+    ctx.needs_memset = true;
+    ctx.emit(&format!(
+        "call void @llvm.memset.p0.i64(ptr {result_ptr}, i8 0, i64 128, i1 false)"
+    ));
+
+    // Row 0: [m00, 0, 0, 0]
+    let rp0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp0} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, i32 0"
+    ));
+    let r0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{r0} = insertelement <4 x double> zeroinitializer, double {m00}, i32 0"
+    ));
+    ctx.emit(&format!("store <4 x double> {r0}, ptr {rp0}, align 32"));
+
+    // Row 1: [0, m11, 0, 0]
+    let rp1 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp1} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, i32 1"
+    ));
+    let r1 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{r1} = insertelement <4 x double> zeroinitializer, double {m11}, i32 1"
+    ));
+    ctx.emit(&format!("store <4 x double> {r1}, ptr {rp1}, align 32"));
+
+    // Row 2: [0, 0, m22, m23]
+    let rp2 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp2} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, i32 2"
+    ));
+    let r2a = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{r2a} = insertelement <4 x double> zeroinitializer, double {m22}, i32 2"
+    ));
+    let r2b = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{r2b} = insertelement <4 x double> {r2a}, double {m23}, i32 3"
+    ));
+    ctx.emit(&format!("store <4 x double> {r2b}, ptr {rp2}, align 32"));
+
+    // Row 3: [0, 0, -1, 0]
+    let rp3 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp3} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, i32 3"
+    ));
+    let r3 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{r3} = insertelement <4 x double> zeroinitializer, double -1.0, i32 2"
+    ));
+    ctx.emit(&format!("store <4 x double> {r3}, ptr {rp3}, align 32"));
+
+    LlvmValue {
+        reg: result_ptr,
+        ty: mat_ty.to_string(),
+    }
+}
+
+/// Emit mat4_look_at(eye, center, up) -> mat4.
+fn emit_builtin_mat4_look_at(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("mat4_look_at requires 3 arguments, got {}", args.len()),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "zeroinitializer".to_string(),
+            ty: "[4 x <4 x double>]".to_string(),
+        };
+    }
+    let eye = emit_expr(ctx, &args[0], None);
+    let center = emit_expr(ctx, &args[1], None);
+    let up = emit_expr(ctx, &args[2], None);
+    let vt = "<4 x double>";
+    let mat_ty = "[4 x <4 x double>]";
+
+    // f = normalize(center - eye)
+    let f_raw = ctx.fresh_reg();
+    ctx.emit(&format!("{f_raw} = fsub {vt} {}, {}", center.reg, eye.reg));
+    // normalize: f / length(f)
+    let f_sq = ctx.fresh_reg();
+    ctx.emit(&format!("{f_sq} = fmul {vt} {f_raw}, {f_raw}"));
+    let f_e0 = ctx.fresh_reg();
+    ctx.emit(&format!("{f_e0} = extractelement {vt} {f_sq}, i32 0"));
+    let f_e1 = ctx.fresh_reg();
+    ctx.emit(&format!("{f_e1} = extractelement {vt} {f_sq}, i32 1"));
+    let f_e2 = ctx.fresh_reg();
+    ctx.emit(&format!("{f_e2} = extractelement {vt} {f_sq}, i32 2"));
+    let f_sum1 = ctx.fresh_reg();
+    ctx.emit(&format!("{f_sum1} = fadd double {f_e0}, {f_e1}"));
+    let f_sum2 = ctx.fresh_reg();
+    ctx.emit(&format!("{f_sum2} = fadd double {f_sum1}, {f_e2}"));
+    ctx.needs_sqrt_f64 = true;
+    let f_len = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{f_len} = call double @llvm.sqrt.f64(double {f_sum2})"
+    ));
+    // Broadcast f_len
+    let f_len_v0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{f_len_v0} = insertelement {vt} poison, double {f_len}, i32 0"
+    ));
+    let f_len_v = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{f_len_v} = shufflevector {vt} {f_len_v0}, {vt} poison, <4 x i32> zeroinitializer"
+    ));
+    let f = ctx.fresh_reg();
+    ctx.emit(&format!("{f} = fdiv {vt} {f_raw}, {f_len_v}"));
+
+    // s = normalize(cross(f, up))
+    // cross(a, b) for vec3 stored in <4 x double>:
+    //   x = a.y*b.z - a.z*b.y
+    //   y = a.z*b.x - a.x*b.z
+    //   z = a.x*b.y - a.y*b.x
+    let f_x = ctx.fresh_reg();
+    ctx.emit(&format!("{f_x} = extractelement {vt} {f}, i32 0"));
+    let f_y = ctx.fresh_reg();
+    ctx.emit(&format!("{f_y} = extractelement {vt} {f}, i32 1"));
+    let f_z = ctx.fresh_reg();
+    ctx.emit(&format!("{f_z} = extractelement {vt} {f}, i32 2"));
+    let up_x = ctx.fresh_reg();
+    ctx.emit(&format!("{up_x} = extractelement {vt} {}, i32 0", up.reg));
+    let up_y = ctx.fresh_reg();
+    ctx.emit(&format!("{up_y} = extractelement {vt} {}, i32 1", up.reg));
+    let up_z = ctx.fresh_reg();
+    ctx.emit(&format!("{up_z} = extractelement {vt} {}, i32 2", up.reg));
+
+    // s_raw = cross(f, up)
+    let s_x1 = ctx.fresh_reg();
+    ctx.emit(&format!("{s_x1} = fmul double {f_y}, {up_z}"));
+    let s_x2 = ctx.fresh_reg();
+    ctx.emit(&format!("{s_x2} = fmul double {f_z}, {up_y}"));
+    let s_x = ctx.fresh_reg();
+    ctx.emit(&format!("{s_x} = fsub double {s_x1}, {s_x2}"));
+    let s_y1 = ctx.fresh_reg();
+    ctx.emit(&format!("{s_y1} = fmul double {f_z}, {up_x}"));
+    let s_y2 = ctx.fresh_reg();
+    ctx.emit(&format!("{s_y2} = fmul double {f_x}, {up_z}"));
+    let s_y = ctx.fresh_reg();
+    ctx.emit(&format!("{s_y} = fsub double {s_y1}, {s_y2}"));
+    let s_z1 = ctx.fresh_reg();
+    ctx.emit(&format!("{s_z1} = fmul double {f_x}, {up_y}"));
+    let s_z2 = ctx.fresh_reg();
+    ctx.emit(&format!("{s_z2} = fmul double {f_y}, {up_x}"));
+    let s_z = ctx.fresh_reg();
+    ctx.emit(&format!("{s_z} = fsub double {s_z1}, {s_z2}"));
+
+    // Build s_raw vec and normalize
+    let s_raw0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{s_raw0} = insertelement {vt} poison, double {s_x}, i32 0"
+    ));
+    let s_raw1 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{s_raw1} = insertelement {vt} {s_raw0}, double {s_y}, i32 1"
+    ));
+    let s_raw2 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{s_raw2} = insertelement {vt} {s_raw1}, double {s_z}, i32 2"
+    ));
+    let s_raw3 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{s_raw3} = insertelement {vt} {s_raw2}, double 0.0, i32 3"
+    ));
+    // normalize s_raw
+    let s_sq = ctx.fresh_reg();
+    ctx.emit(&format!("{s_sq} = fmul {vt} {s_raw3}, {s_raw3}"));
+    let se0 = ctx.fresh_reg();
+    ctx.emit(&format!("{se0} = extractelement {vt} {s_sq}, i32 0"));
+    let se1 = ctx.fresh_reg();
+    ctx.emit(&format!("{se1} = extractelement {vt} {s_sq}, i32 1"));
+    let se2 = ctx.fresh_reg();
+    ctx.emit(&format!("{se2} = extractelement {vt} {s_sq}, i32 2"));
+    let ss1 = ctx.fresh_reg();
+    ctx.emit(&format!("{ss1} = fadd double {se0}, {se1}"));
+    let ss2 = ctx.fresh_reg();
+    ctx.emit(&format!("{ss2} = fadd double {ss1}, {se2}"));
+    let s_len = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{s_len} = call double @llvm.sqrt.f64(double {ss2})"
+    ));
+    let s_len_v0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{s_len_v0} = insertelement {vt} poison, double {s_len}, i32 0"
+    ));
+    let s_len_v = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{s_len_v} = shufflevector {vt} {s_len_v0}, {vt} poison, <4 x i32> zeroinitializer"
+    ));
+    let s = ctx.fresh_reg();
+    ctx.emit(&format!("{s} = fdiv {vt} {s_raw3}, {s_len_v}"));
+
+    // u = cross(s, f)
+    let sx = ctx.fresh_reg();
+    ctx.emit(&format!("{sx} = extractelement {vt} {s}, i32 0"));
+    let sy = ctx.fresh_reg();
+    ctx.emit(&format!("{sy} = extractelement {vt} {s}, i32 1"));
+    let sz = ctx.fresh_reg();
+    ctx.emit(&format!("{sz} = extractelement {vt} {s}, i32 2"));
+    let u_x1 = ctx.fresh_reg();
+    ctx.emit(&format!("{u_x1} = fmul double {sy}, {f_z}"));
+    let u_x2 = ctx.fresh_reg();
+    ctx.emit(&format!("{u_x2} = fmul double {sz}, {f_y}"));
+    let u_x = ctx.fresh_reg();
+    ctx.emit(&format!("{u_x} = fsub double {u_x1}, {u_x2}"));
+    let u_y1 = ctx.fresh_reg();
+    ctx.emit(&format!("{u_y1} = fmul double {sz}, {f_x}"));
+    let u_y2 = ctx.fresh_reg();
+    ctx.emit(&format!("{u_y2} = fmul double {sx}, {f_z}"));
+    let u_y = ctx.fresh_reg();
+    ctx.emit(&format!("{u_y} = fsub double {u_y1}, {u_y2}"));
+    let u_z1 = ctx.fresh_reg();
+    ctx.emit(&format!("{u_z1} = fmul double {sx}, {f_y}"));
+    let u_z2 = ctx.fresh_reg();
+    ctx.emit(&format!("{u_z2} = fmul double {sy}, {f_x}"));
+    let u_z = ctx.fresh_reg();
+    ctx.emit(&format!("{u_z} = fsub double {u_z1}, {u_z2}"));
+
+    // dot(s, eye), dot(u, eye), dot(f, eye)
+    let eye_x = ctx.fresh_reg();
+    ctx.emit(&format!("{eye_x} = extractelement {vt} {}, i32 0", eye.reg));
+    let eye_y = ctx.fresh_reg();
+    ctx.emit(&format!("{eye_y} = extractelement {vt} {}, i32 1", eye.reg));
+    let eye_z = ctx.fresh_reg();
+    ctx.emit(&format!("{eye_z} = extractelement {vt} {}, i32 2", eye.reg));
+
+    // dot(s, eye)
+    let ds1 = ctx.fresh_reg();
+    ctx.emit(&format!("{ds1} = fmul double {sx}, {eye_x}"));
+    let ds2 = ctx.fresh_reg();
+    ctx.emit(&format!("{ds2} = fmul double {sy}, {eye_y}"));
+    let ds3 = ctx.fresh_reg();
+    ctx.emit(&format!("{ds3} = fmul double {sz}, {eye_z}"));
+    let ds12 = ctx.fresh_reg();
+    ctx.emit(&format!("{ds12} = fadd double {ds1}, {ds2}"));
+    let dot_s_eye = ctx.fresh_reg();
+    ctx.emit(&format!("{dot_s_eye} = fadd double {ds12}, {ds3}"));
+    let neg_dot_s = ctx.fresh_reg();
+    ctx.emit(&format!("{neg_dot_s} = fneg double {dot_s_eye}"));
+
+    // dot(u, eye)
+    let du1 = ctx.fresh_reg();
+    ctx.emit(&format!("{du1} = fmul double {u_x}, {eye_x}"));
+    let du2 = ctx.fresh_reg();
+    ctx.emit(&format!("{du2} = fmul double {u_y}, {eye_y}"));
+    let du3 = ctx.fresh_reg();
+    ctx.emit(&format!("{du3} = fmul double {u_z}, {eye_z}"));
+    let du12 = ctx.fresh_reg();
+    ctx.emit(&format!("{du12} = fadd double {du1}, {du2}"));
+    let dot_u_eye = ctx.fresh_reg();
+    ctx.emit(&format!("{dot_u_eye} = fadd double {du12}, {du3}"));
+    let neg_dot_u = ctx.fresh_reg();
+    ctx.emit(&format!("{neg_dot_u} = fneg double {dot_u_eye}"));
+
+    // dot(f, eye)
+    let df1 = ctx.fresh_reg();
+    ctx.emit(&format!("{df1} = fmul double {f_x}, {eye_x}"));
+    let df2 = ctx.fresh_reg();
+    ctx.emit(&format!("{df2} = fmul double {f_y}, {eye_y}"));
+    let df3 = ctx.fresh_reg();
+    ctx.emit(&format!("{df3} = fmul double {f_z}, {eye_z}"));
+    let df12 = ctx.fresh_reg();
+    ctx.emit(&format!("{df12} = fadd double {df1}, {df2}"));
+    let dot_f_eye = ctx.fresh_reg();
+    ctx.emit(&format!("{dot_f_eye} = fadd double {df12}, {df3}"));
+
+    // Build the look-at matrix
+    let result_ptr = ctx.fresh_reg();
+    ctx.emit(&format!("{result_ptr} = alloca {mat_ty}, align 32"));
+    ctx.needs_memset = true;
+    ctx.emit(&format!(
+        "call void @llvm.memset.p0.i64(ptr {result_ptr}, i8 0, i64 128, i1 false)"
+    ));
+
+    // Row 0: [s.x, s.y, s.z, -dot(s,eye)]
+    let rp0 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp0} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, i32 0"
+    ));
+    let r0a = ctx.fresh_reg();
+    ctx.emit(&format!("{r0a} = insertelement {vt} poison, double {sx}, i32 0"));
+    let r0b = ctx.fresh_reg();
+    ctx.emit(&format!("{r0b} = insertelement {vt} {r0a}, double {sy}, i32 1"));
+    let r0c = ctx.fresh_reg();
+    ctx.emit(&format!("{r0c} = insertelement {vt} {r0b}, double {sz}, i32 2"));
+    let r0d = ctx.fresh_reg();
+    ctx.emit(&format!("{r0d} = insertelement {vt} {r0c}, double {neg_dot_s}, i32 3"));
+    ctx.emit(&format!("store {vt} {r0d}, ptr {rp0}, align 32"));
+
+    // Row 1: [u.x, u.y, u.z, -dot(u,eye)]
+    let rp1 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp1} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, i32 1"
+    ));
+    let r1a = ctx.fresh_reg();
+    ctx.emit(&format!("{r1a} = insertelement {vt} poison, double {u_x}, i32 0"));
+    let r1b = ctx.fresh_reg();
+    ctx.emit(&format!("{r1b} = insertelement {vt} {r1a}, double {u_y}, i32 1"));
+    let r1c = ctx.fresh_reg();
+    ctx.emit(&format!("{r1c} = insertelement {vt} {r1b}, double {u_z}, i32 2"));
+    let r1d = ctx.fresh_reg();
+    ctx.emit(&format!("{r1d} = insertelement {vt} {r1c}, double {neg_dot_u}, i32 3"));
+    ctx.emit(&format!("store {vt} {r1d}, ptr {rp1}, align 32"));
+
+    // Row 2: [-f.x, -f.y, -f.z, dot(f,eye)]
+    let neg_f_x = ctx.fresh_reg();
+    ctx.emit(&format!("{neg_f_x} = fneg double {f_x}"));
+    let neg_f_y = ctx.fresh_reg();
+    ctx.emit(&format!("{neg_f_y} = fneg double {f_y}"));
+    let neg_f_z = ctx.fresh_reg();
+    ctx.emit(&format!("{neg_f_z} = fneg double {f_z}"));
+    let rp2 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp2} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, i32 2"
+    ));
+    let r2a = ctx.fresh_reg();
+    ctx.emit(&format!("{r2a} = insertelement {vt} poison, double {neg_f_x}, i32 0"));
+    let r2b = ctx.fresh_reg();
+    ctx.emit(&format!("{r2b} = insertelement {vt} {r2a}, double {neg_f_y}, i32 1"));
+    let r2c = ctx.fresh_reg();
+    ctx.emit(&format!("{r2c} = insertelement {vt} {r2b}, double {neg_f_z}, i32 2"));
+    let r2d = ctx.fresh_reg();
+    ctx.emit(&format!("{r2d} = insertelement {vt} {r2c}, double {dot_f_eye}, i32 3"));
+    ctx.emit(&format!("store {vt} {r2d}, ptr {rp2}, align 32"));
+
+    // Row 3: [0, 0, 0, 1]
+    let rp3 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{rp3} = getelementptr inbounds {mat_ty}, ptr {result_ptr}, i32 0, i32 3"
+    ));
+    let r3 = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{r3} = insertelement {vt} zeroinitializer, double 1.0, i32 3"
+    ));
+    ctx.emit(&format!("store {vt} {r3}, ptr {rp3}, align 32"));
+
+    LlvmValue {
+        reg: result_ptr,
+        ty: mat_ty.to_string(),
     }
 }
 

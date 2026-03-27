@@ -493,6 +493,22 @@ pub enum PrimitiveType {
     Vec3,
     /// 4-component f64 vector (SIMD).
     Vec4,
+    /// 2-component i32 vector (SIMD).
+    IVec2,
+    /// 3-component i32 vector (SIMD, padded to 4 lanes with w=0).
+    IVec3,
+    /// 4-component i32 vector (SIMD).
+    IVec4,
+    /// 2-component f32 vector (SIMD).
+    FVec2,
+    /// 3-component f32 vector (SIMD, padded to 4 lanes with w=0).
+    FVec3,
+    /// 4-component f32 vector (SIMD).
+    FVec4,
+    /// 3x4 matrix (3 rows of <4 x double>).
+    Mat3,
+    /// 4x4 matrix (4 rows of <4 x double>).
+    Mat4,
 }
 
 /// Tensor dimension expression, mirrors `ast::DimExpr`.

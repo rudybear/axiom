@@ -416,6 +416,14 @@ impl fmt::Display for PrimitiveType {
             Self::Vec2 => "vec2",
             Self::Vec3 => "vec3",
             Self::Vec4 => "vec4",
+            Self::IVec2 => "ivec2",
+            Self::IVec3 => "ivec3",
+            Self::IVec4 => "ivec4",
+            Self::FVec2 => "fvec2",
+            Self::FVec3 => "fvec3",
+            Self::FVec4 => "fvec4",
+            Self::Mat3 => "mat3",
+            Self::Mat4 => "mat4",
         };
         write!(f, "{s}")
     }

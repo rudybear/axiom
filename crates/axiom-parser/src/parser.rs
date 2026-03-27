@@ -1509,6 +1509,14 @@ impl<'src> Parser<'src> {
             TokenKind::Vec2 => { self.advance(); TypeExpr::Named("vec2".to_string()) }
             TokenKind::Vec3 => { self.advance(); TypeExpr::Named("vec3".to_string()) }
             TokenKind::Vec4 => { self.advance(); TypeExpr::Named("vec4".to_string()) }
+            TokenKind::IVec2 => { self.advance(); TypeExpr::Named("ivec2".to_string()) }
+            TokenKind::IVec3 => { self.advance(); TypeExpr::Named("ivec3".to_string()) }
+            TokenKind::IVec4 => { self.advance(); TypeExpr::Named("ivec4".to_string()) }
+            TokenKind::FVec2 => { self.advance(); TypeExpr::Named("fvec2".to_string()) }
+            TokenKind::FVec3 => { self.advance(); TypeExpr::Named("fvec3".to_string()) }
+            TokenKind::FVec4 => { self.advance(); TypeExpr::Named("fvec4".to_string()) }
+            TokenKind::Mat3 => { self.advance(); TypeExpr::Named("mat3".to_string()) }
+            TokenKind::Mat4 => { self.advance(); TypeExpr::Named("mat4".to_string()) }
 
             // Tensor type: tensor[T, dims...]
             TokenKind::Tensor => {
@@ -2110,6 +2118,33 @@ impl<'src> Parser<'src> {
                 self.advance();
                 Expr::Ident("vec4".to_string())
             }
+            // Integer/float vector constructors
+            TokenKind::IVec2 => {
+                self.advance();
+                Expr::Ident("ivec2".to_string())
+            }
+            TokenKind::IVec3 => {
+                self.advance();
+                Expr::Ident("ivec3".to_string())
+            }
+            TokenKind::IVec4 => {
+                self.advance();
+                Expr::Ident("ivec4".to_string())
+            }
+            TokenKind::FVec2 => {
+                self.advance();
+                Expr::Ident("fvec2".to_string())
+            }
+            TokenKind::FVec3 => {
+                self.advance();
+                Expr::Ident("fvec3".to_string())
+            }
+            TokenKind::FVec4 => {
+                self.advance();
+                Expr::Ident("fvec4".to_string())
+            }
+            // Matrix constructors are called as functions (mat4_identity etc.)
+            // but we need them to be parseable as identifiers for type expressions.
             TokenKind::Ident(ref name) if name == "array_zeros" => {
                 self.advance();
                 // Parse array_zeros[T, N]

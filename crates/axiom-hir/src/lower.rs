@@ -777,7 +777,8 @@ fn lower_dim_expr(dim: &ast::DimExpr) -> HirDimExpr {
 /// All known primitive type names.
 const PRIMITIVE_NAMES: &[&str] = &[
     "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "f16", "bf16", "f32",
-    "f64", "bool", "vec2", "vec3", "vec4",
+    "f64", "bool", "vec2", "vec3", "vec4", "ivec2", "ivec3", "ivec4", "fvec2", "fvec3", "fvec4",
+    "mat3", "mat4",
 ];
 
 /// Map a type name string to a [`PrimitiveType`] enum variant.
@@ -801,6 +802,14 @@ fn resolve_primitive_type(name: &str) -> Option<PrimitiveType> {
         "vec2" => Some(PrimitiveType::Vec2),
         "vec3" => Some(PrimitiveType::Vec3),
         "vec4" => Some(PrimitiveType::Vec4),
+        "ivec2" => Some(PrimitiveType::IVec2),
+        "ivec3" => Some(PrimitiveType::IVec3),
+        "ivec4" => Some(PrimitiveType::IVec4),
+        "fvec2" => Some(PrimitiveType::FVec2),
+        "fvec3" => Some(PrimitiveType::FVec3),
+        "fvec4" => Some(PrimitiveType::FVec4),
+        "mat3" => Some(PrimitiveType::Mat3),
+        "mat4" => Some(PrimitiveType::Mat4),
         _ => None,
     }
 }
