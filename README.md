@@ -6,7 +6,7 @@ A programming language designed as the canonical transfer format between AI agen
 
 > **This is NOT a language for humans to program in. This is a language for AI agents to communicate optimized computation through.**
 
-> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 138 commits. 35,802 LOC. 469 tests. 197 benchmarks. ALL 47 milestones COMPLETE.
+> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 165 commits. 35,358 LOC. 493 tests. 197 benchmarks. ALL 47 milestones COMPLETE.
 
 ## Why AXIOM Exists
 
@@ -147,13 +147,13 @@ AXIOM Source (.axm)
    LEXER (63 tests)         Tokens with spans
        |
        v
-   PARSER (50 tests)        Typed AST with annotations
+   PARSER (52 tests)        Typed AST with annotations
        |
        v
    HIR LOWERING (25 tests)  Validated annotations, type checking
        |
        v
-   LLVM IR GEN (128 tests)  Optimized IR text with:
+   LLVM IR GEN (150 tests)  Optimized IR text with:
        |                     - noalias, nsw, fast-math
        |                     - fastcc, branch hints
        |                     - allocator attributes
@@ -177,9 +177,11 @@ ptr[T]                         // Heap pointer
 readonly_ptr[T]                // Read-only pointer
 writeonly_ptr[T]               // Write-only pointer
 slice[T]                       // Fat pointer (ptr + length)
+vec2 vec3 vec4                 // SIMD f64 vectors (2/3/4 lanes, hardware-mapped)
 tensor[T, dims...]             // Tensor type (planned)
 (T1, T2, T3)                  // Tuple
 fn(T1, T2) -> R               // Function type
+struct Name { field: Type }    // With literal constructors: Name { x: 1, y: 2 }
 ```
 
 ### Annotations
@@ -261,16 +263,58 @@ lshr(a, n)     // Logical shift right
 rotl(a, n)     // Rotate left rotr(a, n)     // Rotate right
 ```
 
-### Math
+### Math (25 builtins)
 ```axiom
 abs(x)         // Integer absolute value
-abs_f64(x)     // Float absolute value
+abs_f64(x)     // Float absolute value      fabs(x)        // Float absolute value (alias)
 min(a, b)      // Integer min       max(a, b)      // Integer max
 min_f64(a, b)  // Float min         max_f64(a, b)  // Float max
 sqrt(x)        // Square root       pow(x, y)      // Power
+sin(x) cos(x) tan(x)              // Trigonometric
+asin(x) acos(x) atan(x) atan2(y,x) // Inverse trig
+floor(x) ceil(x) round(x)         // Rounding
+log(x) log2(x) exp(x) exp2(x)    // Logarithmic / exponential
 to_f64(x)      // i32 -> f64        to_f64_i64(x)  // i64 -> f64
-widen(x)       // Widen type         narrow(x)      // Narrow type
 truncate(x)    // Float -> integer truncation
+```
+
+### Vector Math (9 builtins)
+```axiom
+let v: vec3 = vec3(1.0, 2.0, 3.0);  // SIMD vector construction
+let d: f64 = dot(a, b);              // Dot product
+let c: vec3 = cross(a, b);           // Cross product
+let l: f64 = length(v);              // Vector length
+let n: vec3 = normalize(v);          // Unit vector
+let r: vec3 = reflect(i, n);        // Reflection
+let m: vec3 = lerp(a, b, t);        // Linear interpolation
+// GLSL-style swizzles:
+let xy: vec2 = v.xy;                // Extract components
+let rev: vec3 = v.zyx;              // Reorder components
+```
+
+### Type Conversions
+```axiom
+widen(x)          // Widen integer (e.g. i32 -> i64)
+narrow(x)         // Narrow integer (e.g. i64 -> i32)
+truncate(x)       // Float -> integer truncation
+f32_to_f64(x)     // f32 -> f64
+f64_to_f32(x)     // f64 -> f32
+```
+
+### Constants & Control Flow
+```axiom
+const PI: f64 = 3.14159265358979;    // Local constant (inlined)
+for i in range(0, 10, 2) { }        // range with optional step
+break;                                // Break out of loop
+continue;                             // Skip to next iteration
+if x > 0 { } else if x == 0 { } else { }  // else if chains
+```
+
+### Struct Constructors
+```axiom
+struct Point { x: f64, y: f64 }
+let p: Point = Point { x: 1.0, y: 2.0 };  // Struct literal constructor
+fn make_point(x: f64, y: f64) -> Point { } // Struct return from functions
 ```
 
 ### Concurrency
@@ -325,16 +369,16 @@ cpu_features()                // CPUID feature bitmask
 
 ### Input System
 ```axiom
-input_key_pressed(key_code)    // Check if key is currently pressed
-input_mouse_x()                // Mouse X position
-input_mouse_y()                // Mouse Y position
-input_mouse_button(button)     // Mouse button state
+is_key_down(key_code)          // Check if key is currently pressed
+get_mouse_x()                  // Mouse X position
+get_mouse_y()                  // Mouse Y position
+is_mouse_down(button)          // Mouse button state
 ```
 
 ### Audio
 ```axiom
-audio_play(path)               // Play WAV file
-audio_stop()                   // Stop playback
+play_beep(freq, duration)      // Play tone at frequency
+play_sound(path)               // Play sound file
 ```
 
 ### Function Pointers
@@ -344,23 +388,22 @@ let result: i32 = call_fn_ptr_i32(fp, arg);
 let result: f64 = call_fn_ptr_f64(fp, arg);
 ```
 
-### Renderer (Vulkan)
+### Renderer (Vulkan) -- 29 builtins
 ```axiom
-renderer_create(width, height, title)
-renderer_destroy(r)
-renderer_begin_frame(r)
-renderer_end_frame(r)
-renderer_should_close(r)
-renderer_clear(r, r, g, b)
-renderer_draw_triangles(r, verts, count)
-renderer_draw_points(r, data, count)
-renderer_get_time(r)
-shader_load(r, path)
-pipeline_create(r, vert_shader, frag_shader)
-renderer_bind_pipeline(r, pipeline)
-gpu_add_light(r, x, y, z, intensity)          // Multi-light support
-gpu_draw_instanced(r, verts, count, instances) // Instanced rendering
-gpu_screenshot(r, path)                        // Screenshot capture
+// Core renderer (12)
+renderer_create(width, height, title) renderer_destroy(r)
+renderer_begin_frame(r) renderer_end_frame(r) renderer_should_close(r)
+renderer_clear(r, r, g, b) renderer_draw_triangles(r, verts, count)
+renderer_draw_points(r, data, count) renderer_get_time(r)
+shader_load(r, path) pipeline_create(r, vert, frag) renderer_bind_pipeline(r, pipeline)
+
+// GPU / PBR / glTF (17)
+gpu_init(w, h, title) gpu_shutdown(r) gpu_begin_frame(r) gpu_end_frame(r)
+gpu_should_close(r) gpu_load_gltf(r, path) gpu_set_camera(r, ...)
+gpu_render(r) gpu_get_frame_time(r) gpu_get_gpu_name(r) gpu_screenshot(r, path)
+gpu_add_light(r, x, y, z, intensity) gpu_clear_lights(r)
+gpu_create_cube(r, ...) gpu_create_sphere(r, ...) gpu_set_mesh_transform(r, mesh, ...)
+gpu_draw_mesh(r, mesh)
 ```
 
 ### C Interop
@@ -436,12 +479,12 @@ axiom/
 │       └── ci.yml              # GitHub Actions CI pipeline
 ├── crates/
 │   ├── axiom-lexer/            # Tokenizer (63 tests)
-│   ├── axiom-parser/           # Recursive descent + Pratt (50 tests)
+│   ├── axiom-parser/           # Recursive descent + Pratt (52 tests)
 │   ├── axiom-hir/              # High-level IR + validation (25 tests)
-│   ├── axiom-codegen/          # LLVM IR generation (128 tests)
-│   ├── axiom-optimize/         # Optimization protocol + agent API (115 tests)
+│   ├── axiom-codegen/          # LLVM IR generation (150 tests)
+│   ├── axiom-optimize/         # Optimization protocol + agent API (119 tests)
 │   ├── axiom-mir/              # Mid-level IR (stub)
-│   └── axiom-driver/           # CLI + MCP server + compilation (57 tests)
+│   └── axiom-driver/           # CLI + MCP server + compilation (72 tests)
 │       └── runtime/
 │           └── axiom_rt.c      # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
 ├── spec/                       # Formal language specification
@@ -457,17 +500,20 @@ axiom/
 │   ├── memory/                 # 30 memory benchmarks
 │   ├── fib/                    # Recursive fibonacci (from drujensen/fib)
 │   └── leibniz/                # Leibniz Pi (from niklas-heer/speed-comparison)
-├── examples/                   # 27 example AXIOM programs
+├── examples/                   # 16 example AXIOM programs
 │   ├── sort/                   # Bubble, insertion, selection sort
 │   ├── nbody/                  # N-body gravitational simulation
 │   ├── numerical/              # Pi, root finding, integration
 │   ├── crypto/                 # Caesar cipher
 │   ├── matmul/                 # Matrix multiplication demos
 │   ├── ecs/                    # Entity-Component-System game demo
-│   ├── vulkan/                 # Vulkan triangle rendering
-│   ├── particle_galaxy/        # 10K particle galaxy (windowed renderer)
+│   ├── raytracer/              # Full raytracer (scalar + vec3 versions)
+│   ├── image_filter/           # Image processing
+│   ├── json_parser/            # JSON parser
+│   ├── pathfinder/             # Pathfinding algorithms
+│   ├── physics_sim/            # Physics simulation
+│   ├── compiler_demo/          # Compiler demo
 │   ├── game_loop/              # Frame allocator, zero per-frame allocs
-│   ├── killer_demo/            # 10K particles with real Vulkan + Lux shaders
 │   ├── self_opt/               # LLM optimization demos (primes, matmul)
 │   ├── multi_agent/            # Multi-agent handoff demo
 │   └── self_host/              # AXIOM lexer written in AXIOM
@@ -492,13 +538,13 @@ axiom/
 
 ## Stats
 
-- **35,802 lines of Rust** across 7 crates
-- **469 tests** (all passing)
+- **35,358 lines of Rust** across 7 crates
+- **493 tests** (all passing)
 - **197 benchmarks** (100% compile rate)
-- **138 git commits** across 11 development phases (all complete)
-- **113 builtin functions** (I/O, math, memory, concurrency, rendering, collections, input, audio, GPU)
+- **165 git commits** across 11 development phases (all complete)
+- **166 builtin functions** (I/O, math, vector math, memory, concurrency, rendering, GPU, collections, input, audio)
 - **12 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp
-- **27 example programs**, **24 sample programs**
+- **16 example programs**, **24 sample programs**
 - **5 formal specification documents**
 - **6 research documents** (optimization, memory, game engine, multithreading, Lux integration, language plan)
 - **47/47 milestones COMPLETE** across 8 tracks

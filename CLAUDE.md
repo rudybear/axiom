@@ -37,13 +37,13 @@ AXIOM Source (.axm)           <- AI agents read/write here
 AXIOM Lexer (63 tests)        <- Tokenizer with error recovery
        |
        v
-AXIOM Parser (50 tests)       <- Recursive descent + Pratt expressions
+AXIOM Parser (52 tests)       <- Recursive descent + Pratt expressions
        |
        v
 AXIOM HIR (25 tests)          <- Annotation validation, type checking
        |
        v
-LLVM IR Text Gen (140 tests)  <- Optimized IR with noalias, nsw, fast-math,
+LLVM IR Text Gen (150 tests)  <- Optimized IR with noalias, nsw, fast-math,
        |                          SIMD vec2/vec3/vec4 types,
        |                          fastcc, branch hints, allocator attributes,
        |                          fence release/acquire, readonly/writeonly,
@@ -54,12 +54,12 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 
 ## Technology Stack
 
-- **Compiler language**: Rust (35,802 lines, 7 crates)
+- **Compiler language**: Rust (35,358 lines, 7 crates)
 - **Backend**: LLVM IR text generation -> clang -O2 (no inkwell dependency)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`)
-- **Testing**: 481 tests (unit + integration + doc-tests + E2E)
+- **Testing**: 493 tests (unit + integration + doc-tests + E2E)
 - **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos)
 
 ## Current Feature Set
@@ -77,7 +77,42 @@ Tensors:       tensor[T, dims...]       // planned
 Tuples:        (T1, T2, T3)
 Functions:     fn(T1, T2) -> R
 Sum types:     type Name = V1(T) | V2(T)  // parsed, codegen via builtins (option/result)
-Structs:       struct Name { field: Type } // parsed, codegen planned
+Structs:       struct Name { field: Type } // with literal constructors: Name { x: 1, y: 2 }
+```
+
+### Control Flow
+```
+if / else if / else            // Conditional chains (else if fully supported)
+for i in range(start, end)     // Counted loop
+for i in range(start, end, step) // Counted loop with step
+while cond { }                 // While loop
+break;                         // Break out of loop
+continue;                      // Skip to next iteration
+return expr;                   // Return with value
+return;                        // Bare return in void functions
+```
+
+### Constants & Bindings
+```
+let x: i32 = 42;                        // Immutable binding
+let mut x: i32 = 0;                     // Mutable binding
+const PI: f64 = 3.14159265358979;       // Local constant (inlined at use sites)
+@lifetime(scope) let buf: ptr[i32] = heap_alloc(100, 4);  // Stack-promoted heap alloc
+```
+
+### Struct Features
+```
+struct Point { x: f64, y: f64 }
+let p: Point = Point { x: 1.0, y: 2.0 };   // Struct literal constructor
+fn make_point() -> Point { ... }              // Struct return from functions
+```
+
+### GLSL-Style Swizzles
+```
+let v: vec3 = vec3(1.0, 2.0, 3.0);
+let xy: vec2 = v.xy;                // Extract first 2 components
+let reversed: vec3 = v.zyx;         // Reorder components
+let broadcast: vec3 = v.xxx;        // Broadcast single component
 ```
 
 ### Annotations (all implemented)
@@ -102,14 +137,14 @@ Structs:       struct Name { field: Type } // parsed, codegen planned
 @optimization_log { ... }      // Optimization history
 ```
 
-### All Builtin Functions (137 total)
+### All Builtin Functions (166 total)
 
 #### I/O (4)
 ```
 print(str) print_i32(n) print_i64(n) print_f64(x)
 ```
 
-#### Math (26)
+#### Math (25)
 ```
 abs(x) abs_f64(x) fabs(x)
 min(a,b) max(a,b) min_f64(a,b) max_f64(a,b)
@@ -125,9 +160,10 @@ vec2(x,y) vec3(x,y,z) vec4(x,y,z,w)
 dot(a,b) cross(a,b) length(v) normalize(v) reflect(i,n) lerp(a,b,t)
 ```
 
-#### Conversions (3)
+#### Conversions (5)
 ```
 widen(narrow->wide) narrow(wide->narrow) truncate(float->int)
+f32_to_f64(x) f64_to_f32(x)
 ```
 
 #### Bitwise (9)
@@ -136,12 +172,19 @@ band(a,b) bor(a,b) bxor(a,b) bnot(a)
 shl(a,n) shr(a,n) lshr(a,n) rotl(a,n) rotr(a,n)
 ```
 
-#### Memory -- Heap (7)
+#### Memory -- Heap (10)
 ```
 heap_alloc(count, elem_size) heap_alloc_zeroed(count, elem_size)
 heap_free(ptr) heap_realloc(ptr, new_count, elem_size)
 ptr_read_i32(ptr, idx) ptr_read_i64(ptr, idx) ptr_read_f64(ptr, idx)
 ptr_write_i32(ptr, idx, val) ptr_write_i64(ptr, idx, val) ptr_write_f64(ptr, idx, val)
+```
+
+#### Memory -- Narrow Ptr (7)
+```
+ptr_read_f32(ptr, idx) ptr_read_i16(ptr, idx) ptr_read_u8(ptr, idx)
+ptr_write_u8(ptr, idx, val) ptr_write_i16(ptr, idx, val) ptr_write_f32(ptr, idx, val)
+ptr_offset(ptr, byte_offset)
 ```
 
 #### Memory -- Arena (4)
@@ -191,7 +234,7 @@ job_dispatch_after(func, data, total_items, dependency_handle)
 job_wait_handle(handle)
 ```
 
-#### Renderer / Vulkan FFI (15)
+#### Renderer / Vulkan FFI (12)
 ```
 renderer_create(w, h, title) renderer_destroy(r)
 renderer_begin_frame(r) renderer_end_frame(r) renderer_should_close(r)
@@ -199,19 +242,26 @@ renderer_clear(r, r, g, b) renderer_draw_triangles(r, verts, count)
 renderer_draw_points(r, data, count) renderer_get_time(r)
 shader_load(r, path) pipeline_create(r, vert, frag)
 renderer_bind_pipeline(r, pipeline)
-gpu_add_light(r, x, y, z, intensity)
-gpu_draw_instanced(r, verts, count, instances)
-gpu_screenshot(r, path)
+```
+
+#### GPU / PBR / glTF (17)
+```
+gpu_init(w, h, title) gpu_shutdown(r) gpu_begin_frame(r) gpu_end_frame(r)
+gpu_should_close(r) gpu_load_gltf(r, path) gpu_set_camera(r, ...) gpu_render(r)
+gpu_get_frame_time(r) gpu_get_gpu_name(r) gpu_screenshot(r, path)
+gpu_add_light(r, x, y, z, intensity) gpu_clear_lights(r)
+gpu_create_cube(r, ...) gpu_create_sphere(r, ...) gpu_set_mesh_transform(r, mesh, ...)
+gpu_draw_mesh(r, mesh)
 ```
 
 #### Input (4)
 ```
-input_key_pressed(key_code) input_mouse_x() input_mouse_y() input_mouse_button(button)
+is_key_down(key_code) get_mouse_x() get_mouse_y() is_mouse_down(button)
 ```
 
 #### Audio (2)
 ```
-audio_play(path) audio_stop()
+play_beep(freq, duration) play_sound(path)
 ```
 
 #### Option (5)
@@ -295,10 +345,10 @@ axiom/
 ├── Cargo.toml                      # Workspace root
 ├── crates/
 │   ├── axiom-lexer/                # Tokenizer (63 tests)
-│   ├── axiom-parser/               # Parser -> AST (50 tests)
+│   ├── axiom-parser/               # Parser -> AST (52 tests)
 │   ├── axiom-hir/                  # HIR + lowering (25 tests)
 │   ├── axiom-mir/                  # Mid-level IR (stub)
-│   ├── axiom-codegen/              # LLVM IR generation (140 tests)
+│   ├── axiom-codegen/              # LLVM IR generation (150 tests)
 │   ├── axiom-optimize/             # Optimization protocol + agent API (119 tests)
 │   └── axiom-driver/               # CLI + MCP server + compilation (72 tests)
 │       └── runtime/
@@ -316,17 +366,20 @@ axiom/
 │   ├── memory/                     # 30 memory benchmarks
 │   ├── fib/                        # From drujensen/fib (908 stars)
 │   └── leibniz/                    # From niklas-heer/speed-comparison
-├── examples/                       # 27 example programs
+├── examples/                       # 16 example programs
 │   ├── sort/                       # Bubble, insertion, selection sort
 │   ├── nbody/                      # N-body gravitational simulation
 │   ├── numerical/                  # Pi, roots, integration
 │   ├── matmul/                     # Matrix multiplication demos
 │   ├── crypto/                     # Caesar cipher
 │   ├── ecs/                        # Entity-Component-System game demo
-│   ├── vulkan/                     # Vulkan triangle rendering
-│   ├── particle_galaxy/            # 10K particle galaxy (windowed renderer)
+│   ├── raytracer/                  # Full raytracer (scalar + vec3 versions)
+│   ├── image_filter/               # Image processing
+│   ├── json_parser/                # JSON parser
+│   ├── pathfinder/                 # Pathfinding algorithms
+│   ├── physics_sim/                # Physics simulation
+│   ├── compiler_demo/              # Compiler demo
 │   ├── game_loop/                  # Frame allocator, zero per-frame allocs
-│   ├── killer_demo/                # 10K particles with real Vulkan + Lux shaders
 │   ├── self_opt/                   # LLM optimization demos (primes, matmul)
 │   ├── multi_agent/                # Multi-agent handoff demo
 │   └── self_host/                  # AXIOM lexer written in AXIOM
