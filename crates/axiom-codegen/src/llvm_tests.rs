@@ -1387,6 +1387,7 @@ fn test_extern_decl() {
         params: vec![param("x", HirType::Primitive(PrimitiveType::F64))],
         return_type: HirType::Primitive(PrimitiveType::F64),
         span: span(),
+        convention: "C".to_string(),
     };
 
     let m = module_with_externs(Some("test"), vec![], vec![ef]);
@@ -1407,6 +1408,7 @@ fn test_extern_call() {
         params: vec![],
         return_type: HirType::Primitive(PrimitiveType::I64),
         span: span(),
+        convention: "C".to_string(),
     };
 
     let main_func = func(

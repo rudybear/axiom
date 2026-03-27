@@ -251,6 +251,116 @@ fn read_source_with_includes(input: &str) -> miette::Result<String> {
     process_includes(&source, base_dir, 0, &mut visited)
 }
 
+/// Resolve `import` declarations in a parsed module.
+///
+/// For each `Import` item in the module, look for a corresponding `.axm` file:
+///   1. `lib/<name>.axm` relative to the compiler binary
+///   2. `lib/<name>.axm` relative to the source file
+///   3. `<name>.axm` relative to the source file
+///
+/// Parse the imported file and merge its extern function declarations and struct
+/// definitions into the main module's AST (in-place). This allows user code to
+/// `import renderer;` and then call `axiom_renderer_create(...)` directly.
+fn resolve_imports(module: &mut axiom_parser::ast::Module, source_path: &str) {
+    use axiom_parser::ast::Item;
+    let source_dir = Path::new(source_path).parent().unwrap_or(Path::new("."));
+
+    // Collect the import paths first to avoid borrow issues.
+    let import_paths: Vec<Vec<String>> = module
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Import(ref decl) = item.node {
+                Some(decl.path.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for path_segments in import_paths {
+        let name = path_segments.join("/");
+        let file_name = format!("{name}.axm");
+
+        // Try multiple resolution paths.
+        let candidates: Vec<std::path::PathBuf> = {
+            let mut c = Vec::new();
+            // 1. lib/<name>.axm relative to compiler binary
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(exe_dir) = exe.parent() {
+                    c.push(exe_dir.join("lib").join(&file_name));
+                }
+            }
+            // 2. lib/<name>.axm relative to workspace root (cwd)
+            c.push(std::path::PathBuf::from("lib").join(&file_name));
+            // 3. lib/<name>.axm relative to the source file
+            c.push(source_dir.join("lib").join(&file_name));
+            // 4. <name>.axm relative to the source file
+            c.push(source_dir.join(&file_name));
+            c
+        };
+
+        let resolved = candidates.iter().find(|p| p.exists());
+        let resolved_path = match resolved {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!(
+                    "warning: could not resolve import '{}' (tried: {})",
+                    name,
+                    candidates
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                continue;
+            }
+        };
+
+        let import_source = match std::fs::read_to_string(&resolved_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to read import '{}' from {}: {}",
+                    name,
+                    resolved_path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        let import_result = axiom_parser::parse(&import_source);
+        if import_result.has_errors() {
+            eprintln!(
+                "warning: parse errors in import '{}' ({})",
+                name,
+                resolved_path.display()
+            );
+            for err in &import_result.errors {
+                eprintln!("  {err}");
+            }
+            continue;
+        }
+
+        // Merge imported items into the main module.
+        for item in import_result.module.items {
+            match &item.node {
+                Item::ExternFunction(_) | Item::Struct(_) => {
+                    module.items.push(item);
+                }
+                Item::Function(_) => {
+                    // Also merge functions from imported modules.
+                    module.items.push(item);
+                }
+                _ => {
+                    // Skip imports-of-imports and type aliases for now.
+                }
+            }
+        }
+    }
+}
+
 /// Generate markdown documentation from an AXIOM source file.
 ///
 /// Parses the source, extracts `@intent` and `@module` annotations, lists all
@@ -493,7 +603,7 @@ fn main() -> miette::Result<()> {
                     println!("{:#?}", result.module);
                 }
                 Some("hir") => {
-                    let result = axiom_parser::parse(&source);
+                    let mut result = axiom_parser::parse(&source);
                     if result.has_errors() {
                         eprintln!("--- Parse Errors ---");
                         for err in &result.errors {
@@ -501,6 +611,7 @@ fn main() -> miette::Result<()> {
                         }
                         return Err(miette::miette!("parsing failed with {} error(s)", result.errors.len()));
                     }
+                    resolve_imports(&mut result.module, &input);
                     match axiom_hir::lower(&result.module) {
                         Ok(hir_module) => {
                             println!("{hir_module}");
@@ -515,7 +626,7 @@ fn main() -> miette::Result<()> {
                     }
                 }
                 Some("llvm-ir") => {
-                    let result = axiom_parser::parse(&source);
+                    let mut result = axiom_parser::parse(&source);
                     if result.has_errors() {
                         eprintln!("--- Parse Errors ---");
                         for err in &result.errors {
@@ -523,6 +634,7 @@ fn main() -> miette::Result<()> {
                         }
                         return Err(miette::miette!("parsing failed with {} error(s)", result.errors.len()));
                     }
+                    resolve_imports(&mut result.module, &input);
                     let hir_module = axiom_hir::lower(&result.module).map_err(|errors| {
                         for err in &errors {
                             eprintln!("  {err}");
@@ -545,7 +657,7 @@ fn main() -> miette::Result<()> {
                 }
                 None => {
                     // Full compilation: .axm -> native binary
-                    let result = axiom_parser::parse(&source);
+                    let mut result = axiom_parser::parse(&source);
                     if result.has_errors() {
                         if use_json {
                             for err in &result.errors {
@@ -564,6 +676,7 @@ fn main() -> miette::Result<()> {
                             result.errors.len()
                         ));
                     }
+                    resolve_imports(&mut result.module, &input);
                     let hir_module =
                         axiom_hir::lower(&result.module).map_err(|errors| {
                             if use_json {
@@ -767,11 +880,12 @@ fn run_watch(input: &str, output: Option<&str>) -> miette::Result<()> {
 /// Try to compile a single .axm file to a binary. Returns Ok on success.
 fn try_compile(input: &str, output_path: &str) -> miette::Result<()> {
     let source = read_source_with_includes(input)?;
-    let result = axiom_parser::parse(&source);
+    let mut result = axiom_parser::parse(&source);
     if result.has_errors() {
         let msgs: Vec<String> = result.errors.iter().map(|e| format!("{e}")).collect();
         return Err(miette::miette!("parse errors:\n  {}", msgs.join("\n  ")));
     }
+    resolve_imports(&mut result.module, input);
     let hir_module = axiom_hir::lower(&result.module).map_err(|errors| {
         let msgs: Vec<String> = errors.iter().map(|e| format!("{e}")).collect();
         miette::miette!("HIR errors:\n  {}", msgs.join("\n  "))

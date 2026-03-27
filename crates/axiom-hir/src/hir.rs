@@ -85,7 +85,7 @@ pub struct HirModule {
     pub imports: Vec<HirImport>,
 }
 
-/// An external function declaration (no body, C calling convention).
+/// An external function declaration (no body).
 #[derive(Debug, Clone)]
 pub struct HirExternFunction {
     /// Unique node ID.
@@ -102,6 +102,9 @@ pub struct HirExternFunction {
     pub return_type: HirType,
     /// Span covering the entire extern function declaration.
     pub span: Span,
+    /// Calling convention (e.g., `"C"`, `"fastcall"`, `"stdcall"`, `"win64"`).
+    /// Defaults to `"C"`.
+    pub convention: String,
 }
 
 /// A function with validated annotations.
@@ -560,6 +563,8 @@ pub enum HirAnnotationKind {
     Postcondition(Box<HirExpr>),
     /// `@test { input: (...), expect: value }` — inline test case for a function.
     Test(HirTestCase),
+    /// `@link("library", "kind")` - link against a native library.
+    Link { library: String, kind: String },
     /// `@custom(name, args)` - extensibility.
     Custom(String, Vec<AnnotationValue>),
 }

@@ -277,6 +277,9 @@ impl LoweringContext {
 
         let return_type = self.lower_type(&ef.return_type, ef.name.span);
 
+        // Map calling convention: default to "C" if not specified.
+        let convention = ef.convention.clone().unwrap_or_else(|| "C".to_string());
+
         HirExternFunction {
             id,
             name: ef.name.node.clone(),
@@ -285,6 +288,7 @@ impl LoweringContext {
             params,
             return_type,
             span,
+            convention,
         }
     }
 
@@ -721,6 +725,12 @@ impl LoweringContext {
                 inputs: tc.inputs.iter().map(|e| self.lower_expr(e, ann.span)).collect(),
                 expected: self.lower_expr(&tc.expected, ann.span),
             }),
+            ast::Annotation::Link { library, kind } => {
+                HirAnnotationKind::Link {
+                    library: library.clone(),
+                    kind: kind.clone().unwrap_or_else(|| "dylib".to_string()),
+                }
+            }
             ast::Annotation::Custom(name, args) => {
                 HirAnnotationKind::Custom(name.clone(), args.clone())
             }
@@ -819,6 +829,7 @@ fn annotation_valid_targets(kind: &HirAnnotationKind) -> (&str, Vec<AnnotationTa
         HirAnnotationKind::Precondition(_) => ("precondition", vec![Function]),
         HirAnnotationKind::Postcondition(_) => ("postcondition", vec![Function]),
         HirAnnotationKind::Test(_) => ("test", vec![Function]),
+        HirAnnotationKind::Link { .. } => ("link", vec![Function]),
         HirAnnotationKind::Custom(_, _) => (
             "custom",
             vec![Function, Module, Param, StructDef, StructField, Block],

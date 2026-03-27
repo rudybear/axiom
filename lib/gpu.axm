@@ -1,0 +1,67 @@
+@module gpu;
+
+@link("axiom_renderer")
+extern "C" fn gpu_init(w: i32, h: i32, title: ptr[i8]) -> ptr[i64];
+
+@link("axiom_renderer")
+extern "C" fn gpu_shutdown(ctx: ptr[i64]);
+
+@link("axiom_renderer")
+extern "C" fn gpu_begin_frame(ctx: ptr[i64]) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_end_frame(ctx: ptr[i64]);
+
+@link("axiom_renderer")
+extern "C" fn gpu_should_close(ctx: ptr[i64]) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_load_gltf(ctx: ptr[i64], path: ptr[i8]) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_set_camera(ctx: ptr[i64], eye_x: f64, eye_y: f64, eye_z: f64, look_x: f64, look_y: f64, look_z: f64, fov: f64);
+
+@link("axiom_renderer")
+extern "C" fn gpu_render(ctx: ptr[i64]);
+
+@link("axiom_renderer")
+extern "C" fn gpu_get_frame_time(ctx: ptr[i64]) -> f64;
+
+@link("axiom_renderer")
+extern "C" fn gpu_get_gpu_name(ctx: ptr[i64]) -> ptr[i8];
+
+@link("axiom_renderer")
+extern "C" fn gpu_screenshot(ctx: ptr[i64], path: ptr[i8]) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_add_light(ctx: ptr[i64], x: f64, y: f64, z: f64, r: f64, g: f64, b: f64, intensity: f64) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_clear_lights(ctx: ptr[i64]);
+
+@link("axiom_renderer")
+extern "C" fn gpu_create_cube(ctx: ptr[i64]) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_create_sphere(ctx: ptr[i64], rings: i32, sectors: i32) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_set_mesh_transform(ctx: ptr[i64], mesh_id: i32, x: f64, y: f64, z: f64, sx: f64, sy: f64, sz: f64);
+
+@link("axiom_renderer")
+extern "C" fn gpu_draw_mesh(ctx: ptr[i64], mesh_id: i32);
+
+@link("axiom_renderer")
+extern "C" fn gpu_create_mesh_triangles(ctx: ptr[i64], positions: ptr[f32], colors: ptr[f32], count: i32) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_upload_texture(ctx: ptr[i64], pixels: ptr[u8], width: i32, height: i32) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_create_textured_mesh(ctx: ptr[i64], positions: ptr[f32], uvs: ptr[f32], count: i32, tex_id: i32) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_create_lit_textured_mesh(ctx: ptr[i64], positions: ptr[f32], uvs: ptr[f32], colors: ptr[f32], count: i32, tex_id: i32) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn gpu_blit_rgba(ctx: ptr[i64], pixels: ptr[u8], width: i32, height: i32);

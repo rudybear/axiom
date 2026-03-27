@@ -100,7 +100,11 @@ impl fmt::Display for HirExternFunction {
             writeln!(f, "{ann}")?;
         }
 
-        write!(f, "extern fn {}(", self.name)?;
+        if self.convention != "C" {
+            write!(f, "extern \"{}\" fn {}(", self.convention, self.name)?;
+        } else {
+            write!(f, "extern fn {}(", self.name)?;
+        }
         for (i, param) in self.params.iter().enumerate() {
             if i > 0 {
                 write!(f, ", ")?;
@@ -550,6 +554,9 @@ impl fmt::Display for HirAnnotation {
                     write!(f, "{input}")?;
                 }
                 write!(f, "), expect: {} }}", tc.expected)
+            }
+            HirAnnotationKind::Link { library, kind } => {
+                write!(f, "@link(library: \"{library}\", kind: \"{kind}\")")
             }
             HirAnnotationKind::Custom(name, args) => {
                 write!(f, "@{name}")?;

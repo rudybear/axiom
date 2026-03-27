@@ -1,13 +1,11 @@
 @module ffi_test;
-extern fn clock() -> i64;
+@intent("Test Rust-style FFI: calling convention + @link annotation");
 
-@export
-fn add(a: i32, b: i32) -> i32 {
-    return a + b;
-}
+@link("msvcrt")
+extern "C" fn _time64(t: ptr[i64]) -> i64;
+
+extern "C" fn puts(s: ptr[i8]) -> i32;
 
 fn main() -> i32 {
-    let t: i64 = clock();
-    print_i64(t);
     return 0;
 }

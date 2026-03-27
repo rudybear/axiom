@@ -1,0 +1,4 @@
+@module audio;
+
+extern "C" fn axiom_play_beep(freq: i32, duration: i32);
+extern "C" fn axiom_play_sound(path: ptr[i8]);

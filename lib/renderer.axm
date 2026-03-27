@@ -1,0 +1,37 @@
+@module renderer;
+
+@link("axiom_renderer")
+extern "C" fn axiom_renderer_create(w: i32, h: i32, title: ptr[i8]) -> ptr[i64];
+
+@link("axiom_renderer")
+extern "C" fn axiom_renderer_destroy(r: ptr[i64]);
+
+@link("axiom_renderer")
+extern "C" fn axiom_renderer_begin_frame(r: ptr[i64]) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn axiom_renderer_end_frame(r: ptr[i64]);
+
+@link("axiom_renderer")
+extern "C" fn axiom_renderer_should_close(r: ptr[i64]) -> i32;
+
+@link("axiom_renderer")
+extern "C" fn axiom_renderer_clear(r: ptr[i64], color: i32);
+
+@link("axiom_renderer")
+extern "C" fn axiom_renderer_draw_triangles(r: ptr[i64], positions: ptr[f64], colors: ptr[f64], count: i32);
+
+@link("axiom_renderer")
+extern "C" fn axiom_renderer_draw_points(r: ptr[i64], x_arr: ptr[f64], y_arr: ptr[f64], colors: ptr[i32], count: i32);
+
+@link("axiom_renderer")
+extern "C" fn axiom_renderer_get_time(r: ptr[i64]) -> f64;
+
+@link("axiom_renderer")
+extern "C" fn axiom_shader_load(r: ptr[i64], path: ptr[i8], kind: i32) -> ptr[i64];
+
+@link("axiom_renderer")
+extern "C" fn axiom_pipeline_create(r: ptr[i64], vert: ptr[i64], frag: ptr[i64]) -> ptr[i64];
+
+@link("axiom_renderer")
+extern "C" fn axiom_renderer_bind_pipeline(r: ptr[i64], pipeline: ptr[i64]);

@@ -121,25 +121,6 @@ fn find_compiler_name() -> Option<String> {
 /// The C runtime source, embedded at compile time.
 const AXIOM_RT_C: &str = include_str!("../runtime/axiom_rt.c");
 
-/// Search for the axiom_renderer DLL import library.
-/// Looks in: target/release/, next to the current executable, and current dir.
-fn find_renderer_lib() -> Option<PathBuf> {
-    let candidates = [
-        // Relative to workspace root (when running from D:/ailang)
-        PathBuf::from("target/release/axiom_renderer.dll.lib"),
-        PathBuf::from("target/debug/axiom_renderer.dll.lib"),
-    ];
-    // Also check next to the current exe
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join("axiom_renderer.dll.lib");
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-    candidates.into_iter().find(|p| p.exists())
-}
 
 /// Write the embedded C runtime to a temp file and return its path.
 fn write_runtime_c() -> miette::Result<PathBuf> {
@@ -277,29 +258,17 @@ fn invoke_clang_core(
         }
     }
 
-    // If the IR uses the wgpu renderer, try to link against the pre-built
-    // axiom_renderer.dll.lib and tell the C runtime to skip its stub renderer.
-    let mut use_wgpu = false;
+    // Scan IR for @axiom_link comments and add -l flags for each library.
     if let Some(ref ir_text) = options.ir_text {
-        if ir_text.contains("@axiom_renderer_create") || ir_text.contains("@gpu_init") || ir_text.contains("@gpu_blit_rgba") {
-            if let Some(lib_path) = find_renderer_lib() {
-                cmd.arg(lib_path.to_str().unwrap_or("axiom_renderer.dll.lib"));
-                cmd.arg("-DAXIOM_USE_WGPU_RENDERER");
-                use_wgpu = true;
-                #[cfg(target_os = "windows")]
-                {
-                    cmd.arg("-ladvapi32");
-                    cmd.arg("-ld3dcompiler");
-                    cmd.arg("-luserenv");
-                    cmd.arg("-lws2_32");
-                    cmd.arg("-lbcrypt");
-                    cmd.arg("-lntdll");
-                    cmd.arg("-lopengl32");
+        for line in ir_text.lines() {
+            if let Some(rest) = line.strip_prefix("; @axiom_link: ") {
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if let Some(lib_name) = parts.first() {
+                    cmd.arg(format!("-l{lib_name}"));
                 }
             }
         }
     }
-    let _ = use_wgpu; // suppress unused warning on non-Windows
 
     cmd.arg("-o")
         .arg(output);

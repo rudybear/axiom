@@ -728,6 +728,43 @@ impl<'src> Parser<'src> {
                     Annotation::Lifetime("scope".to_string())
                 }
             }
+            "link" => {
+                // @link("library_name") or @link("library_name", "kind")
+                if self.eat(&TokenKind::LParen) {
+                    let lib = if let TokenKind::StringLiteral(ref s) = self.peek() {
+                        let s = s.clone();
+                        self.advance();
+                        s
+                    } else {
+                        self.errors.push(ParseError::InvalidAnnotation {
+                            name: "link".to_string(),
+                            reason: "expected library name string".to_string(),
+                            span: span_to_source_span(self.current_span()),
+                        });
+                        String::new()
+                    };
+                    let kind = if self.eat(&TokenKind::Comma) {
+                        if let TokenKind::StringLiteral(ref s) = self.peek() {
+                            let s = s.clone();
+                            self.advance();
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    self.expect(&TokenKind::RParen, "')'");
+                    Annotation::Link { library: lib, kind }
+                } else {
+                    self.errors.push(ParseError::InvalidAnnotation {
+                        name: "link".to_string(),
+                        reason: "expected '(' after @link".to_string(),
+                        span: span_to_source_span(self.current_span()),
+                    });
+                    Annotation::Link { library: String::new(), kind: None }
+                }
+            }
             "strict" => Annotation::Strict,
             "precondition" => {
                 // @precondition(expr)
@@ -1204,7 +1241,17 @@ impl<'src> Parser<'src> {
         let start_span = self.current_span();
         self.advance(); // consume `extern`
 
-        // Expect `fn` keyword after `extern`
+        // Check for optional calling convention string literal before `fn`
+        // e.g., `extern "C" fn ...` or `extern "fastcall" fn ...`
+        let convention = if let TokenKind::StringLiteral(ref s) = self.peek() {
+            let s = s.clone();
+            self.advance();
+            Some(s)
+        } else {
+            None
+        };
+
+        // Expect `fn` keyword after `extern` [convention]
         if !self.eat(&TokenKind::Fn) {
             self.errors.push(ParseError::UnexpectedToken {
                 expected: "'fn' after 'extern'".to_string(),
@@ -1250,6 +1297,7 @@ impl<'src> Parser<'src> {
                 annotations,
                 params,
                 return_type,
+                convention,
             }),
             start_span.merge(end_span),
         )

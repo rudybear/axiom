@@ -42,6 +42,9 @@ pub struct ExternFunction {
     pub annotations: Vec<Spanned<Annotation>>,
     pub params: Vec<Param>,
     pub return_type: TypeExpr,
+    /// Calling convention string (e.g., `"C"`, `"fastcall"`, `"stdcall"`, `"win64"`).
+    /// `None` means the default C calling convention.
+    pub convention: Option<String>,
 }
 
 /// Function definition
@@ -222,6 +225,8 @@ pub enum Annotation {
     Postcondition(Box<Expr>),
     /// `@test { input: (...), expect: value }` — inline test case for a function.
     Test(TestCase),
+    /// `@link("library_name")` or `@link("library_name", "kind")` — specifies a library to link.
+    Link { library: String, kind: Option<String> },
     Custom(String, Vec<AnnotationValue>),
 }
 
