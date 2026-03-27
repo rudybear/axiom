@@ -826,6 +826,7 @@ fn main() -> miette::Result<()> {
                         opt_report,
                         sanitize: sanitize.clone(),
                         debug_mode: debug,
+                        record_mode: false,
                     };
 
                     compile::compile_to_binary_with_options(&llvm_ir, &output_path, &compile_opts)?;
@@ -1024,6 +1025,7 @@ fn try_compile(input: &str, output_path: &str) -> miette::Result<()> {
         opt_report: false,
         sanitize: None,
         debug_mode: false,
+        record_mode: false,
     };
 
     compile::compile_to_binary_with_options(&llvm_ir, output_path, &compile_opts)
@@ -1952,6 +1954,7 @@ fn compile_for_opt_remarks(
         opt_report: true,
         sanitize: None,
         debug_mode: false,
+        record_mode: false,
     };
 
     eprintln!("[REWRITE] Compiling with optimization remarks...");
@@ -2121,6 +2124,7 @@ fn run_verified_build(input: &str) -> miette::Result<()> {
         opt_report: false,
         sanitize: None,
         debug_mode: false,
+        record_mode: false,
     };
 
     compile::compile_to_binary_with_options(&llvm_ir, &output_path, &compile_opts)?;
