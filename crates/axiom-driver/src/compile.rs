@@ -174,6 +174,7 @@ fn write_runtime_c() -> miette::Result<PathBuf> {
         ("axiom_rt_threading.c", AXIOM_RT_THREADING_C),
         ("axiom_rt_strings.c", AXIOM_RT_STRINGS_C),
         ("axiom_rt_vec.c", AXIOM_RT_VEC_C),
+        ("axiom_rt_trace.c", AXIOM_RT_TRACE_C),
     ];
     for (name, content) in files {
         let path = rt_dir.join(name);
