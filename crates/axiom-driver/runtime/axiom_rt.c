@@ -33,7 +33,7 @@
 
 #include "axiom_rt_threading.c"
 
-
+#include "axiom_rt_trace.c"
 
 /* ── Input State (globals) ───────────────────────────────────────────── */
 /* Declared here so the Win32 window procedure can update them, and the  */

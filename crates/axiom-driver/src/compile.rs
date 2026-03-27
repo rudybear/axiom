@@ -59,6 +59,10 @@ pub struct CompileOptions {
     /// `-fno-omit-frame-pointer` for reliable stack walking.
     /// On Windows, also links `-ldbghelp`.
     pub debug_mode: bool,
+
+    /// When true, compile the C runtime with `-DAXIOM_RECORD_MODE` to enable
+    /// execution trace recording for time-travel debugging (--record flag).
+    pub record_mode: bool,
 }
 
 /// Compile LLVM IR text to a native executable binary with default options.
@@ -148,6 +152,7 @@ const AXIOM_RT_COROUTINES_C: &str = include_str!("../runtime/axiom_rt_coroutines
 const AXIOM_RT_THREADING_C: &str = include_str!("../runtime/axiom_rt_threading.c");
 const AXIOM_RT_STRINGS_C: &str = include_str!("../runtime/axiom_rt_strings.c");
 const AXIOM_RT_VEC_C: &str = include_str!("../runtime/axiom_rt_vec.c");
+const AXIOM_RT_TRACE_C: &str = include_str!("../runtime/axiom_rt_trace.c");
 
 
 /// Write the embedded C runtime (and its split include files) to a temp
