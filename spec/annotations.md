@@ -1,6 +1,6 @@
 # AXIOM Annotation Schema
 
-Version 0.2 -- matches implemented parser and HIR as of 2026-03-24.
+Version 0.3 -- matches implemented parser and HIR as of 2026-03-25.
 Source of truth: `crates/axiom-parser/src/ast.rs` (`Annotation` enum),
 `crates/axiom-hir/src/hir.rs` (`HirAnnotationKind` enum),
 `crates/axiom-hir/src/lower.rs` (`annotation_valid_targets` function).
@@ -366,6 +366,99 @@ Each entry contains a version label, parameter values, measured metrics,
 the agent name, target architecture, and date. See `spec/optimization.md`.
 **Effect on compilation:** Informational. The optimization protocol reads
 the log to avoid re-exploring parameter values that have already been tried.
+
+---
+
+## Verification Annotations
+
+### `@strict`
+
+**Syntax:** `@strict`
+**Valid targets:** Module
+**Meaning:** Enforces annotation completeness on all functions in the module.
+When `@strict` is present, every function must have `@pure` (or explicitly not
+pure), `@intent`, and `@complexity` annotations. Missing annotations produce
+compile errors.
+**Effect on compilation:** Checked during AST-to-HIR lowering. Functions
+without required annotations are flagged as errors. This is the primary
+mechanism for ensuring AI-generated code meets quality standards.
+
+```axiom
+@strict;
+
+@pure
+@intent("Square a number")
+@complexity O(1)
+fn square(x: i32) -> i32 {
+    return x * x;
+}
+// ERROR if @intent or @complexity is missing
+```
+
+### `@precondition`
+
+**Syntax:** `@precondition(expr)`
+**Valid targets:** Function
+**Meaning:** Declares a boolean expression that must be true when the function
+is called. The expression can reference parameter names.
+**Effect on compilation:**
+- In `--debug` builds: emits a runtime check at function entry. If the
+  condition is false, the program aborts with a diagnostic message including
+  the source location and the failing expression.
+- In release builds: no code is emitted (zero overhead).
+- Used by `axiom test --fuzz` to generate valid test inputs.
+
+```axiom
+@precondition(n > 0)
+@precondition(n <= 1000000)
+fn count_primes(n: i32) -> i32 {
+    // n is guaranteed > 0 and <= 1000000 in debug builds
+    ...
+}
+```
+
+### `@postcondition`
+
+**Syntax:** `@postcondition(expr)`
+**Valid targets:** Function
+**Meaning:** Declares a boolean expression that must be true when the function
+returns. The expression can reference parameter names and the special name
+`result` to refer to the return value.
+**Effect on compilation:**
+- In `--debug` builds: emits a runtime check before each return statement.
+  If the condition is false, the program aborts with a diagnostic message.
+- In release builds: no code is emitted (zero overhead).
+
+```axiom
+@postcondition(result >= 0)
+fn my_abs(x: i32) -> i32 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+```
+
+### `@test`
+
+**Syntax:** `@test { input: (arg1, arg2, ...), expect: value }`
+**Valid targets:** Function
+**Meaning:** Attaches an inline test case to a function. Multiple `@test`
+annotations can be attached to the same function. Each test specifies input
+arguments and the expected return value.
+**Effect on compilation:** Test annotations are not included in normal
+compilation. They are extracted and executed by the `axiom test` command,
+which compiles test harnesses, runs them, and reports pass/fail results.
+**Fuzzing:** When `axiom test --fuzz` is used, `@precondition` constraints
+are analyzed to generate additional random test inputs within valid ranges.
+
+```axiom
+@test { input: (5), expect: 120 }
+@test { input: (0), expect: 1 }
+@test { input: (1), expect: 1 }
+fn factorial(n: i32) -> i32 {
+    if n <= 1 { return 1; }
+    return n * factorial(n - 1);
+}
+```
 
 ---
 

@@ -40,26 +40,27 @@ AXIOM Lexer (63 tests)        <- Tokenizer with error recovery
 AXIOM Parser (52 tests)       <- Recursive descent + Pratt expressions
        |
        v
-AXIOM HIR (25 tests)          <- Annotation validation, type checking
-       |
+AXIOM HIR (25 tests)          <- Annotation validation, type checking,
+       |                          @strict enforcement, pre/postcondition lowering
        v
 LLVM IR Text Gen (150 tests)  <- Optimized IR with noalias, nsw, fast-math,
        |                          SIMD vec2/vec3/vec4 types,
        |                          fastcc, branch hints, allocator attributes,
        |                          fence release/acquire, readonly/writeonly,
-       |                          SIMD width metadata, DWARF debug info
+       |                          SIMD width metadata, DWARF debug info,
+       |                          @precondition/@postcondition checks (--debug)
        v
 clang -O2                     <- Native binary (x86_64, AArch64)
 ```
 
 ## Technology Stack
 
-- **Compiler language**: Rust (35,358 lines, 7 crates)
+- **Compiler language**: Rust (36,778 lines, 7 crates)
 - **Backend**: LLVM IR text generation -> clang -O2 (no inkwell dependency)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`)
-- **Testing**: 493 tests (unit + integration + doc-tests + E2E)
+- **Testing**: 504 tests (unit + integration + doc-tests + E2E)
 - **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos)
 
 ## Current Feature Set
@@ -133,11 +134,15 @@ let broadcast: vec3 = v.xxx;        // Broadcast single component
 @align(bytes)                  // Alignment
 @lifetime(scope | static | manual)  // Lifetime control -> heap-to-stack promotion, escape analysis
 @export                        // C ABI export
+@strict                        // Module: enforce annotations on all functions
+@precondition(expr)            // Function: runtime check at entry (--debug)
+@postcondition(expr)           // Function: runtime check at exit (--debug)
+@test { input: (...), expect } // Function: inline test case
 @transfer { ... }              // Inter-agent handoff
 @optimization_log { ... }      // Optimization history
 ```
 
-### All Builtin Functions (166 total)
+### All Builtin Functions (173 total)
 
 #### I/O (4)
 ```
@@ -244,14 +249,16 @@ shader_load(r, path) pipeline_create(r, vert, frag)
 renderer_bind_pipeline(r, pipeline)
 ```
 
-#### GPU / PBR / glTF (17)
+#### GPU / PBR / glTF (22)
 ```
 gpu_init(w, h, title) gpu_shutdown(r) gpu_begin_frame(r) gpu_end_frame(r)
 gpu_should_close(r) gpu_load_gltf(r, path) gpu_set_camera(r, ...) gpu_render(r)
 gpu_get_frame_time(r) gpu_get_gpu_name(r) gpu_screenshot(r, path)
 gpu_add_light(r, x, y, z, intensity) gpu_clear_lights(r)
 gpu_create_cube(r, ...) gpu_create_sphere(r, ...) gpu_set_mesh_transform(r, mesh, ...)
-gpu_draw_mesh(r, mesh)
+gpu_draw_mesh(r, mesh) gpu_upload_texture(r, data, w, h)
+gpu_create_textured_mesh(r, ...) gpu_create_lit_textured_mesh(r, ...)
+gpu_create_mesh_triangles(r, ...) gpu_blit_rgba(r, data, w, h)
 ```
 
 #### Input (4)
@@ -295,6 +302,11 @@ result_unwrap(r) result_err_code(r)
 #### Platform Detection (1)
 ```
 cpu_features()
+```
+
+#### Debug / Verification (2)
+```
+assert(cond, msg) debug_print(expr)
 ```
 
 ### C Interop
@@ -350,7 +362,7 @@ axiom/
 │   ├── axiom-mir/                  # Mid-level IR (stub)
 │   ├── axiom-codegen/              # LLVM IR generation (150 tests)
 │   ├── axiom-optimize/             # Optimization protocol + agent API (119 tests)
-│   └── axiom-driver/               # CLI + MCP server + compilation (72 tests)
+│   └── axiom-driver/               # CLI + MCP server + compilation (83 tests)
 │       └── runtime/
 │           └── axiom_rt.c          # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
 ├── spec/                           # Formal language specification
@@ -436,9 +448,12 @@ Proper archetype-based ECS with real component storage (`lib/ecs.axm`). Input sy
 ### Phase K -- Self-Improvement (S1-S3) DONE
 Self-hosted AXIOM parser written in AXIOM (`examples/self_host/`). Compiler self-optimization via PGO bootstrap (`axiom pgo`): profile the compiler, recompile with profile data, iterate. Source-to-source AI optimizer (`axiom rewrite`): LLM rewrites AXIOM source code (not just ?params).
 
+### Phase L -- Verified Development Pipeline (V1-V4) DONE
+`@strict` module annotation enforces that all functions carry `@pure`/`@intent`/`@complexity` annotations -- any missing annotation is a compile error. `@precondition(expr)` and `@postcondition(expr)` on functions emit runtime checks in `--debug` builds (no overhead in release). `@test { input: (...), expect: value }` attaches inline test cases to functions, runnable via `axiom test`. `axiom verify` checks annotation completeness across a module. `axiom test --fuzz` auto-generates test inputs from `@precondition` constraints. New builtins: `assert(cond, msg)` for runtime assertions, `debug_print(expr)` for debug-mode-only output.
+
 ---
 
-## CLI Commands (12 total)
+## CLI Commands (14 total)
 
 ```bash
 # Build
@@ -451,6 +466,8 @@ cargo test --workspace
 axiom compile program.axm -o output
 axiom compile --emit=tokens|ast|hir|llvm-ir program.axm
 axiom compile --target=x86-64-v4 program.axm -o output
+axiom compile --debug program.axm -o output         # Enable runtime pre/postcondition checks
+axiom compile --error-format=json program.axm        # JSON diagnostic output
 
 # Tokenizer debug
 axiom lex program.axm
@@ -481,6 +498,11 @@ axiom rewrite program.axm --strategy performance
 
 # LSP server for editor integration
 axiom lsp
+
+# Verified development
+axiom verify program.axm                # Check annotation completeness (@strict)
+axiom test program.axm                  # Run @test blocks
+axiom test program.axm --fuzz           # Auto-fuzz from @precondition
 
 # MCP server
 axiom mcp

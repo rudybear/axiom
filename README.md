@@ -6,7 +6,7 @@ A programming language designed as the canonical transfer format between AI agen
 
 > **This is NOT a language for humans to program in. This is a language for AI agents to communicate optimized computation through.**
 
-> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 165 commits. 35,358 LOC. 493 tests. 197 benchmarks. ALL 47 milestones COMPLETE.
+> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 169 commits. 36,778 LOC. 504 tests. 197 benchmarks. ALL 47 milestones COMPLETE.
 
 ## Why AXIOM Exists
 
@@ -102,6 +102,12 @@ axiom compile --emit=llvm-ir examples/sort/bubble_sort.axm
 # Target a specific CPU architecture
 axiom compile --target=x86-64-v4 program.axm -o program
 
+# Enable runtime pre/postcondition checks
+axiom compile --debug program.axm -o program
+
+# JSON diagnostic output (for IDE/tooling integration)
+axiom compile --error-format=json program.axm
+
 # Run optimization protocol
 axiom optimize examples/matmul/matmul_simple.axm --iterations 5
 
@@ -129,6 +135,11 @@ axiom build
 # Source-to-source AI rewriter
 axiom rewrite program.axm --strategy performance
 
+# Verified development
+axiom verify program.axm                # Check annotation completeness (@strict)
+axiom test program.axm                  # Run @test blocks
+axiom test program.axm --fuzz           # Auto-fuzz from @precondition
+
 # Start LSP server for editor integration
 axiom lsp
 
@@ -150,8 +161,8 @@ AXIOM Source (.axm)
    PARSER (52 tests)        Typed AST with annotations
        |
        v
-   HIR LOWERING (25 tests)  Validated annotations, type checking
-       |
+   HIR LOWERING (25 tests)  Validated annotations, type checking,
+       |                     @strict enforcement, pre/postcondition lowering
        v
    LLVM IR GEN (150 tests)  Optimized IR text with:
        |                     - noalias, nsw, fast-math
@@ -202,6 +213,10 @@ struct Name { field: Type }    // With literal constructors: Name { x: 1, y: 2 }
 @align(bytes)                  // Alignment
 @target(device_class)          // Target hardware
 @export                        // C-compatible symbol
+@strict                        // Module: enforce annotations on all functions
+@precondition(expr)            // Function: runtime check at entry (--debug)
+@postcondition(expr)           // Function: runtime check at exit (--debug)
+@test { input: (...), expect } // Function: inline test case
 @transfer { ... }              // Inter-agent handoff metadata
 @optimization_log { ... }      // Optimization history
 ```
@@ -388,7 +403,7 @@ let result: i32 = call_fn_ptr_i32(fp, arg);
 let result: f64 = call_fn_ptr_f64(fp, arg);
 ```
 
-### Renderer (Vulkan) -- 29 builtins
+### Renderer (Vulkan) -- 34 builtins
 ```axiom
 // Core renderer (12)
 renderer_create(width, height, title) renderer_destroy(r)
@@ -397,13 +412,15 @@ renderer_clear(r, r, g, b) renderer_draw_triangles(r, verts, count)
 renderer_draw_points(r, data, count) renderer_get_time(r)
 shader_load(r, path) pipeline_create(r, vert, frag) renderer_bind_pipeline(r, pipeline)
 
-// GPU / PBR / glTF (17)
+// GPU / PBR / glTF (22)
 gpu_init(w, h, title) gpu_shutdown(r) gpu_begin_frame(r) gpu_end_frame(r)
 gpu_should_close(r) gpu_load_gltf(r, path) gpu_set_camera(r, ...)
 gpu_render(r) gpu_get_frame_time(r) gpu_get_gpu_name(r) gpu_screenshot(r, path)
 gpu_add_light(r, x, y, z, intensity) gpu_clear_lights(r)
 gpu_create_cube(r, ...) gpu_create_sphere(r, ...) gpu_set_mesh_transform(r, mesh, ...)
-gpu_draw_mesh(r, mesh)
+gpu_draw_mesh(r, mesh) gpu_upload_texture(r, data, w, h)
+gpu_create_textured_mesh(r, ...) gpu_create_lit_textured_mesh(r, ...)
+gpu_create_mesh_triangles(r, ...) gpu_blit_rgba(r, data, w, h)
 ```
 
 ### C Interop
@@ -484,7 +501,7 @@ axiom/
 │   ├── axiom-codegen/          # LLVM IR generation (150 tests)
 │   ├── axiom-optimize/         # Optimization protocol + agent API (119 tests)
 │   ├── axiom-mir/              # Mid-level IR (stub)
-│   └── axiom-driver/           # CLI + MCP server + compilation (72 tests)
+│   └── axiom-driver/           # CLI + MCP server + compilation (83 tests)
 │       └── runtime/
 │           └── axiom_rt.c      # C runtime (I/O, coroutines, threads, jobs, renderer, input, audio)
 ├── spec/                       # Formal language specification
@@ -538,16 +555,16 @@ axiom/
 
 ## Stats
 
-- **35,358 lines of Rust** across 7 crates
-- **493 tests** (all passing)
+- **36,778 lines of Rust** across 7 crates
+- **504 tests** (all passing)
 - **197 benchmarks** (100% compile rate)
-- **165 git commits** across 11 development phases (all complete)
-- **166 builtin functions** (I/O, math, vector math, memory, concurrency, rendering, GPU, collections, input, audio)
-- **12 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp
+- **169 git commits** across 12 development phases (all complete)
+- **173 builtin functions** (I/O, math, vector math, memory, concurrency, rendering, GPU, collections, input, audio, debug)
+- **14 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test
 - **16 example programs**, **24 sample programs**
 - **5 formal specification documents**
 - **6 research documents** (optimization, memory, game engine, multithreading, Lux integration, language plan)
-- **47/47 milestones COMPLETE** across 8 tracks
+- **47/47 milestones COMPLETE** across 8 tracks (plus Phase L verified development)
 
 ## Roadmap
 
@@ -564,6 +581,7 @@ axiom/
 - **Phase I:** R1-R5 -- Real Vulkan renderer (ash + winit + gpu-allocator, GPU buffers, SPIR-V shaders, descriptor sets, production renderer with instancing and multi-light)
 - **Phase J:** G1-G5 -- Game engine (archetype ECS, input system, audio, hot reload, 10K particle killer demo with real Vulkan + Lux shaders + parallel jobs)
 - **Phase K:** S1-S3 -- Self-improvement (self-hosted parser, compiler self-optimization via PGO bootstrap, source-to-source AI optimizer with `axiom rewrite`)
+- **Phase L:** V1-V4 -- Verified development pipeline (`@strict` annotation enforcement, `@precondition`/`@postcondition` runtime checks, `@test` inline test cases, `axiom verify`, `axiom test --fuzz`)
 
 ## Development Pipeline
 
@@ -580,6 +598,33 @@ AXIOM was built using a multi-agent development pipeline with 7 independent agen
 | **Pessimistic Code Reviewer** | Adversarial review for bugs and UB |
 
 Each milestone goes through all 7 agents with git branch isolation and retry loops.
+
+## Verified Development Pipeline
+
+AXIOM includes a built-in verification system for AI-generated code quality:
+
+- **`@strict`** module annotation enforces that all functions carry `@pure`/`@intent`/`@complexity` annotations. Missing annotations are compile errors.
+- **`@precondition(expr)`** and **`@postcondition(expr)`** on functions emit runtime checks in `--debug` builds (zero overhead in release).
+- **`@test { input: (...), expect: value }`** attaches inline test cases directly to functions. Run with `axiom test`.
+- **`axiom verify`** checks annotation completeness across a module without compiling.
+- **`axiom test --fuzz`** auto-generates test inputs from `@precondition` constraints.
+- **`assert(cond, msg)`** and **`debug_print(expr)`** builtins for runtime assertions and debug-only output.
+
+```axiom
+@strict;  // All functions must have @pure/@intent/@complexity
+
+@pure
+@intent("Compute absolute value")
+@complexity O(1)
+@precondition(x > -2147483648)
+@postcondition(result >= 0)
+@test { input: (5), expect: 5 }
+@test { input: (-3), expect: 3 }
+fn my_abs(x: i32) -> i32 {
+    if x < 0 { return 0 - x; }
+    return x;
+}
+```
 
 ## License
 

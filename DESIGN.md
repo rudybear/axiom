@@ -4,7 +4,7 @@ This is the living design document for AXIOM. It summarizes the current
 implementation state, references the formal specification files, and tracks
 design decisions and open questions.
 
-**Project stats:** 165 commits, 35,358 LOC, 493 tests, 197 benchmarks, 16 examples, 24 samples. ALL 47 milestones COMPLETE across 8 tracks.
+**Project stats:** 169 commits, 36,778 LOC, 504 tests, 197 benchmarks, 16 examples, 24 samples. ALL 47 milestones COMPLETE across 8 tracks, plus Phase L verified development pipeline.
 
 **FINAL benchmark result:** AXIOM beats C turbo (-O3 -march=native -ffast-math) by 3% overall (0.97x total wall clock) across 20 real-world benchmarks. 2 AXIOM wins (JPEG DCT 56% faster, RLE 16% faster), 9 ties, 9 C wins. Optimization Knowledge Base: 10 rules + 5 anti-patterns, grows with each LLM session.
 
@@ -75,7 +75,8 @@ The `spec/` directory contains the formal language specification:
   Invalid placement produces errors but lowering continues.
 - Annotations: `Pure`, `Const`, `Inline`, `Complexity`, `Intent`, `Module`,
   `Constraint`, `Target`, `Strategy`, `Transfer`, `Vectorizable`, `Parallel`,
-  `Layout`, `Align`, `OptimizationLog`, `Export`, `Lifetime`, `ParallelFor`, `Custom`.
+  `Layout`, `Align`, `OptimizationLog`, `Export`, `Lifetime`, `ParallelFor`,
+  `Strict`, `Precondition`, `Postcondition`, `Test`, `Custom`.
 - Duplicate detection for functions, structs, and type aliases.
 - Re-exports AST types that are identical between AST and HIR (BinOp, UnaryOp,
   InlineHint, LayoutKind, AnnotationValue, StrategyBlock, StrategyValue,
@@ -89,14 +90,15 @@ The `spec/` directory contains the formal language specification:
   `@export` functions, struct literal constructors, struct return from functions,
   local constants (`const NAME: Type = value`), `range(start, end, step)` with
   optional step, `@lifetime(scope)` on let bindings for stack promotion.
-- 166 builtin functions covering: I/O, math (25 including trig/log/exp), vector
+- 173 builtin functions covering: I/O, math (25 including trig/log/exp), vector
   construction & math (vec2/vec3/vec4/dot/cross/length/normalize/reflect/lerp),
   conversions (including f32_to_f64/f64_to_f32), bitwise, heap memory (including
   narrow ptr reads/writes for u8/i16/f32 and ptr_offset), arena allocation, file
   I/O, system, coroutines, threading, atomics, mutex, job system (with dependency
-  graph), renderer/Vulkan FFI (12), GPU/PBR/glTF (17 including procedural mesh
-  generation), option, string, vec, function pointers, result/error handling,
-  CPU feature detection, input system, audio.
+  graph), renderer/Vulkan FFI (12), GPU/PBR/glTF (22 including procedural mesh
+  generation, texture uploads, and blit), option, string, vec, function pointers,
+  result/error handling, CPU feature detection, input system, audio, debug/verification
+  (assert, debug_print).
 - GLSL-style swizzles on vec2/vec3/vec4: `.xy`, `.zyx`, `.xxx`, etc.
 - `@pure` -> `memory(none)` or `memory(argmem: read)`, `readnone`/`readonly`,
   fast-math flags on float operations.
@@ -137,9 +139,9 @@ The `spec/` directory contains the formal language specification:
   LLVM IR, assembly, benchmark data, `@constraint` annotations, and optimization
   history. Supports Claude API (via curl), Claude CLI, and dry-run modes.
 
-### Driver (`axiom-driver`) -- Complete (72 tests)
+### Driver (`axiom-driver`) -- Complete (83 tests)
 
-- CLI frontend with 12 subcommands:
+- CLI frontend with 14 subcommands:
   - `axiom compile` -- full compilation (.axm -> native binary), with `--emit` for
     intermediate stages (tokens, ast, hir, llvm-ir) and `--target` for CPU arch.
   - `axiom lex` -- debug tokenizer output.
@@ -154,6 +156,8 @@ The `spec/` directory contains the formal language specification:
   - `axiom build` -- build project with dependency resolution.
   - `axiom rewrite` -- source-to-source AI rewriter.
   - `axiom lsp` -- LSP server for editor integration.
+  - `axiom verify` -- check annotation completeness (`@strict` enforcement).
+  - `axiom test` -- run `@test` blocks (with optional `--fuzz` for auto-fuzzing from `@precondition`).
 - C runtime (`axiom_rt.c`): I/O, nanosecond clock, coroutines (OS fibers/ucontext),
   threads, atomics, mutexes, thread-pool job system with dependency graph,
   Vulkan renderer, input system, audio playback.
@@ -190,7 +194,8 @@ AXIOM HIR (25 tests)         -- Annotation validation, type checking, NodeIds
        |
        v
 LLVM IR Text (150 tests)     -- Optimized IR with noalias, nsw, fast-math,
-       |                        fastcc, fences, readonly/writeonly, DWARF debug
+       |                        fastcc, fences, readonly/writeonly, DWARF debug,
+       |                        @precondition/@postcondition runtime checks (--debug)
        v
 clang -O2                    -- Native binary (x86_64, AArch64)
 ```
@@ -238,9 +243,9 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 |----------|-------|---------|
 | Primitive types | 15 | i8-i128, u8-u128, f16, bf16, f32, f64, bool |
 | Compound types | 11 | array, ptr, readonly_ptr, writeonly_ptr, slice, vec2, vec3, vec4, tensor, tuple, fn |
-| Annotations | 19 | pure, const, inline, complexity, intent, module, constraint, target, strategy, vectorizable, parallel, parallel_for, layout, align, lifetime, export, transfer, optimization_log, custom |
-| Builtin functions | 166 | I/O (4), math (25), vector math (9), conversions (5), bitwise (9), memory heap (10), memory narrow ptr (7), arena (4), file (3), system (3), coroutines (5), threads (2), atomics (4), mutex (4), jobs (8), renderer (12), GPU/PBR/glTF (17), option (5), string (5), vec (9), fn_ptr (3), result (6), cpu (1), input (4), audio (2) |
-| CLI commands | 12 | compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp |
+| Annotations | 23 | pure, const, inline, complexity, intent, module, constraint, target, strategy, vectorizable, parallel, parallel_for, layout, align, lifetime, export, strict, precondition, postcondition, test, transfer, optimization_log, custom |
+| Builtin functions | 173 | I/O (4), math (25), vector math (9), conversions (5), bitwise (9), memory heap (10), memory narrow ptr (7), arena (4), file (3), system (3), coroutines (5), threads (2), atomics (4), mutex (4), jobs (8), renderer (12), GPU/PBR/glTF (22), option (5), string (5), vec (9), fn_ptr (3), result (6), cpu (1), input (4), audio (2), debug (2) |
+| CLI commands | 14 | compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test |
 | Keywords | 21 | fn, let, mut, return, if, else, for, while, in, struct, type, module, import, pub, unsafe, extern, and, or, not, true, false |
 | Type keywords | 22 | i8-i128 (5), u8-u128 (5), f16, bf16, f32, f64, bool, tensor, array, slice, ptr, readonly_ptr, writeonly_ptr |
 | Operators | 16 | +, -, *, /, %, +%, +\|, -%, -\|, *%, ==, !=, <, >, <=, >= |
@@ -248,6 +253,7 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 
 ## Resolved Questions
 
+- **Verified development**: `@strict` enforcement, `@precondition`/`@postcondition` runtime checks, `@test` inline tests, `axiom verify`, `axiom test --fuzz`.
 - **Pattern matching**: Option/Result use builtin functions. While-let/if-let codegen complete.
 - **Generics**: Parsed with monomorphization codegen implemented.
 - **Module system**: `import` parsed, lowered, and separate compilation implemented.
