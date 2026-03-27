@@ -11,12 +11,14 @@
 Converted a 401-line C raytracer (4 spheres, 3 lights, Phong shading, reflections, 600x600)
 to AXIOM. Both produce identical checksums (5854663641).
 
-### Three versions:
-| Version | Lines | Median (ms) | vs C |
-|---------|-------|-------------|------|
-| **AXIOM vec3** | **310** | **46** | **23% fewer lines** |
-| C -O2 | 401 | 44 | baseline |
-| AXIOM scalar | 627 | 42 | +5% faster, +56% more lines |
+### Five versions benchmarked (20 runs each, median):
+| Version | Lines | Median (ms) | Best (ms) | vs C |
+|---------|-------|-------------|-----------|------|
+| **AXIOM scalar** | 627 | **41** | **41** | **+5% faster** |
+| **AXIOM AOS vec3** | 311 | **43** | **43** | **= C, 23% fewer lines** |
+| C -O2 | 401 | 43 | 43 | baseline |
+| AXIOM vec3 SOA | 310 | 48 | 44 | -5% |
+| C turbo (-O3 -ffast-math) | 401 | 53 | 49 | -23% slower |
 
 ### Gaps resolved by vec2/vec3/vec4:
 - **GAP #1 RESOLVED**: `vec3(1.0, 2.0, 3.0)` constructor syntax
