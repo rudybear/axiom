@@ -100,7 +100,10 @@ pub fn compile_to_binary_with_options(
     if result.is_ok() {
         let _ = std::fs::remove_file(&temp_ll);
         if let Some(ref rp) = rt_path {
-            let _ = std::fs::remove_file(rp);
+            // The runtime is now written to a directory with split files.
+            if let Some(rt_dir) = rp.parent() {
+                let _ = std::fs::remove_dir_all(rt_dir);
+            }
         }
     } else {
         eprintln!("note: LLVM IR written to {} for debugging", temp_ll.display());
@@ -587,7 +590,9 @@ pub fn compile_with_pgo(
     // Clean up
     let _ = std::fs::remove_file(&temp_ll);
     if let Some(ref rp) = rt_path {
-        let _ = std::fs::remove_file(rp);
+        if let Some(rt_dir) = rp.parent() {
+            let _ = std::fs::remove_dir_all(rt_dir);
+        }
     }
     let _ = std::fs::remove_dir_all(&prof_dir);
 
@@ -665,19 +670,34 @@ mod tests {
 
     #[test]
     fn test_runtime_c_is_embedded() {
-        // The embedded C runtime should contain our function names.
-        assert!(AXIOM_RT_C.contains("axiom_file_read"));
-        assert!(AXIOM_RT_C.contains("axiom_file_write"));
-        assert!(AXIOM_RT_C.contains("axiom_file_size"));
-        assert!(AXIOM_RT_C.contains("axiom_clock_ns"));
-        assert!(AXIOM_RT_C.contains("axiom_get_argc"));
-        assert!(AXIOM_RT_C.contains("axiom_get_argv"));
-        // Coroutine functions should also be present.
-        assert!(AXIOM_RT_C.contains("axiom_coro_create"));
-        assert!(AXIOM_RT_C.contains("axiom_coro_resume"));
-        assert!(AXIOM_RT_C.contains("axiom_coro_yield"));
-        assert!(AXIOM_RT_C.contains("axiom_coro_is_done"));
-        assert!(AXIOM_RT_C.contains("axiom_coro_destroy"));
+        // The main runtime file should include the split files.
+        assert!(AXIOM_RT_C.contains("axiom_rt_io.c"));
+        assert!(AXIOM_RT_C.contains("axiom_rt_core.c"));
+        assert!(AXIOM_RT_C.contains("axiom_rt_coroutines.c"));
+        assert!(AXIOM_RT_C.contains("axiom_rt_threading.c"));
+        assert!(AXIOM_RT_C.contains("axiom_rt_vec.c"));
+        assert!(AXIOM_RT_C.contains("axiom_rt_strings.c"));
+
+        // Split files should contain their respective function names.
+        assert!(AXIOM_RT_IO_C.contains("axiom_file_read"));
+        assert!(AXIOM_RT_IO_C.contains("axiom_file_write"));
+        assert!(AXIOM_RT_IO_C.contains("axiom_file_size"));
+        assert!(AXIOM_RT_CORE_C.contains("axiom_clock_ns"));
+        assert!(AXIOM_RT_CORE_C.contains("axiom_get_argc"));
+        assert!(AXIOM_RT_CORE_C.contains("axiom_get_argv"));
+        // Coroutine functions in the coroutines split file.
+        assert!(AXIOM_RT_COROUTINES_C.contains("axiom_coro_create"));
+        assert!(AXIOM_RT_COROUTINES_C.contains("axiom_coro_resume"));
+        assert!(AXIOM_RT_COROUTINES_C.contains("axiom_coro_yield"));
+        assert!(AXIOM_RT_COROUTINES_C.contains("axiom_coro_is_done"));
+        assert!(AXIOM_RT_COROUTINES_C.contains("axiom_coro_destroy"));
+        // Threading functions in the threading split file.
+        assert!(AXIOM_RT_THREADING_C.contains("axiom_thread_create"));
+        assert!(AXIOM_RT_THREADING_C.contains("axiom_mutex_create"));
+        assert!(AXIOM_RT_THREADING_C.contains("axiom_jobs_init"));
+        // Vec and string functions in their split files.
+        assert!(AXIOM_RT_VEC_C.contains("axiom_vec_new"));
+        assert!(AXIOM_RT_STRINGS_C.contains("axiom_string_from_literal"));
     }
 
     #[test]

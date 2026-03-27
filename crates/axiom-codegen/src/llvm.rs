@@ -226,6 +226,10 @@ struct CodegenContext {
     current_func_has_trace: bool,
     /// Name of the current function for `@trace` EXIT messages.
     current_func_name_for_trace: String,
+    /// When true, emit execution trace instrumentation for every function (time-travel debugging).
+    record_mode: bool,
+    /// Whether trace runtime functions are needed (axiom_trace_init/enter/exit/close).
+    needs_trace: bool,
 }
 
 /// Ownership kind for pointer parameters, used for access validation.
@@ -296,6 +300,8 @@ impl CodegenContext {
             postconditions: Vec::new(),
             current_func_has_trace: false,
             current_func_name_for_trace: String::new(),
+            record_mode: false,
+            needs_trace: false,
         }
     }
 
@@ -354,6 +360,9 @@ impl CodegenContext {
 pub struct CodegenOptions {
     /// When true, emit runtime bounds checks for array indexing and assert calls.
     pub debug_mode: bool,
+    /// When true, emit execution trace instrumentation (time-travel debugging).
+    /// Every function entry/exit is logged to a `.trace.jsonl` file via the C runtime.
+    pub record_mode: bool,
 }
 
 /// Generate LLVM IR text from an HIR module with custom options.
@@ -365,6 +374,7 @@ pub fn codegen_with_options(
 ) -> Result<String, Vec<CodegenError>> {
     let mut ctx = CodegenContext::new();
     ctx.debug_mode = options.debug_mode;
+    ctx.record_mode = options.record_mode;
     codegen_inner(&mut ctx, module)
 }
 
@@ -729,6 +739,14 @@ fn codegen_inner(
         let _ = writeln!(ctx.output, "declare void @axiom_install_crash_handler()");
     }
 
+    // Emit trace runtime declarations (time-travel debugging / --record mode).
+    if ctx.needs_trace {
+        let _ = writeln!(ctx.output, "declare void @axiom_trace_init(ptr)");
+        let _ = writeln!(ctx.output, "declare void @axiom_trace_enter(ptr)");
+        let _ = writeln!(ctx.output, "declare void @axiom_trace_exit(ptr)");
+        let _ = writeln!(ctx.output, "declare void @axiom_trace_close()");
+    }
+
     // Emit attribute groups.
     if !ctx.attribute_groups.is_empty() {
         ctx.emit_blank();
@@ -844,6 +862,11 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_cpu_features")
         // Debug crash handler
         || ir.contains("@axiom_install_crash_handler")
+        // Time-travel debugging trace
+        || ir.contains("@axiom_trace_init")
+        || ir.contains("@axiom_trace_enter")
+        || ir.contains("@axiom_trace_exit")
+        || ir.contains("@axiom_trace_close")
 }
 
 /// Register a struct type in the codegen context.
@@ -1169,6 +1192,24 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
         ctx.emit(&format!("{_p} = call i32 (ptr, ...) @printf(ptr @.str.{msg_idx})"));
     }
 
+    // Record mode: emit trace instrumentation for time-travel debugging.
+    if ctx.record_mode {
+        ctx.needs_trace = true;
+        ctx.needs_runtime = true;
+        // In main, initialize the trace file first.
+        if is_main {
+            let trace_path = "program.trace.jsonl";
+            let trace_path_idx = ctx.string_literals.len();
+            ctx.string_literals.push(trace_path.to_string());
+            ctx.emit(&format!("call void @axiom_trace_init(ptr @.str.{trace_path_idx})"));
+        }
+        // Emit trace_enter for every function.
+        let func_name_str = func.name.clone();
+        let name_idx = ctx.string_literals.len();
+        ctx.string_literals.push(func_name_str);
+        ctx.emit(&format!("call void @axiom_trace_enter(ptr @.str.{name_idx})"));
+    }
+
     // Emit function body.
     emit_block(ctx, &func.body);
 
@@ -1176,6 +1217,8 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     // add an implicit `ret void`.
     if !ctx.block_terminated {
         if ret_type == "void" {
+            // Record mode: emit trace_exit (and trace_close for main) before implicit ret void.
+            emit_record_trace_exit(ctx, &func.name, is_main);
             ctx.emit("ret void");
         } else {
             // Non-void function without return — emit unreachable as safety net.
@@ -1453,6 +1496,9 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
 
                     // Emit @trace EXIT before returning.
                     emit_trace_exit(ctx);
+                    let pc_func_name = ctx.current_func_name_for_trace.clone();
+                    let pc_is_main = pc_func_name == "main";
+                    emit_record_trace_exit(ctx, &pc_func_name, pc_is_main);
 
                     // Load the result and return it.
                     let ret_val = ctx.fresh_reg();
@@ -1465,6 +1511,9 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
             } else {
                 // Emit @trace EXIT before returning void.
                 emit_trace_exit(ctx);
+                let void_func_name = ctx.current_func_name_for_trace.clone();
+                let void_is_main = void_func_name == "main";
+                emit_record_trace_exit(ctx, &void_func_name, void_is_main);
                 ctx.emit("ret void");
                 ctx.block_terminated = true;
             }
@@ -2070,6 +2119,8 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
 /// Emit a return statement.
 fn emit_return(ctx: &mut CodegenContext, value: &HirExpr) {
     let ret_type = ctx.current_return_type.clone();
+    let func_name = ctx.current_func_name_for_trace.clone();
+    let is_main = func_name == "main";
     let expected = if ret_type.is_empty() {
         None
     } else {
@@ -2088,11 +2139,13 @@ fn emit_return(ctx: &mut CodegenContext, value: &HirExpr) {
         let load_reg = ctx.fresh_reg();
         ctx.emit(&format!("{load_reg} = load {ty}, ptr {}", val.reg));
         emit_trace_exit(ctx);
+        emit_record_trace_exit(ctx, &func_name, is_main);
         ctx.emit(&format!("ret {ty} {load_reg}"));
         ctx.block_terminated = true;
         return;
     }
     emit_trace_exit(ctx);
+    emit_record_trace_exit(ctx, &func_name, is_main);
     ctx.emit(&format!("ret {ty} {}", val.reg));
     ctx.block_terminated = true;
 }
@@ -2107,6 +2160,23 @@ fn emit_trace_exit(ctx: &mut CodegenContext) {
         ctx.needs_printf = true;
         let _p = ctx.fresh_reg();
         ctx.emit(&format!("{_p} = call i32 (ptr, ...) @printf(ptr @.str.{msg_idx})"));
+    }
+}
+
+/// Emit record-mode trace exit (and trace_close for main).
+///
+/// When `record_mode` is active, emits a call to `axiom_trace_exit` with the
+/// function name string. For `main`, also emits `axiom_trace_close` to flush
+/// and close the trace file before the program exits.
+fn emit_record_trace_exit(ctx: &mut CodegenContext, func_name: &str, is_main: bool) {
+    if !ctx.record_mode {
+        return;
+    }
+    let name_idx = ctx.string_literals.len();
+    ctx.string_literals.push(func_name.to_string());
+    ctx.emit(&format!("call void @axiom_trace_exit(ptr @.str.{name_idx})"));
+    if is_main {
+        ctx.emit("call void @axiom_trace_close()");
     }
 }
 

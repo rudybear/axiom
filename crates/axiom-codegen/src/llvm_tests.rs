@@ -6997,7 +6997,7 @@ fn test_debug_mode_crash_handler() {
     let parse_result = axiom_parser::parse(source);
     assert!(!parse_result.has_errors());
     let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
-    let opts = CodegenOptions { debug_mode: true };
+    let opts = CodegenOptions { debug_mode: true, ..Default::default() };
     let ir = codegen_with_options(&hir, &opts).expect("codegen should succeed");
     assert!(
         ir.contains("call void @axiom_install_crash_handler()"),

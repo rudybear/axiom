@@ -729,6 +729,7 @@ fn main() -> miette::Result<()> {
                     })?;
                     let codegen_opts = axiom_codegen::CodegenOptions {
                         debug_mode: debug,
+                        ..Default::default()
                     };
                     let llvm_ir = axiom_codegen::codegen_with_options(&hir_module, &codegen_opts).map_err(|errors| {
                         for err in &errors {
@@ -783,6 +784,7 @@ fn main() -> miette::Result<()> {
                         })?;
                     let codegen_opts = axiom_codegen::CodegenOptions {
                         debug_mode: debug,
+                        ..Default::default()
                     };
                     let llvm_ir =
                         axiom_codegen::codegen_with_options(&hir_module, &codegen_opts).map_err(|errors| {
@@ -2432,6 +2434,7 @@ fn run_test_with_fuzz(input: &str, fuzz: bool) -> miette::Result<()> {
 
     let codegen_opts = axiom_codegen::CodegenOptions {
         debug_mode: true,
+        ..Default::default()
     };
     let test_ir = axiom_codegen::codegen_with_options(&test_hir, &codegen_opts).map_err(|errors| {
         for err in &errors {
@@ -2601,6 +2604,7 @@ fn run_test(input: &str) -> miette::Result<()> {
 
     let codegen_opts = axiom_codegen::CodegenOptions {
         debug_mode: true,
+        ..Default::default()
     };
     let test_ir = axiom_codegen::codegen_with_options(&test_hir, &codegen_opts).map_err(|errors| {
         for err in &errors {
