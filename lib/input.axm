@@ -1,6 +1,10 @@
 @module input;
 
+@link("axiom_renderer")
 extern "C" fn axiom_is_key_down(key: i32) -> i32;
+@link("axiom_renderer")
 extern "C" fn axiom_get_mouse_x() -> i32;
+@link("axiom_renderer")
 extern "C" fn axiom_get_mouse_y() -> i32;
+@link("axiom_renderer")
 extern "C" fn axiom_is_mouse_down(button: i32) -> i32;
