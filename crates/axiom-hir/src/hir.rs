@@ -552,6 +552,23 @@ pub enum HirAnnotationKind {
     /// `@parallel_for(shared_read: [...], shared_write: [...], reduction(...: ...), private: [...])`
     /// — marks a for loop for parallel execution with data sharing clauses.
     ParallelFor(ParallelForConfig),
+    /// `@strict` — module-level annotation requiring all functions to have @intent and contracts.
+    Strict,
+    /// `@precondition(expr)` — function precondition (checked at runtime in debug mode).
+    Precondition(Box<HirExpr>),
+    /// `@postcondition(expr)` — function postcondition (checked at runtime in debug mode).
+    Postcondition(Box<HirExpr>),
+    /// `@test { input: (...), expect: value }` — inline test case for a function.
+    Test(HirTestCase),
     /// `@custom(name, args)` - extensibility.
     Custom(String, Vec<AnnotationValue>),
+}
+
+/// Inline test case attached to a function via `@test`.
+#[derive(Debug, Clone)]
+pub struct HirTestCase {
+    /// The input argument expressions.
+    pub inputs: Vec<HirExpr>,
+    /// The expected return value expression.
+    pub expected: HirExpr,
 }

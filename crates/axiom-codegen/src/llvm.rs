@@ -218,6 +218,9 @@ struct CodegenContext {
     /// Set of variable names that were promoted from heap to stack via `@lifetime(scope)`.
     /// `heap_free` calls on these variables are skipped since the stack handles deallocation.
     stack_promoted_vars: std::collections::HashSet<String>,
+    /// Postcondition expressions for the current function (debug mode only).
+    /// Each entry is (function_name, postcondition_expr).
+    postconditions: Vec<(String, HirExpr)>,
 }
 
 /// Ownership kind for pointer parameters, used for access validation.
@@ -286,6 +289,7 @@ impl CodegenContext {
             current_loop_header: None,
             current_loop_exit: None,
             stack_promoted_vars: std::collections::HashSet::new(),
+            postconditions: Vec::new(),
         }
     }
 
@@ -833,6 +837,16 @@ fn codegen_inner(
             ctx.output,
             "declare i32 @gpu_create_mesh_triangles(ptr, ptr, ptr, i32)"
         );
+        // Upload RGBA texture to GPU, returns texture ID
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_upload_texture(ptr, ptr, i32, i32)"
+        );
+        // Create textured mesh (positions + UVs + texture_id)
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @gpu_create_textured_mesh(ptr, ptr, ptr, i32, i32)"
+        );
     }
 
     // Emit Vec (dynamic array) runtime extern declarations.
@@ -985,6 +999,8 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@gpu_set_mesh_transform")
         || ir.contains("@gpu_draw_mesh")
         || ir.contains("@gpu_create_mesh_triangles")
+        || ir.contains("@gpu_upload_texture")
+        || ir.contains("@gpu_create_textured_mesh")
         || ir.contains("@gpu_blit_rgba")
         // Vec builtins
         || ir.contains("@axiom_vec_new")
@@ -1177,6 +1193,45 @@ fn is_signed_int_type_str(ty: &str) -> bool {
     matches!(ty, "i8" | "i16" | "i32" | "i64" | "i128")
 }
 
+/// Emit a contract check (precondition or postcondition) as a conditional branch.
+///
+/// If the condition is false, prints an error message and calls `exit(1)`.
+fn emit_contract_check(ctx: &mut CodegenContext, expr: &HirExpr, kind: &str, func_name: &str) {
+    let cond = emit_expr(ctx, expr, Some("i1"));
+    let cond_i1 = if cond.ty != "i1" {
+        let cmp = ctx.fresh_reg();
+        ctx.emit(&format!("{cmp} = icmp ne {} {}, 0", cond.ty, cond.reg));
+        cmp
+    } else {
+        cond.reg.clone()
+    };
+
+    let ok_label = ctx.fresh_label(&format!("{}.ok", kind.to_lowercase()));
+    let fail_label = ctx.fresh_label(&format!("{}.fail", kind.to_lowercase()));
+
+    ctx.emit(&format!(
+        "br i1 {cond_i1}, label %{ok_label}, label %{fail_label}"
+    ));
+    ctx.block_terminated = true;
+    ctx.emit_raw(&format!("{fail_label}:"));
+    ctx.block_terminated = false;
+
+    let msg = format!("{kind} failed in {func_name}\n");
+    let msg_idx = ctx.string_literals.len();
+    ctx.string_literals.push(msg);
+    ctx.needs_printf = true;
+    ctx.needs_abort = true;
+    let _p = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{_p} = call i32 (ptr, ...) @printf(ptr @.str.{msg_idx})"
+    ));
+    ctx.emit("call void @exit(i32 1)");
+    ctx.emit("unreachable");
+
+    ctx.emit_raw(&format!("{ok_label}:"));
+    ctx.block_terminated = false;
+}
+
 /// Emit a function definition.
 fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     // Reset per-function state.
@@ -1253,6 +1308,25 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
 
     // Alloca + store for each parameter.
     emit_param_allocas(ctx, &func.params);
+
+    // Emit precondition checks in debug mode.
+    if ctx.debug_mode {
+        for ann in &func.annotations {
+            if let HirAnnotationKind::Precondition(ref expr) = ann.kind {
+                emit_contract_check(ctx, expr, "Precondition", &func.name);
+            }
+        }
+    }
+
+    // Collect postconditions for checking at return sites.
+    ctx.postconditions.clear();
+    if ctx.debug_mode {
+        for ann in &func.annotations {
+            if let HirAnnotationKind::Postcondition(ref expr) = ann.kind {
+                ctx.postconditions.push((func.name.clone(), (**expr).clone()));
+            }
+        }
+    }
 
     // Emit function body.
     emit_block(ctx, &func.body);
@@ -1474,7 +1548,51 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
         HirStmtKind::Assign { target, value } => emit_assign(ctx, target, value),
         HirStmtKind::Return { value } => {
             if let Some(value) = value {
-                emit_return(ctx, value);
+                if !ctx.postconditions.is_empty() {
+                    // Postcondition checks: evaluate result, bind as "result", check, then return.
+                    let postconditions = ctx.postconditions.clone();
+                    let ret_type = ctx.current_return_type.clone();
+                    let expected = if ret_type.is_empty() {
+                        None
+                    } else {
+                        Some(ret_type.as_str())
+                    };
+                    let val = emit_expr(ctx, value, expected);
+                    let ty = if !ret_type.is_empty() {
+                        ret_type.clone()
+                    } else {
+                        val.ty.clone()
+                    };
+
+                    // Alloca for result and store the return value.
+                    let result_alloca = ctx.fresh_reg();
+                    ctx.emit(&format!("{result_alloca} = alloca {ty}"));
+                    ctx.emit(&format!("store {ty} {}, ptr {result_alloca}", val.reg));
+                    ctx.variables.insert(
+                        "result".to_string(),
+                        VarInfo {
+                            alloca_name: result_alloca.clone(),
+                            llvm_type: ty.clone(),
+                            array_info: None,
+                        },
+                    );
+
+                    // Check each postcondition.
+                    for (func_name, post_expr) in &postconditions {
+                        emit_contract_check(ctx, post_expr, "Postcondition", func_name);
+                    }
+
+                    // Remove "result" variable.
+                    ctx.variables.remove("result");
+
+                    // Load the result and return it.
+                    let ret_val = ctx.fresh_reg();
+                    ctx.emit(&format!("{ret_val} = load {ty}, ptr {result_alloca}"));
+                    ctx.emit(&format!("ret {ty} {ret_val}"));
+                    ctx.block_terminated = true;
+                } else {
+                    emit_return(ctx, value);
+                }
             } else {
                 ctx.emit("ret void");
                 ctx.block_terminated = true;
@@ -3717,6 +3835,8 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "gpu_set_mesh_transform" => return emit_builtin_gpu_set_mesh_transform(ctx, args),
             "gpu_draw_mesh" => return emit_builtin_gpu_draw_mesh(ctx, args),
             "gpu_create_mesh_triangles" => return emit_builtin_gpu_create_mesh_triangles(ctx, args),
+            "gpu_upload_texture" => return emit_builtin_gpu_upload_texture(ctx, args),
+            "gpu_create_textured_mesh" => return emit_builtin_gpu_create_textured_mesh(ctx, args),
             "gpu_blit_rgba" => return emit_builtin_gpu_blit_rgba(ctx, args),
             // Option (sum type) builtins -- tagged union packed into i64
             "option_none" => return emit_builtin_option_none(ctx, args),
@@ -6840,6 +6960,59 @@ fn emit_builtin_gpu_create_mesh_triangles(ctx: &mut CodegenContext, args: &[HirE
         reg: result_reg,
         ty: "i32".to_string(),
     }
+}
+
+/// Emit built-in `gpu_upload_texture(handle: ptr, pixels: ptr, width: i32, height: i32) -> i32`.
+fn emit_builtin_gpu_upload_texture(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 4 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_upload_texture() requires 4 arguments (handle, pixels, width, height)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue { reg: "0".to_string(), ty: "i32".to_string() };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let pixels_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let width_val = emit_expr(ctx, &args[2], Some("i32"));
+    let height_val = emit_expr(ctx, &args[3], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_upload_texture(ptr {}, ptr {}, i32 {}, i32 {})",
+        handle_val.reg, pixels_val.reg, width_val.reg, height_val.reg
+    ));
+    LlvmValue { reg: result_reg, ty: "i32".to_string() }
+}
+
+/// Emit built-in `gpu_create_textured_mesh(handle, positions, uvs, num_verts, texture_id) -> i32`.
+fn emit_builtin_gpu_create_textured_mesh(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_gpu = true;
+
+    if args.len() != 5 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "gpu_create_textured_mesh() requires 5 arguments (handle, positions, uvs, num_vertices, texture_id)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue { reg: "0".to_string(), ty: "i32".to_string() };
+    }
+
+    let handle_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let pos_val = emit_expr(ctx, &args[1], Some("ptr"));
+    let uv_val = emit_expr(ctx, &args[2], Some("ptr"));
+    let count_val = emit_expr(ctx, &args[3], Some("i32"));
+    let tex_val = emit_expr(ctx, &args[4], Some("i32"));
+
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @gpu_create_textured_mesh(ptr {}, ptr {}, ptr {}, i32 {}, i32 {})",
+        handle_val.reg, pos_val.reg, uv_val.reg, count_val.reg, tex_val.reg
+    ));
+    LlvmValue { reg: result_reg, ty: "i32".to_string() }
 }
 
 /// Emit built-in `gpu_blit_rgba(handle: ptr, pixels: ptr, width: i32, height: i32)`.

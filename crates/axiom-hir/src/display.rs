@@ -538,6 +538,19 @@ impl fmt::Display for HirAnnotation {
                 }
                 write!(f, ")")
             }
+            HirAnnotationKind::Strict => write!(f, "@strict"),
+            HirAnnotationKind::Precondition(expr) => write!(f, "@precondition({expr})"),
+            HirAnnotationKind::Postcondition(expr) => write!(f, "@postcondition({expr})"),
+            HirAnnotationKind::Test(tc) => {
+                write!(f, "@test {{ input: (")?;
+                for (i, input) in tc.inputs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{input}")?;
+                }
+                write!(f, "), expect: {} }}", tc.expected)
+            }
             HirAnnotationKind::Custom(name, args) => {
                 write!(f, "@{name}")?;
                 if !args.is_empty() {

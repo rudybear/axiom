@@ -34,6 +34,43 @@ pub fn lower(module: &ast::Module) -> Result<HirModule, Vec<LowerError>> {
     let mut ctx = LoweringContext::new();
     ctx.collect_user_defined_types(module);
     let hir = ctx.lower_module(module);
+
+    // Check @strict enforcement: every non-main function must have @intent + contract.
+    let is_strict = hir
+        .annotations
+        .iter()
+        .any(|a| matches!(a.kind, HirAnnotationKind::Strict));
+    if is_strict {
+        for func in &hir.functions {
+            if func.name == "main" {
+                continue;
+            }
+            let has_intent = func
+                .annotations
+                .iter()
+                .any(|a| matches!(a.kind, HirAnnotationKind::Intent(_)));
+            let has_contract = func.annotations.iter().any(|a| {
+                matches!(
+                    a.kind,
+                    HirAnnotationKind::Precondition(_) | HirAnnotationKind::Postcondition(_)
+                )
+            });
+            if !has_intent || !has_contract {
+                let missing = match (!has_intent, !has_contract) {
+                    (true, true) => "@intent and @precondition/@postcondition",
+                    (true, false) => "@intent",
+                    (false, true) => "@precondition/@postcondition",
+                    _ => unreachable!(),
+                };
+                ctx.errors.push(LowerError::StrictMissingAnnotations {
+                    name: func.name.clone(),
+                    missing: missing.to_string(),
+                    span: span_to_source_span(func.name_span),
+                });
+            }
+        }
+    }
+
     if ctx.errors.is_empty() {
         Ok(hir)
     } else {
@@ -673,6 +710,17 @@ impl LoweringContext {
             ast::Annotation::ParallelFor(config) => {
                 HirAnnotationKind::ParallelFor(config.clone())
             }
+            ast::Annotation::Strict => HirAnnotationKind::Strict,
+            ast::Annotation::Precondition(expr) => {
+                HirAnnotationKind::Precondition(Box::new(self.lower_expr(expr, ann.span)))
+            }
+            ast::Annotation::Postcondition(expr) => {
+                HirAnnotationKind::Postcondition(Box::new(self.lower_expr(expr, ann.span)))
+            }
+            ast::Annotation::Test(tc) => HirAnnotationKind::Test(HirTestCase {
+                inputs: tc.inputs.iter().map(|e| self.lower_expr(e, ann.span)).collect(),
+                expected: self.lower_expr(&tc.expected, ann.span),
+            }),
             ast::Annotation::Custom(name, args) => {
                 HirAnnotationKind::Custom(name.clone(), args.clone())
             }
@@ -767,6 +815,10 @@ fn annotation_valid_targets(kind: &HirAnnotationKind) -> (&str, Vec<AnnotationTa
         HirAnnotationKind::Export => ("export", vec![Function]),
         HirAnnotationKind::Lifetime(_) => ("lifetime", vec![Function, Block]),
         HirAnnotationKind::ParallelFor(_) => ("parallel_for", vec![Block]),
+        HirAnnotationKind::Strict => ("strict", vec![Module]),
+        HirAnnotationKind::Precondition(_) => ("precondition", vec![Function]),
+        HirAnnotationKind::Postcondition(_) => ("postcondition", vec![Function]),
+        HirAnnotationKind::Test(_) => ("test", vec![Function]),
         HirAnnotationKind::Custom(_, _) => (
             "custom",
             vec![Function, Module, Param, StructDef, StructField, Block],

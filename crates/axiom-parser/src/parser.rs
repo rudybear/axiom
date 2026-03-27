@@ -728,6 +728,58 @@ impl<'src> Parser<'src> {
                     Annotation::Lifetime("scope".to_string())
                 }
             }
+            "strict" => Annotation::Strict,
+            "precondition" => {
+                // @precondition(expr)
+                self.expect(&TokenKind::LParen, "'('");
+                let expr = self.parse_expr();
+                self.expect(&TokenKind::RParen, "')'");
+                Annotation::Precondition(Box::new(expr))
+            }
+            "postcondition" => {
+                // @postcondition(expr)
+                self.expect(&TokenKind::LParen, "'('");
+                let expr = self.parse_expr();
+                self.expect(&TokenKind::RParen, "')'");
+                Annotation::Postcondition(Box::new(expr))
+            }
+            "test" => {
+                // @test { input: (args...), expect: value }
+                self.expect(&TokenKind::LBrace, "'{'");
+                let mut inputs = Vec::new();
+                let mut expected = Expr::IntLiteral(0);
+                // Parse key: value pairs
+                while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+                    let key = match self.peek() {
+                        TokenKind::Ident(ref n) => n.clone(),
+                        _ => {
+                            self.errors.push(ParseError::InvalidAnnotation {
+                                name: "test".to_string(),
+                                reason: "expected 'input' or 'expect'".to_string(),
+                                span: span_to_source_span(self.current_span()),
+                            });
+                            break;
+                        }
+                    };
+                    self.advance();
+                    self.expect(&TokenKind::Colon, "':'");
+                    if key == "input" {
+                        self.expect(&TokenKind::LParen, "'('");
+                        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                            inputs.push(self.parse_expr());
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&TokenKind::RParen, "')'");
+                    } else if key == "expect" {
+                        expected = self.parse_expr();
+                    }
+                    self.eat(&TokenKind::Comma); // optional trailing comma
+                }
+                self.expect(&TokenKind::RBrace, "'}'");
+                Annotation::Test(crate::ast::TestCase { inputs, expected })
+            }
             _ => {
                 // Custom annotation: @name or @name(args) or @name { kv }
                 if self.eat(&TokenKind::LParen) {

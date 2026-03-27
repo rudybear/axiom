@@ -214,7 +214,24 @@ pub enum Annotation {
     /// `@parallel_for(shared_read: [...], shared_write: [...], reduction(+: var), private: [...])`
     /// — marks a for loop for parallel execution with data sharing clauses.
     ParallelFor(ParallelForConfig),
+    /// `@strict` — module-level annotation requiring all functions to have @intent and contracts.
+    Strict,
+    /// `@precondition(expr)` — function precondition (checked at runtime in debug mode).
+    Precondition(Box<Expr>),
+    /// `@postcondition(expr)` — function postcondition (checked at runtime in debug mode).
+    Postcondition(Box<Expr>),
+    /// `@test { input: (...), expect: value }` — inline test case for a function.
+    Test(TestCase),
     Custom(String, Vec<AnnotationValue>),
+}
+
+/// Inline test case attached to a function via `@test { input: (...), expect: value }`.
+#[derive(Debug, Clone)]
+pub struct TestCase {
+    /// The input argument expressions.
+    pub inputs: Vec<Expr>,
+    /// The expected return value expression.
+    pub expected: Expr,
 }
 
 /// Configuration for `@parallel_for` data sharing clauses.

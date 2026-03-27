@@ -107,6 +107,22 @@ pub enum LowerError {
         #[label("invalid array size")]
         span: SourceSpan,
     },
+
+    /// A function in a `@strict` module is missing required annotations.
+    #[error("@strict: function `{name}` is missing {missing}")]
+    #[diagnostic(
+        code(axiom::hir::strict_missing_annotations),
+        help("in @strict modules, every non-main function must have @intent and at least one @precondition or @postcondition")
+    )]
+    StrictMissingAnnotations {
+        /// The function name.
+        name: String,
+        /// Description of what is missing.
+        missing: String,
+        /// Source location of the function.
+        #[label("this function")]
+        span: SourceSpan,
+    },
 }
 
 /// Convert an `axiom_lexer::Span` to a `miette::SourceSpan`.
