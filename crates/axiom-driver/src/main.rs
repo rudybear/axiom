@@ -3527,4 +3527,58 @@ fn main() -> i32 {
         let _ = std::fs::remove_file(&axm_path);
         let _ = std::fs::remove_file(&h_path);
     }
+
+    // -----------------------------------------------------------------------
+    // Tests for pub import / transitive re-export
+    // -----------------------------------------------------------------------
+
+    /// `pub import foo;` in module A should make foo's declarations visible
+    /// to any module that does `import A;` — even without `pub import A;`.
+    #[test]
+    fn test_pub_import_transitive_reexport() {
+        // Use a unique sub-directory to avoid collisions with other tests.
+        let tmp = std::env::temp_dir().join("axiom_pub_import_test");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // foo.axm — defines a helper function (no pub annotation needed, legacy mode)
+        let foo_src = "fn foo_helper(x: i32) -> i32 { return x + 1; }\n";
+        // a.axm — re-exports foo via `pub import`; has its own pub fn too
+        let a_src = "pub import foo;\npub fn a_fn(x: i32) -> i32 { return x + 2; }\n";
+        // b.axm — imports a (NOT pub import), should still see foo_helper via re-export
+        let b_src = "import a;\nfn main() -> i32 { return foo_helper(1); }\n";
+
+        let foo_path = tmp.join("foo.axm");
+        let a_path   = tmp.join("a.axm");
+        let b_path   = tmp.join("b.axm");
+
+        std::fs::write(&foo_path, foo_src).unwrap();
+        std::fs::write(&a_path, a_src).unwrap();
+        std::fs::write(&b_path, b_src).unwrap();
+
+        // Parse b.axm and resolve its imports.
+        let b_source = std::fs::read_to_string(&b_path).unwrap();
+        let mut result = axiom_parser::parse(&b_source);
+        resolve_imports(&mut result.module, &b_path.display().to_string());
+
+        // After resolution, b's module should contain foo_helper (from the
+        // transitive pub import chain A -> foo).
+        let has_foo_helper = result.module.items.iter().any(|item| {
+            if let axiom_parser::ast::Item::Function(f) = &item.node {
+                f.name.node == "foo_helper"
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_foo_helper,
+            "foo_helper should be visible in b via A's pub import; items: {:?}",
+            result.module.items.iter().map(|i| format!("{:?}", i.node)).collect::<Vec<_>>()
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&foo_path);
+        let _ = std::fs::remove_file(&a_path);
+        let _ = std::fs::remove_file(&b_path);
+        let _ = std::fs::remove_dir(&tmp);
+    }
 }

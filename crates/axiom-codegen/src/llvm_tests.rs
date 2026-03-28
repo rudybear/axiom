@@ -7696,3 +7696,101 @@ fn test_parallel_range_wrong_arg_count() {
         }
     }
 }
+
+// -----------------------------------------------------------------------
+// Error recovery: codegen must collect ALL errors, not just the first one
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_codegen_collects_multiple_errors_in_function_body() {
+    // Build a function with a valid return type (i32) but two let-bindings that
+    // use unsupported Tensor types.  Both errors should be reported.
+    let m = module(
+        Some("test"),
+        vec![func(
+            "main",
+            vec![],
+            HirType::Primitive(PrimitiveType::I32),
+            block(vec![
+                stmt(HirStmtKind::Let {
+                    name: "a".to_string(),
+                    name_span: span(),
+                    ty: HirType::Tensor {
+                        element: Box::new(HirType::Primitive(PrimitiveType::F32)),
+                        dims: vec![axiom_hir::HirDimExpr::Const(4)],
+                    },
+                    value: Some(int_lit(0)),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Let {
+                    name: "b".to_string(),
+                    name_span: span(),
+                    ty: HirType::Tensor {
+                        element: Box::new(HirType::Primitive(PrimitiveType::F64)),
+                        dims: vec![axiom_hir::HirDimExpr::Const(4)],
+                    },
+                    value: Some(int_lit(0)),
+                    mutable: false,
+                }),
+                stmt(HirStmtKind::Return {
+                    value: Some(int_lit(0)),
+                }),
+            ]),
+        )],
+    );
+
+    let result = codegen(&m);
+    assert!(result.is_err(), "should fail with unsupported Tensor types");
+    let errors = result.unwrap_err();
+    // Both unsupported-type errors should be reported, not just the first one.
+    assert!(
+        errors.len() >= 2,
+        "expected at least 2 errors (one per unsupported Tensor let-binding), got {}: {:?}",
+        errors.len(),
+        errors
+    );
+}
+
+#[test]
+fn test_codegen_collects_errors_across_functions() {
+    // Two separate functions, each with an unsupported return type.
+    // Both errors should be collected even though the first function fails.
+    let m = module(
+        Some("test"),
+        vec![
+            func(
+                "bad1",
+                vec![],
+                HirType::Tensor {
+                    element: Box::new(HirType::Primitive(PrimitiveType::F32)),
+                    dims: vec![axiom_hir::HirDimExpr::Const(4)],
+                },
+                block(vec![stmt(HirStmtKind::Return {
+                    value: Some(int_lit(0)),
+                })]),
+            ),
+            func(
+                "bad2",
+                vec![],
+                HirType::Tensor {
+                    element: Box::new(HirType::Primitive(PrimitiveType::F64)),
+                    dims: vec![axiom_hir::HirDimExpr::Const(8)],
+                },
+                block(vec![stmt(HirStmtKind::Return {
+                    value: Some(int_lit(0)),
+                })]),
+            ),
+        ],
+    );
+
+    let result = codegen(&m);
+    assert!(result.is_err(), "should fail with unsupported return types");
+    let errors = result.unwrap_err();
+    // Both functions should report their return-type errors.
+    assert!(
+        errors.len() >= 2,
+        "expected at least 2 errors (one per bad function), got {}: {:?}",
+        errors.len(),
+        errors
+    );
+}

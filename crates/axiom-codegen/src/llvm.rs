@@ -2102,11 +2102,13 @@ fn emit_let(
         ref element, size, ..
     } = ty
     {
+        // Resolve element type; on failure use dummy "i8" so remaining
+        // statements in the same block can still be processed.
         let elem_llvm = match hir_type_to_llvm(element) {
             Ok(t) => t,
             Err(e) => {
                 ctx.errors.push(e);
-                return;
+                "i8".to_string()
             }
         };
         let array_llvm = format!("[{size} x {elem_llvm}]");
@@ -2152,11 +2154,13 @@ fn emit_let(
         if has_lifetime_scope(annotations) && is_heap_alloc_call(value) {
             if let HirExprKind::Call { args, .. } = &value.kind {
                 if args.len() == 2 {
+                    // Resolve pointer type; on failure use dummy "ptr" so the
+                    // enclosing block can still collect further errors.
                     let llvm_type = match hir_type_to_llvm(ty) {
                         Ok(t) => t,
                         Err(e) => {
                             ctx.errors.push(e);
-                            return;
+                            "ptr".to_string()
                         }
                     };
 
@@ -2260,11 +2264,15 @@ fn emit_let(
         return;
     }
 
+    // Resolve variable type.  Use a dummy on failure so that the variable still
+    // gets registered and subsequent uses of it don't also emit spurious
+    // "undefined variable" errors.  The invalid IR is never used (codegen_inner
+    // returns Err when ctx.errors is non-empty).
     let llvm_type = match hir_type_to_llvm(ty) {
         Ok(t) => t,
         Err(e) => {
             ctx.errors.push(e);
-            return;
+            "i32".to_string()
         }
     };
 
