@@ -442,3 +442,23 @@ checks reduce the critical path length.
 
 **When to apply:** Any loop that uses a boolean/int flag to control continuation.
 Convert to direct condition checking on the actual termination value.
+
+## Clarification on readonly_ptr / writeonly_ptr
+
+**Previous finding (Anti-pattern 7) was PARTIALLY wrong.** The regressions were caused
+by agents RESTRUCTURING code alongside adding readonly_ptr. The readonly_ptr attribute
+itself generates correct and potentially beneficial LLVM IR.
+
+**When readonly_ptr HELPS:**
+- Non-@pure functions with mixed read/write params (e.g., `copy(src, dst)`)
+- The `readonly` tells LLVM that writes to `dst` can't affect reads from `src`
+
+**When readonly_ptr is REDUNDANT (no effect):**
+- @pure functions — already have `memory(argmem: read)` which covers all params
+
+**When readonly_ptr HURTS:**
+- NEVER, on its own. The regressions came from code restructuring done simultaneously.
+
+**Rule update:** readonly_ptr is SAFE but UNNECESSARY on @pure functions.
+Use it on non-@pure functions with mixed read/write params where alias info matters.
+Do NOT combine it with code restructuring in the same change — measure each independently.
