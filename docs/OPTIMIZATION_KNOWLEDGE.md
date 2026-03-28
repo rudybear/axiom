@@ -348,3 +348,19 @@ schedule), or checksums.
 
 **Anti-pattern:** Never use `+` or `*` in hash functions — the nsw flag allows LLVM to
 assume overflow doesn't happen, which can silently produce wrong results.
+
+## Design Decision: No >> or << infix operators
+
+AXIOM deliberately does NOT support `>>` and `<<` as infix operators.
+All bitwise operations use explicit function calls: `shr()`, `lshr()`, `shl()`.
+
+**Why:** AXIOM is AI-first. AI agents don't benefit from C syntax sugar.
+Explicit function calls are:
+- **Unambiguous**: `shr(x, 4)` is always arithmetic shift right. `lshr(x, 4)` is always logical.
+  In C, `x >> 4` depends on whether `x` is signed or unsigned — a source of bugs.
+- **Searchable**: An AI can grep for `shr(` or `lshr(` precisely.
+- **Consistent**: All bitwise ops are functions: `band`, `bor`, `bxor`, `shl`, `shr`, `lshr`, `rotl`, `rotr`.
+  Adding `>>` as an operator would break this consistency.
+
+The `shr()` vs `lshr()` distinction is AXIOM's answer to C's type-dependent `>>` behavior.
+For unsigned types (u32), use `lshr()`. For signed types (i32), use `shr()`.
