@@ -71,6 +71,35 @@ pub fn lower(module: &ast::Module) -> Result<HirModule, Vec<LowerError>> {
                     span: span_to_source_span(func.name_span),
                 });
             }
+
+            // Check for vacuous contracts: if ALL contracts are trivially `true`,
+            // warn the developer that the contracts are meaningless.
+            let contract_annotations: Vec<&HirAnnotation> = func
+                .annotations
+                .iter()
+                .filter(|a| {
+                    matches!(
+                        a.kind,
+                        HirAnnotationKind::Precondition(_) | HirAnnotationKind::Postcondition(_)
+                    )
+                })
+                .collect();
+            if !contract_annotations.is_empty() {
+                let all_trivial = contract_annotations.iter().all(|a| match &a.kind {
+                    HirAnnotationKind::Precondition(expr)
+                    | HirAnnotationKind::Postcondition(expr) => {
+                        matches!(expr.kind, HirExprKind::BoolLiteral { value: true })
+                    }
+                    _ => false,
+                });
+                if all_trivial {
+                    eprintln!(
+                        "warning: function `{}` has only trivial contracts (@precondition(true)) \
+                         -- consider adding meaningful constraints",
+                        func.name
+                    );
+                }
+            }
         }
     }
 
@@ -190,13 +219,32 @@ impl LoweringContext {
         let mut type_aliases = Vec::new();
         let mut imports = Vec::new();
 
+        // Determine the current platform for @cfg filtering.
+        let current_os = if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "linux") {
+            "linux"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "unknown"
+        };
+
         for item in &module.items {
             match &item.node {
                 ast::Item::Function(f) => {
+                    // Skip functions with @cfg that doesn't match the current platform.
+                    if !cfg_matches(&f.annotations, current_os) {
+                        continue;
+                    }
                     let hir_func = self.lower_function(f, item.span);
                     functions.push(hir_func);
                 }
                 ast::Item::ExternFunction(ef) => {
+                    // Skip extern functions with @cfg that doesn't match the current platform.
+                    if !cfg_matches(&ef.annotations, current_os) {
+                        continue;
+                    }
                     let hir_extern = self.lower_extern_function(ef, item.span);
                     extern_functions.push(hir_extern);
                 }
@@ -631,6 +679,12 @@ impl LoweringContext {
                     .map(|(name, expr)| (name.clone(), self.lower_expr(expr, SPAN_DUMMY)))
                     .collect(),
             },
+            ast::Expr::TupleLiteral { elements } => HirExprKind::TupleLiteral {
+                elements: elements
+                    .iter()
+                    .map(|expr| self.lower_expr(expr, SPAN_DUMMY))
+                    .collect(),
+            },
         };
 
         HirExpr { id, kind, span }
@@ -756,6 +810,7 @@ impl LoweringContext {
                 }
             }
             ast::Annotation::Trace => HirAnnotationKind::Trace,
+            ast::Annotation::Cfg(target) => HirAnnotationKind::Cfg(target.clone()),
             ast::Annotation::Requires(expr) => {
                 HirAnnotationKind::Requires(Box::new(self.lower_expr(expr, ann.span)))
             }
@@ -874,6 +929,7 @@ fn annotation_valid_targets(kind: &HirAnnotationKind) -> (&str, Vec<AnnotationTa
         HirAnnotationKind::Test(_) => ("test", vec![Function]),
         HirAnnotationKind::Link { .. } => ("link", vec![Function]),
         HirAnnotationKind::Trace => ("trace", vec![Function]),
+        HirAnnotationKind::Cfg(_) => ("cfg", vec![Function]),
         HirAnnotationKind::Requires(_) => ("requires", vec![Function]),
         HirAnnotationKind::Ensures(_) => ("ensures", vec![Function]),
         HirAnnotationKind::Invariant(_) => ("invariant", vec![Block]),
@@ -882,6 +938,23 @@ fn annotation_valid_targets(kind: &HirAnnotationKind) -> (&str, Vec<AnnotationTa
             vec![Function, Module, Param, StructDef, StructField, Block],
         ),
     }
+}
+
+/// Check whether an item with the given AST annotations should be included
+/// based on `@cfg` annotations and the current platform.
+///
+/// Returns `true` if the item should be included (i.e., no `@cfg` annotation
+/// present, or a `@cfg` annotation matches the current OS). Returns `false`
+/// if a `@cfg` annotation is present and does NOT match the current OS.
+fn cfg_matches(annotations: &[ast::Spanned<ast::Annotation>], current_os: &str) -> bool {
+    for ann in annotations {
+        if let ast::Annotation::Cfg(ref target) = ann.node {
+            if target != current_os {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1990,6 +2063,220 @@ fn main() -> i32 {
             result.is_ok(),
             "should pass: all @strict annotations present: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn test_cfg_filters_non_matching_functions() {
+        let source = r#"
+@module cfg_test;
+
+@cfg("windows")
+fn win_only() -> i32 { return 1; }
+
+@cfg("linux")
+fn linux_only() -> i32 { return 2; }
+
+@cfg("macos")
+fn mac_only() -> i32 { return 3; }
+
+fn always_present() -> i32 { return 0; }
+"#;
+        let hir = parse_and_lower(source).expect("lowering should succeed");
+
+        // `always_present` has no @cfg, so it should always be present.
+        assert!(
+            hir.functions.iter().any(|f| f.name == "always_present"),
+            "always_present should be in HIR"
+        );
+
+        // Exactly one of the platform-specific functions should be present
+        // (the one matching the current build platform).
+        let current_os = if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "linux") {
+            "linux"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "unknown"
+        };
+
+        match current_os {
+            "windows" => {
+                assert!(
+                    hir.functions.iter().any(|f| f.name == "win_only"),
+                    "win_only should be present on Windows"
+                );
+                assert!(
+                    !hir.functions.iter().any(|f| f.name == "linux_only"),
+                    "linux_only should NOT be present on Windows"
+                );
+                assert!(
+                    !hir.functions.iter().any(|f| f.name == "mac_only"),
+                    "mac_only should NOT be present on Windows"
+                );
+            }
+            "linux" => {
+                assert!(
+                    !hir.functions.iter().any(|f| f.name == "win_only"),
+                    "win_only should NOT be present on Linux"
+                );
+                assert!(
+                    hir.functions.iter().any(|f| f.name == "linux_only"),
+                    "linux_only should be present on Linux"
+                );
+                assert!(
+                    !hir.functions.iter().any(|f| f.name == "mac_only"),
+                    "mac_only should NOT be present on Linux"
+                );
+            }
+            "macos" => {
+                assert!(
+                    !hir.functions.iter().any(|f| f.name == "win_only"),
+                    "win_only should NOT be present on macOS"
+                );
+                assert!(
+                    !hir.functions.iter().any(|f| f.name == "linux_only"),
+                    "linux_only should NOT be present on macOS"
+                );
+                assert!(
+                    hir.functions.iter().any(|f| f.name == "mac_only"),
+                    "mac_only should be present on macOS"
+                );
+            }
+            _ => {
+                // Unknown platform: none of the platform-specific functions should be present
+                assert!(
+                    !hir.functions.iter().any(|f| f.name == "win_only"),
+                    "win_only should NOT be present on unknown platform"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cfg_filters_extern_functions() {
+        let source = r#"
+@module cfg_extern_test;
+
+@cfg("windows")
+extern "C" fn GetTickCount() -> i64;
+
+@cfg("linux")
+extern "C" fn clock_gettime() -> i64;
+
+fn main() -> i32 { return 0; }
+"#;
+        let hir = parse_and_lower(source).expect("lowering should succeed");
+
+        if cfg!(target_os = "windows") {
+            assert!(
+                hir.extern_functions.iter().any(|f| f.name == "GetTickCount"),
+                "GetTickCount should be present on Windows"
+            );
+            assert!(
+                !hir.extern_functions.iter().any(|f| f.name == "clock_gettime"),
+                "clock_gettime should NOT be present on Windows"
+            );
+        } else if cfg!(target_os = "linux") {
+            assert!(
+                !hir.extern_functions.iter().any(|f| f.name == "GetTickCount"),
+                "GetTickCount should NOT be present on Linux"
+            );
+            assert!(
+                hir.extern_functions.iter().any(|f| f.name == "clock_gettime"),
+                "clock_gettime should be present on Linux"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cfg_no_annotation_always_included() {
+        let source = r#"
+fn always() -> i32 { return 42; }
+"#;
+        let hir = parse_and_lower(source).expect("lowering should succeed");
+        assert_eq!(hir.functions.len(), 1);
+        assert_eq!(hir.functions[0].name, "always");
+    }
+
+    #[test]
+    fn test_strict_trivial_precondition_warning() {
+        // Under @strict, a function with only @precondition(true) should still
+        // pass (it has a contract), but should emit a warning about vacuous contracts.
+        // We verify the lowering succeeds (doesn't error).
+        let source = r#"
+@strict;
+
+@intent("does nothing meaningful")
+@precondition(true)
+fn trivial(x: i32) -> i32 {
+    return x;
+}
+
+fn main() -> i32 {
+    return trivial(5);
+}
+"#;
+        let result = parse_and_lower(source);
+        // Should succeed: @precondition(true) IS a contract, so @strict is satisfied.
+        assert!(
+            result.is_ok(),
+            "should pass: trivial @precondition(true) counts as a contract: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_strict_nontrivial_precondition_no_warning() {
+        // Under @strict, a function with a meaningful @precondition should NOT
+        // trigger the trivial-contract warning.
+        let source = r#"
+@strict;
+
+@intent("adds one")
+@precondition(x > 0)
+fn add_one(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn main() -> i32 {
+    return add_one(5);
+}
+"#;
+        let result = parse_and_lower(source);
+        assert!(
+            result.is_ok(),
+            "should pass with meaningful precondition: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_tuple_literal_parsing_and_lowering() {
+        let source = r#"
+fn make_pair() -> (i32, f64) {
+    return (1, 2.0);
+}
+
+fn main() -> i32 {
+    return 0;
+}
+"#;
+        let result = parse_and_lower(source);
+        assert!(
+            result.is_ok(),
+            "tuple literal should parse and lower: {:?}",
+            result.err()
+        );
+        let hir = result.unwrap();
+        let make_pair = hir.functions.iter().find(|f| f.name == "make_pair").unwrap();
+        // Return type should be Tuple
+        assert!(
+            matches!(make_pair.return_type, HirType::Tuple { .. }),
+            "make_pair return type should be Tuple, got: {:?}",
+            make_pair.return_type
         );
     }
 }

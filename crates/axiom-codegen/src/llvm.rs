@@ -128,6 +128,12 @@ struct CodegenContext {
     needs_printf_i32: bool,
     /// Whether an f64 format string is needed.
     needs_printf_f64: bool,
+    /// Whether a hex i32 format string is needed.
+    needs_printf_hex_i32: bool,
+    /// Whether a hex i64 format string is needed.
+    needs_printf_hex_i64: bool,
+    /// Whether `@memcmp` is needed (memcmp builtin).
+    needs_memcmp: bool,
     /// Whether puts is needed.
     needs_puts: bool,
     /// Whether printf is needed.
@@ -291,6 +297,9 @@ impl CodegenContext {
             needs_printf_i64: false,
             needs_printf_i32: false,
             needs_printf_f64: false,
+            needs_printf_hex_i32: false,
+            needs_printf_hex_i64: false,
+            needs_memcmp: false,
             needs_puts: false,
             needs_printf: false,
             needs_sqrt_f64: false,
@@ -890,6 +899,20 @@ fn codegen_inner(
         );
     }
 
+    if ctx.needs_printf_hex_i32 {
+        let _ = writeln!(
+            ctx.output,
+            "@.fmt.hex.i32 = private unnamed_addr constant [4 x i8] c\"%x\\0A\\00\""
+        );
+    }
+
+    if ctx.needs_printf_hex_i64 {
+        let _ = writeln!(
+            ctx.output,
+            "@.fmt.hex.i64 = private unnamed_addr constant [6 x i8] c\"%llx\\0A\\00\""
+        );
+    }
+
     // Emit global constant arrays (array_const_i32, array_const_u8, array_const_f64).
     for arr in &ctx.const_arrays.clone() {
         let _ = writeln!(ctx.output, "{arr}");
@@ -899,6 +922,8 @@ fn codegen_inner(
         || ctx.needs_printf_i64
         || ctx.needs_printf_i32
         || ctx.needs_printf_f64
+        || ctx.needs_printf_hex_i32
+        || ctx.needs_printf_hex_i64
         || !ctx.const_arrays.is_empty();
     if has_globals {
         ctx.emit_blank();
@@ -954,6 +979,12 @@ fn codegen_inner(
         let _ = writeln!(
             ctx.output,
             "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)"
+        );
+    }
+    if ctx.needs_memcmp {
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @memcmp(ptr, ptr, i64)"
         );
     }
     if ctx.needs_fshl_i32 {
@@ -2246,7 +2277,7 @@ fn emit_let(
     } else {
         // No initializer — zero-initialize primitive types too.
         // This handles `let x: i32;` → alloca + store 0.
-        let zero = if is_vector_type(&llvm_type) {
+        let zero = if is_vector_type(&llvm_type) || llvm_type.starts_with("{") {
             "zeroinitializer"
         } else {
             "0"
@@ -3161,6 +3192,44 @@ fn emit_expr(ctx: &mut CodegenContext, expr: &HirExpr, expected_type: Option<&st
                 ty: format!("[{size} x {elem_llvm}]"),
             }
         }
+        HirExprKind::TupleLiteral { elements } => {
+            // Emit each element expression.
+            let mut elem_vals: Vec<LlvmValue> = Vec::new();
+            // If we have an expected type, try to extract element types from it.
+            let expected_elem_types: Vec<Option<String>> = if let Some(exp) = expected_type {
+                if exp.starts_with("{") {
+                    let inner = exp.trim_start_matches('{').trim_end_matches('}').trim();
+                    inner.split(", ").map(|t| Some(t.trim().to_string())).collect()
+                } else {
+                    vec![None; elements.len()]
+                }
+            } else {
+                vec![None; elements.len()]
+            };
+            for (i, elem) in elements.iter().enumerate() {
+                let exp = expected_elem_types.get(i).and_then(|e| e.as_deref());
+                elem_vals.push(emit_expr(ctx, elem, exp));
+            }
+            // Build the tuple LLVM type from actual emitted types.
+            let type_parts: Vec<&str> = elem_vals.iter().map(|v| v.ty.as_str()).collect();
+            let tuple_type = format!("{{ {} }}", type_parts.join(", "));
+            // Build the tuple value via insertvalue chain.
+            let mut current = format!("undef");
+            let mut current_reg = String::new();
+            for (i, val) in elem_vals.iter().enumerate() {
+                let result = ctx.fresh_reg();
+                let src = if i == 0 { &current } else { &current_reg };
+                ctx.emit(&format!(
+                    "{result} = insertvalue {tuple_type} {src}, {} {}, {i}",
+                    val.ty, val.reg
+                ));
+                current_reg = result;
+            }
+            LlvmValue {
+                reg: current_reg,
+                ty: tuple_type,
+            }
+        }
         _ => {
             ctx.errors.push(CodegenError::UnsupportedExpression {
                 expr: format!("{:?}", expr.kind),
@@ -3709,6 +3778,26 @@ fn emit_field_access(
             };
         }
 
+        // Tuple field access: t.0, t.1, etc. on anonymous struct types { T1, T2, ... }
+        if var_info.llvm_type.starts_with("{") && field.chars().all(|c| c.is_ascii_digit()) {
+            let idx: usize = field.parse().unwrap_or(0);
+            let load = ctx.fresh_reg();
+            ctx.emit(&format!("{load} = load {}, ptr {}", var_info.llvm_type, var_info.alloca_name));
+            let result = ctx.fresh_reg();
+            ctx.emit(&format!("{result} = extractvalue {} {load}, {idx}", var_info.llvm_type));
+            // Determine element type from the tuple type string.
+            let inner = var_info.llvm_type
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .trim();
+            let elem_types: Vec<&str> = inner.split(", ").collect();
+            let elem_type = elem_types.get(idx).unwrap_or(&"i32").trim().to_string();
+            return LlvmValue {
+                reg: result,
+                ty: elem_type,
+            };
+        }
+
         // Determine the struct name from the LLVM type.
         let struct_name = if var_info.llvm_type.starts_with("%struct.") {
             var_info.llvm_type.strip_prefix("%struct.").map(|s| s.to_string())
@@ -4253,6 +4342,9 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "print_i64" => return emit_builtin_print_i64(ctx, args),
             "print_i32" => return emit_builtin_print_i32(ctx, args),
             "print_f64" => return emit_builtin_print_f64(ctx, args),
+            "print_hex" => return emit_builtin_print_hex_i32(ctx, args),
+            "print_hex_i32" => return emit_builtin_print_hex_i32(ctx, args),
+            "print_hex_i64" => return emit_builtin_print_hex_i64(ctx, args),
             "widen" => return emit_builtin_widen(ctx, args),
             "narrow" => return emit_builtin_narrow(ctx, args),
             "truncate" => return emit_builtin_truncate(ctx, args),
@@ -4459,6 +4551,7 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "memcpy" => return emit_builtin_memcpy_user(ctx, args),
             "memset" => return emit_builtin_memset_user(ctx, args),
             "memmove" => return emit_builtin_memmove(ctx, args),
+            "memcmp" => return emit_builtin_memcmp(ctx, args),
             // I/O builtins
             "flush" => return emit_builtin_flush(ctx, args),
             // Typed function pointer call
@@ -4827,6 +4920,68 @@ fn emit_builtin_print_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVal
     let result_reg = ctx.fresh_reg();
     ctx.emit(&format!(
         "{result_reg} = call i32 (ptr, ...) @printf(ptr @.fmt.f64, double {})",
+        val.reg
+    ));
+    if ctx.debug_mode {
+        emit_debug_fflush(ctx);
+    }
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `print_hex_i32(n)` -- calls C `printf("%x\n", n)`.
+fn emit_builtin_print_hex_i32(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_printf = true;
+    ctx.needs_printf_hex_i32 = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "print_hex_i32() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("i32"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 (ptr, ...) @printf(ptr @.fmt.hex.i32, i32 {})",
+        val.reg
+    ));
+    if ctx.debug_mode {
+        emit_debug_fflush(ctx);
+    }
+    LlvmValue {
+        reg: result_reg,
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `print_hex_i64(n)` -- calls C `printf("%llx\n", n)`.
+fn emit_builtin_print_hex_i64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_printf = true;
+    ctx.needs_printf_hex_i64 = true;
+
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "print_hex_i64() with wrong number of arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    let val = emit_expr(ctx, &args[0], Some("i64"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 (ptr, ...) @printf(ptr @.fmt.hex.i64, i64 {})",
         val.reg
     ));
     if ctx.debug_mode {
@@ -8516,10 +8671,13 @@ fn hir_type_to_llvm(ty: &HirType) -> Result<String, CodegenError> {
         HirType::Ptr { .. } => Ok("ptr".to_string()),
         HirType::ReadonlyPtr { .. } => Ok("ptr".to_string()),
         HirType::WriteonlyPtr { .. } => Ok("ptr".to_string()),
-        HirType::Tuple { .. } => Err(CodegenError::UnsupportedType {
-            ty: "tuple".to_string(),
-            context: "tuple types not yet supported".to_string(),
-        }),
+        HirType::Tuple { elements } => {
+            let types: Vec<String> = elements
+                .iter()
+                .map(|e| hir_type_to_llvm(e))
+                .collect::<Result<_, _>>()?;
+            Ok(format!("{{ {} }}", types.join(", ")))
+        }
         HirType::Fn { .. } => Err(CodegenError::UnsupportedType {
             ty: "fn".to_string(),
             context: "function types not yet supported".to_string(),
@@ -11154,6 +11312,42 @@ fn emit_builtin_memmove(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue
     ));
     LlvmValue {
         reg: "0".to_string(),
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `memcmp(a, b, num_bytes)` -- returns 0 if equal, non-zero if different.
+///
+/// Calls libc `memcmp(ptr, ptr, i64)` and returns the i32 result.
+fn emit_builtin_memcmp(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "memcmp() requires exactly 3 arguments (a, b, num_bytes)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+    let a = emit_expr(ctx, &args[0], Some("ptr"));
+    let b = emit_expr(ctx, &args[1], Some("ptr"));
+    let n = emit_expr(ctx, &args[2], Some("i64"));
+    let n64 = if n.ty != "i64" {
+        let ext = ctx.fresh_reg();
+        ctx.emit(&format!("{ext} = zext {} {} to i64", n.ty, n.reg));
+        ext
+    } else {
+        n.reg.clone()
+    };
+    ctx.needs_memcmp = true;
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i32 @memcmp(ptr {}, ptr {}, i64 {n64})",
+        a.reg, b.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
         ty: "i32".to_string(),
     }
 }

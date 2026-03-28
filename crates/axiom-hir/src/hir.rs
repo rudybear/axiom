@@ -396,6 +396,11 @@ pub enum HirExprKind {
         /// Field name and value pairs.
         fields: Vec<(String, HirExpr)>,
     },
+    /// Tuple literal: `(a, b, c)`.
+    TupleLiteral {
+        /// Element expressions.
+        elements: Vec<HirExpr>,
+    },
 }
 
 /// Validated type reference.
@@ -585,6 +590,8 @@ pub enum HirAnnotationKind {
     Link { library: String, kind: String },
     /// `@trace` — emit ENTER/EXIT printf calls for function tracing.
     Trace,
+    /// `@cfg("windows"|"linux"|"macos")` — conditional compilation by platform.
+    Cfg(String),
     /// `@requires(expr)` — alias for `@precondition`, signals formal verification intent.
     Requires(Box<HirExpr>),
     /// `@ensures(expr)` — alias for `@postcondition`, signals formal verification intent.

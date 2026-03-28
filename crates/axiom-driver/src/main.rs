@@ -2399,6 +2399,31 @@ fn format_hir_expr_as_axiom(expr: &axiom_hir::HirExpr) -> String {
     format!("{expr}")
 }
 
+/// Convert a HIR type to an AXIOM source type string for the test harness.
+fn hir_type_to_axiom_str(ty: &axiom_hir::HirType) -> String {
+    // HirType implements Display, which produces valid AXIOM source text.
+    format!("{ty}")
+}
+
+/// Return `true` if the type is a floating-point type (f32 or f64).
+fn is_float_type(ty: &axiom_hir::HirType) -> bool {
+    matches!(
+        ty,
+        axiom_hir::HirType::Primitive(axiom_hir::PrimitiveType::F32)
+            | axiom_hir::HirType::Primitive(axiom_hir::PrimitiveType::F64)
+            | axiom_hir::HirType::Primitive(axiom_hir::PrimitiveType::F16)
+            | axiom_hir::HirType::Primitive(axiom_hir::PrimitiveType::Bf16)
+    )
+}
+
+/// Return `true` if the type is `bool`.
+fn is_bool_type(ty: &axiom_hir::HirType) -> bool {
+    matches!(
+        ty,
+        axiom_hir::HirType::Primitive(axiom_hir::PrimitiveType::Bool)
+    )
+}
+
 /// Strip the `fn main() { ... }` function from source, counting brace nesting.
 ///
 /// Returns the source with the main function removed. If no main function is
@@ -2516,7 +2541,8 @@ fn run_test_with_fuzz(input: &str, fuzz: bool) -> miette::Result<()> {
     })?;
 
     // Collect existing @test cases plus fuzz-generated inputs from @precondition.
-    let mut test_cases: Vec<(String, Vec<axiom_hir::HirTestCase>)> = Vec::new();
+    // Tuple: (function_name, return_type, Vec<HirTestCase>)
+    let mut test_cases: Vec<(String, axiom_hir::HirType, Vec<axiom_hir::HirTestCase>)> = Vec::new();
     let mut fuzz_test_count = 0usize;
 
     for func in &hir.functions {
@@ -2583,7 +2609,7 @@ fn run_test_with_fuzz(input: &str, fuzz: bool) -> miette::Result<()> {
         }
 
         if !tests.is_empty() {
-            test_cases.push((func.name.clone(), tests));
+            test_cases.push((func.name.clone(), func.return_type.clone(), tests));
         }
     }
 
@@ -2592,7 +2618,7 @@ fn run_test_with_fuzz(input: &str, fuzz: bool) -> miette::Result<()> {
         return Ok(());
     }
 
-    let total_tests: usize = test_cases.iter().map(|(_, ts)| ts.len()).sum();
+    let total_tests: usize = test_cases.iter().map(|(_, _, ts)| ts.len()).sum();
     eprintln!(
         "[TEST] Found {total_tests} test(s) across {} function(s) ({fuzz_test_count} fuzz-generated)",
         test_cases.len()
@@ -2604,7 +2630,8 @@ fn run_test_with_fuzz(input: &str, fuzz: bool) -> miette::Result<()> {
     test_main.push_str("    let passed: i32 = 0;\n");
     test_main.push_str("    let failed: i32 = 0;\n");
 
-    for (func_name, tests) in &test_cases {
+    for (func_name, ret_type, tests) in &test_cases {
+        let type_str = hir_type_to_axiom_str(ret_type);
         for (i, tc) in tests.iter().enumerate() {
             let is_fuzz = matches!(
                 &tc.expected.kind,
@@ -2623,7 +2650,7 @@ fn run_test_with_fuzz(input: &str, fuzz: bool) -> miette::Result<()> {
             if is_fuzz {
                 // Fuzz test: just call the function to check it doesn't crash.
                 test_main.push_str(&format!(
-                    "    let {var}: i32 = {func_name}({args_str});\n"
+                    "    let {var}: {type_str} = {func_name}({args_str});\n"
                 ));
                 test_main.push_str(&format!(
                     "    print(\"[FUZZ] {func_name}({args_str}): OK\\n\");\n"
@@ -2632,11 +2659,27 @@ fn run_test_with_fuzz(input: &str, fuzz: bool) -> miette::Result<()> {
             } else {
                 let expected_str = format_hir_expr_as_axiom(&tc.expected);
                 test_main.push_str(&format!(
-                    "    let {var}: i32 = {func_name}({args_str});\n"
+                    "    let {var}: {type_str} = {func_name}({args_str});\n"
                 ));
-                test_main.push_str(&format!(
-                    "    if {var} == {expected_str} {{\n"
-                ));
+
+                if is_float_type(ret_type) {
+                    // For float types, compare using tolerance.
+                    let eps_var = format!("eps{}_{}", i, func_name);
+                    let diff_var = format!("diff{}_{}", i, func_name);
+                    test_main.push_str(&format!(
+                        "    let {diff_var}: f64 = {var} - {expected_str};\n"
+                    ));
+                    test_main.push_str(&format!(
+                        "    let {eps_var}: f64 = abs_f64({diff_var});\n"
+                    ));
+                    test_main.push_str(&format!(
+                        "    if {eps_var} < 0.0001 {{\n"
+                    ));
+                } else {
+                    test_main.push_str(&format!(
+                        "    if {var} == {expected_str} {{\n"
+                    ));
+                }
                 test_main.push_str(&format!(
                     "        print(\"[TEST] {func_name}({args_str}) == {expected_str}: PASS\\n\");\n"
                 ));
@@ -2752,8 +2795,8 @@ fn run_test(input: &str) -> miette::Result<()> {
         miette::miette!("HIR lowering failed with {} error(s)", errors.len())
     })?;
 
-    // Collect test cases: (function_name, Vec<HirTestCase>)
-    let mut test_cases: Vec<(String, Vec<axiom_hir::HirTestCase>)> = Vec::new();
+    // Collect test cases: (function_name, return_type, Vec<HirTestCase>)
+    let mut test_cases: Vec<(String, axiom_hir::HirType, Vec<axiom_hir::HirTestCase>)> = Vec::new();
     for func in &hir.functions {
         let tests: Vec<axiom_hir::HirTestCase> = func
             .annotations
@@ -2767,7 +2810,7 @@ fn run_test(input: &str) -> miette::Result<()> {
             })
             .collect();
         if !tests.is_empty() {
-            test_cases.push((func.name.clone(), tests));
+            test_cases.push((func.name.clone(), func.return_type.clone(), tests));
         }
     }
 
@@ -2776,7 +2819,7 @@ fn run_test(input: &str) -> miette::Result<()> {
         return Ok(());
     }
 
-    let total_tests: usize = test_cases.iter().map(|(_, ts)| ts.len()).sum();
+    let total_tests: usize = test_cases.iter().map(|(_, _, ts)| ts.len()).sum();
     eprintln!("[TEST] Found {total_tests} test(s) across {} function(s)", test_cases.len());
 
     // Build the test harness main function
@@ -2785,7 +2828,8 @@ fn run_test(input: &str) -> miette::Result<()> {
     test_main.push_str("    let passed: i32 = 0;\n");
     test_main.push_str("    let failed: i32 = 0;\n");
 
-    for (func_name, tests) in &test_cases {
+    for (func_name, ret_type, tests) in &test_cases {
+        let type_str = hir_type_to_axiom_str(ret_type);
         for (i, tc) in tests.iter().enumerate() {
             let args: Vec<String> = tc
                 .inputs
@@ -2798,11 +2842,34 @@ fn run_test(input: &str) -> miette::Result<()> {
             // Use a unique variable name for each test result
             let var = format!("t{}_{}", i, func_name);
             test_main.push_str(&format!(
-                "    let {var}: i32 = {func_name}({args_str});\n"
+                "    let {var}: {type_str} = {func_name}({args_str});\n"
             ));
-            test_main.push_str(&format!(
-                "    if {var} == {expected_str} {{\n"
-            ));
+
+            if is_float_type(ret_type) {
+                // For float types, compare using a tolerance-based approach.
+                // Compute abs(result - expected) < epsilon.
+                let eps_var = format!("eps{}_{}", i, func_name);
+                let diff_var = format!("diff{}_{}", i, func_name);
+                test_main.push_str(&format!(
+                    "    let {diff_var}: f64 = {var} - {expected_str};\n"
+                ));
+                test_main.push_str(&format!(
+                    "    let {eps_var}: f64 = abs_f64({diff_var});\n"
+                ));
+                test_main.push_str(&format!(
+                    "    if {eps_var} < 0.0001 {{\n"
+                ));
+            } else if is_bool_type(ret_type) {
+                // For bool, use direct == comparison.
+                test_main.push_str(&format!(
+                    "    if {var} == {expected_str} {{\n"
+                ));
+            } else {
+                // For integer types, use direct == comparison.
+                test_main.push_str(&format!(
+                    "    if {var} == {expected_str} {{\n"
+                ));
+            }
             test_main.push_str(&format!(
                 "        print(\"[TEST] {func_name}({args_str}) == {expected_str}: PASS\\n\");\n"
             ));

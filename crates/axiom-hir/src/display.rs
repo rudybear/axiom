@@ -347,6 +347,16 @@ impl fmt::Display for HirExpr {
                 }
                 write!(f, " }}")
             }
+            HirExprKind::TupleLiteral { elements } => {
+                write!(f, "(")?;
+                for (i, elem) in elements.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{elem}")?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -573,6 +583,7 @@ impl fmt::Display for HirAnnotation {
                 write!(f, "@link(library: \"{library}\", kind: \"{kind}\")")
             }
             HirAnnotationKind::Trace => write!(f, "@trace"),
+            HirAnnotationKind::Cfg(target) => write!(f, "@cfg(\"{target}\")"),
             HirAnnotationKind::Requires(expr) => write!(f, "@requires({expr})"),
             HirAnnotationKind::Ensures(expr) => write!(f, "@ensures({expr})"),
             HirAnnotationKind::Invariant(expr) => write!(f, "@invariant({expr})"),

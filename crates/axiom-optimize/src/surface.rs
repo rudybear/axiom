@@ -477,6 +477,11 @@ fn walk_expr_for_holes(expr: &HirExpr, holes: &mut Vec<OptHole>) {
                 walk_expr_for_holes(expr, holes);
             }
         }
+        HirExprKind::TupleLiteral { elements } => {
+            for elem in elements {
+                walk_expr_for_holes(elem, holes);
+            }
+        }
         // Literals, idents, and array constructors have no holes
         HirExprKind::IntLiteral { .. }
         | HirExprKind::FloatLiteral { .. }

@@ -181,6 +181,10 @@ pub enum Expr {
         type_name: String,
         fields: Vec<(String, Expr)>,
     },
+    /// Tuple literal: `(a, b, c)`.
+    TupleLiteral {
+        elements: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -235,6 +239,8 @@ pub enum Annotation {
     Link { library: String, kind: Option<String> },
     /// `@trace` — emit ENTER/EXIT printf calls for function tracing.
     Trace,
+    /// `@cfg("windows"|"linux"|"macos")` — conditional compilation: include/exclude item by platform.
+    Cfg(String),
     /// `@requires(expr)` — alias for `@precondition`, signals formal verification intent.
     Requires(Box<Expr>),
     /// `@ensures(expr)` — alias for `@postcondition`, signals formal verification intent.

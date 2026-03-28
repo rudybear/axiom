@@ -768,6 +768,32 @@ impl<'src> Parser<'src> {
                     Annotation::Link { library: String::new(), kind: None }
                 }
             }
+            "cfg" => {
+                // @cfg("windows"|"linux"|"macos")
+                if self.eat(&TokenKind::LParen) {
+                    let target = if let TokenKind::StringLiteral(ref s) = self.peek() {
+                        let s = s.clone();
+                        self.advance();
+                        s
+                    } else {
+                        self.errors.push(ParseError::InvalidAnnotation {
+                            name: "cfg".to_string(),
+                            reason: "expected target string (e.g., \"windows\", \"linux\", \"macos\")".to_string(),
+                            span: span_to_source_span(self.current_span()),
+                        });
+                        String::new()
+                    };
+                    self.expect(&TokenKind::RParen, "')'");
+                    Annotation::Cfg(target)
+                } else {
+                    self.errors.push(ParseError::InvalidAnnotation {
+                        name: "cfg".to_string(),
+                        reason: "expected '(' after @cfg".to_string(),
+                        span: span_to_source_span(self.current_span()),
+                    });
+                    Annotation::Cfg(String::new())
+                }
+            }
             "strict" => Annotation::Strict,
             "trace" => Annotation::Trace,
             "precondition" => {
@@ -2256,12 +2282,28 @@ impl<'src> Parser<'src> {
                     operand: Box::new(operand),
                 }
             }
-            // Parenthesized expression
+            // Parenthesized expression or tuple literal
             TokenKind::LParen => {
                 self.advance();
-                let expr = self.parse_expr_bp(0);
-                self.expect(&TokenKind::RParen, "')'");
-                expr
+                let first = self.parse_expr_bp(0);
+                if self.eat(&TokenKind::Comma) {
+                    // Tuple literal: (a, b, ...)
+                    let mut elements = vec![first];
+                    loop {
+                        if self.check(&TokenKind::RParen) || self.at_end() {
+                            break;
+                        }
+                        elements.push(self.parse_expr_bp(0));
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(&TokenKind::RParen, "')'");
+                    Expr::TupleLiteral { elements }
+                } else {
+                    self.expect(&TokenKind::RParen, "')'");
+                    first
+                }
             }
             // Conversion keywords: widen(x), narrow(x), truncate(x)
             TokenKind::Widen => {
@@ -2357,7 +2399,15 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Dot => {
                 self.advance(); // consume `.`
-                if let Some((name, _)) = self.eat_ident() {
+                // Tuple field access: `.0`, `.1`, etc.
+                if let &TokenKind::IntLiteral { value, .. } = self.peek() {
+                    let field = format!("{value}");
+                    self.advance();
+                    Expr::FieldAccess {
+                        expr: Box::new(lhs),
+                        field,
+                    }
+                } else if let Some((name, _)) = self.eat_ident() {
                     // Check if this is a method call (next token is `(`)
                     if matches!(self.peek(), TokenKind::LParen) {
                         self.parse_call_args(Expr::MethodCall {
@@ -3779,6 +3829,65 @@ fn main() -> i32 {
         assert!(
             !result.has_errors(),
             "struct literal with nested call should parse: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_cfg_annotation() {
+        let source = r#"
+@module cfg_test;
+
+@cfg("windows")
+fn win_only() -> i32 { return 1; }
+
+@cfg("linux")
+fn linux_only() -> i32 { return 2; }
+
+@cfg("macos")
+fn mac_only() -> i32 { return 3; }
+
+fn main() -> i32 { return 0; }
+"#;
+        let result = parse(source);
+        assert!(
+            !result.has_errors(),
+            "@cfg should parse without errors: {:?}",
+            result.errors
+        );
+        // All 4 functions should be in the AST (filtering happens at HIR lowering)
+        let func_count = result
+            .module
+            .items
+            .iter()
+            .filter(|item| matches!(item.node, Item::Function(_)))
+            .count();
+        assert_eq!(func_count, 4, "expected 4 functions in AST");
+
+        // Verify the @cfg annotations are correctly parsed
+        if let Item::Function(f) = &result.module.items[0].node {
+            assert_eq!(f.name.node, "win_only");
+            assert!(
+                f.annotations
+                    .iter()
+                    .any(|a| matches!(&a.node, Annotation::Cfg(t) if t == "windows")),
+                "win_only should have @cfg(\"windows\")"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cfg_annotation_on_extern() {
+        let source = r#"
+@cfg("windows")
+extern "C" fn GetTickCount() -> i64;
+
+fn main() -> i32 { return 0; }
+"#;
+        let result = parse(source);
+        assert!(
+            !result.has_errors(),
+            "@cfg on extern should parse without errors: {:?}",
             result.errors
         );
     }

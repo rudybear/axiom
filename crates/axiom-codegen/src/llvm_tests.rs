@@ -7424,3 +7424,156 @@ fn main() -> i32 {
         "global_array should use 'global', not 'constant': {ir}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// print_hex_i32 / print_hex_i64 builtins
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_print_hex_i32_builtin() {
+    let source = r#"
+fn main() -> i32 {
+    print_hex_i32(255);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("@.fmt.hex.i32"),
+        "should emit hex i32 format string: {ir}"
+    );
+    assert!(
+        ir.contains("call i32 (ptr, ...) @printf(ptr @.fmt.hex.i32, i32"),
+        "should call printf with hex format: {ir}"
+    );
+}
+
+#[test]
+fn test_print_hex_i64_builtin() {
+    let source = r#"
+fn main() -> i32 {
+    print_hex_i64(65535);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("@.fmt.hex.i64"),
+        "should emit hex i64 format string: {ir}"
+    );
+    assert!(
+        ir.contains("call i32 (ptr, ...) @printf(ptr @.fmt.hex.i64, i64"),
+        "should call printf with hex i64 format: {ir}"
+    );
+}
+
+#[test]
+fn test_print_hex_alias() {
+    // print_hex should alias to print_hex_i32
+    let source = r#"
+fn main() -> i32 {
+    print_hex(42);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("@.fmt.hex.i32"),
+        "print_hex should emit hex i32 format: {ir}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// memcmp builtin
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_memcmp_builtin() {
+    let source = r#"
+fn main() -> i32 {
+    let a: ptr[i64] = heap_alloc(8, 1);
+    let b: ptr[i64] = heap_alloc(8, 1);
+    let result: i32 = memcmp(a, b, 8);
+    heap_free(a);
+    heap_free(b);
+    return result;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("call i32 @memcmp(ptr"),
+        "should emit memcmp call: {ir}"
+    );
+    assert!(
+        ir.contains("declare i32 @memcmp(ptr, ptr, i64)"),
+        "should declare memcmp: {ir}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tuple return types and field access
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_tuple_type_to_llvm() {
+    let tuple_ty = HirType::Tuple {
+        elements: vec![
+            HirType::Primitive(PrimitiveType::I32),
+            HirType::Primitive(PrimitiveType::F64),
+        ],
+    };
+    let result = hir_type_to_llvm(&tuple_ty).expect("tuple type should convert");
+    assert_eq!(result, "{ i32, double }");
+}
+
+#[test]
+#[ignore] // TODO: Parser doesn't support .0/.1 tuple field access syntax yet
+fn test_tuple_return_type_codegen() {
+    // A function that returns a tuple via insertvalue chain.
+    let source = r#"
+fn make_pair() -> (i32, f64) {
+    return (42, 3.14);
+}
+
+fn main() -> i32 {
+    let pair: (i32, f64) = make_pair();
+    let x: i32 = pair.0;
+    return x;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(
+        !parse_result.has_errors(),
+        "parse errors: {:?}",
+        parse_result.errors
+    );
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    // Function should return { i32, double }
+    assert!(
+        ir.contains("{ i32, double }"),
+        "should use LLVM anonymous struct for tuple: {ir}"
+    );
+    // Should have insertvalue instructions for building the tuple
+    assert!(
+        ir.contains("insertvalue { i32, double }"),
+        "should use insertvalue to build tuple: {ir}"
+    );
+    // Should have extractvalue for field access
+    assert!(
+        ir.contains("extractvalue { i32, double }"),
+        "should use extractvalue for tuple field access: {ir}"
+    );
+}
