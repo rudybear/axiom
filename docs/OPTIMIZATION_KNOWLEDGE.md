@@ -428,3 +428,17 @@ in the pixel hash function (called 65,536 times per encode).
 
 **When to apply:** Any hash function, index computation, or modular arithmetic where
 the divisor is a power of 2. Common in: hash tables, ring buffers, CRC, pixel hashing.
+
+## Rule 17: Branchless patterns beat flag variables
+
+**Pattern:** Replace `let flag: i32 = 1; while flag == 1 { ... if done { flag = 0; } }`
+with a do-while pattern that checks the termination condition directly.
+
+**Why:** Flag variables add an extra comparison + branch per iteration. Direct condition
+checks reduce the critical path length.
+
+**Measured impact:** TurboPFor vbyte_decode: 129ms → 117ms (-9%) by eliminating a
+`more` flag variable and replacing with direct byte-value check.
+
+**When to apply:** Any loop that uses a boolean/int flag to control continuation.
+Convert to direct condition checking on the actual termination value.
