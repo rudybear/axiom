@@ -43,7 +43,7 @@ fn u8to64_le(p: ptr[i64], offset: i32) -> i64 {
 // SIPROUND: the core mixing step
 // Uses ptr to 4-element i64 array for v0..v3 (no structs with mutation)
 // ---------------------------------------------------------------------------
-@inline(always)
+@pure @inline(always)
 fn sipround(v: ptr[i64]) {
     let v0: i64 = ptr_read_i64(v, 0);
     let v1: i64 = ptr_read_i64(v, 1);
@@ -78,6 +78,7 @@ fn sipround(v: ptr[i64]) {
 // SipHash-2-4: hash `inlen` bytes from `in_ptr` with 128-bit key (k0, k1)
 // `v` is a pre-allocated 4-element i64 scratch buffer
 // ---------------------------------------------------------------------------
+@pure @inline(always)
 fn siphash_2_4(in_ptr: ptr[i64], inlen: i32, k0: i64, k1: i64, v: ptr[i64]) -> i64 {
     // State initialization
     ptr_write_i64(v, 0, bxor(k0, 0x736f6d6570736575));

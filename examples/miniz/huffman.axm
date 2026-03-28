@@ -65,12 +65,14 @@
 // Bit writer: write `count` bits from `value` (MSB first)
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn bw_init(state: ptr[i32]) {
     ptr_write_i32(state, BW_BYTE_POS(), 0);
     ptr_write_i32(state, BW_BIT_POS(), 0);
     ptr_write_i32(state, BW_CUR_BYTE(), 0);
 }
 
+@inline(always)
 fn bw_write_bits(outbuf: ptr[i32], state: ptr[i32], value: i32, count: i32) {
     let byte_pos: i32 = ptr_read_i32(state, BW_BYTE_POS());
     let bit_pos: i32 = ptr_read_i32(state, BW_BIT_POS());
@@ -98,6 +100,7 @@ fn bw_write_bits(outbuf: ptr[i32], state: ptr[i32], value: i32, count: i32) {
 }
 
 // Flush any remaining partial byte
+@inline(always)
 fn bw_flush(outbuf: ptr[i32], state: ptr[i32]) {
     let bit_pos: i32 = ptr_read_i32(state, BW_BIT_POS());
     if bit_pos > 0 {
@@ -110,6 +113,7 @@ fn bw_flush(outbuf: ptr[i32], state: ptr[i32]) {
     }
 }
 
+@pure @inline(always)
 fn bw_get_pos(state: ptr[i32]) -> i32 {
     return ptr_read_i32(state, BW_BYTE_POS());
 }
@@ -125,6 +129,7 @@ fn bw_get_pos(state: ptr[i32]) -> i32 {
 @const fn BR_BIT_POS() -> i32 { return 1; }
 @const fn BR_CUR_BYTE() -> i32 { return 2; }
 
+@inline(always)
 fn br_init(state: ptr[i32], inbuf: ptr[i32]) {
     ptr_write_i32(state, BR_BYTE_POS(), 0);
     ptr_write_i32(state, BR_BIT_POS(), 0);
@@ -151,6 +156,7 @@ fn br_read_bit(inbuf: ptr[i32], state: ptr[i32]) -> i32 {
     return bit;
 }
 
+@inline(always)
 fn br_read_bits(inbuf: ptr[i32], state: ptr[i32], count: i32) -> i32 {
     let result: i32 = 0;
     let i: i32 = 0;
@@ -165,6 +171,7 @@ fn br_read_bits(inbuf: ptr[i32], state: ptr[i32], count: i32) -> i32 {
 // Count byte frequencies
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn count_frequencies(input: ptr[i32], in_len: i32, freq: ptr[i32]) {
     // Zero out frequency table
     for i: i32 in range(0, NUM_SYMBOLS()) {
@@ -229,10 +236,7 @@ fn build_tree(freq: ptr[i32], nodes: ptr[i32], out_root: ptr[i32], out_count: pt
     }
 
     // Allocate "used" flags
-    let used: ptr[i32] = heap_alloc(MAX_NODES(), 4);
-    for i: i32 in range(0, MAX_NODES()) {
-        ptr_write_i32(used, i, 0);
-    }
+    let used: ptr[i32] = heap_alloc_zeroed(MAX_NODES(), 4);
 
     // Repeatedly merge two lowest-frequency nodes
     let remaining: i32 = node_count;
@@ -593,7 +597,7 @@ fn huffman_decode(input: ptr[i32], in_len: i32, output: ptr[i32], out_max: i32) 
 // Verify: compare two byte buffers
 // ---------------------------------------------------------------------------
 
-@pure
+@pure @inline(always)
 fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
         if ptr_read_u8(a, i) != ptr_read_u8(b, i) {

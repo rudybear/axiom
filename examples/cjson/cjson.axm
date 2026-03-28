@@ -85,6 +85,7 @@ fn state_inc(state: ptr[i32], idx: i32) {
 // Helper: skip whitespace
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn skip_ws(json: ptr[i32], state: ptr[i32], len: i32) {
     let pos: i32 = ptr_read_i32(state, ST_POS());
     while pos < len and is_whitespace(ptr_read_u8(json, pos)) == 1 {
@@ -107,7 +108,7 @@ fn peek(json: ptr[i32], pos: i32, len: i32) -> i32 {
 // Helper: match a literal string (e.g., "true", "false", "null")
 // ---------------------------------------------------------------------------
 
-@pure
+@pure @inline(always)
 fn match_keyword(json: ptr[i32], pos: i32, len: i32,
                  c0: i32, c1: i32, c2: i32, c3: i32, klen: i32) -> i32 {
     if pos + klen > len { return 0; }
@@ -129,6 +130,7 @@ fn match_keyword(json: ptr[i32], pos: i32, len: i32,
 // Parse a JSON string value (skip to closing quote)
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn parse_string(json: ptr[i32], state: ptr[i32], len: i32) {
     let pos: i32 = ptr_read_i32(state, ST_POS());
     // Current char should be '"'
@@ -164,6 +166,7 @@ fn parse_string(json: ptr[i32], state: ptr[i32], len: i32) {
 // Parse a JSON number (integer or float, but we only extract integer part)
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn parse_number(json: ptr[i32], state: ptr[i32], len: i32) {
     let pos: i32 = ptr_read_i32(state, ST_POS());
     let sign: i32 = 1;

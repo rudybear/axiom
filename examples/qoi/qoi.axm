@@ -115,10 +115,7 @@ fn qoi_encode(pixels: ptr[i64], w: i32, h: i32, out: ptr[i64]) -> i32 {
     let p: i32 = QOI_HEADER_SIZE();
 
     // Hash table: 64 entries, each packed RGBA as i32
-    let index: ptr[i32] = heap_alloc(64, 4);
-    for i: i32 in range(0, 64) {
-        ptr_write_i32(index, i, 0);
-    }
+    let index: ptr[i32] = heap_alloc_zeroed(64, 4);
 
     // Previous pixel state
     let prev_r: i32 = 0;
@@ -246,10 +243,7 @@ fn qoi_decode(data: ptr[i64], data_len: i32, out_pixels: ptr[i64]) -> i32 {
     let p: i32 = QOI_HEADER_SIZE();
 
     // Hash table
-    let index: ptr[i32] = heap_alloc(64, 4);
-    for i: i32 in range(0, 64) {
-        ptr_write_i32(index, i, 0);
-    }
+    let index: ptr[i32] = heap_alloc_zeroed(64, 4);
 
     let r: i32 = 0;
     let g: i32 = 0;

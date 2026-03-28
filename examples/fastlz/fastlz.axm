@@ -73,6 +73,7 @@ fn hash_at(src: ptr[i32], pos: i32) -> i32 {
 // Returns new output position
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn emit_literals(src: ptr[i32], src_start: i32, count: i32,
                  dst: ptr[i32], dst_pos: i32) -> i32 {
     let remaining: i32 = count;
@@ -107,6 +108,7 @@ fn emit_literals(src: ptr[i32], src_start: i32, count: i32,
 // Returns new output position
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn emit_backref(dst: ptr[i32], dst_pos: i32, distance: i32, match_len: i32) -> i32 {
     let p: i32 = dst_pos;
     let dist: i32 = distance - 1; // 0-based distance
@@ -165,10 +167,7 @@ fn fastlz_compress(src: ptr[i32], src_len: i32,
     }
 
     // Allocate hash table
-    let htab: ptr[i32] = heap_alloc(HASH_SIZE(), 4);
-    for i: i32 in range(0, HASH_SIZE()) {
-        ptr_write_i32(htab, i, 0);
-    }
+    let htab: ptr[i32] = heap_alloc_zeroed(HASH_SIZE(), 4);
 
     let src_pos: i32 = 0;
     let dst_pos: i32 = 0;
@@ -316,7 +315,7 @@ fn fastlz_decompress(src: ptr[i32], src_len: i32,
 // Verify: compare buffers
 // ---------------------------------------------------------------------------
 
-@pure
+@pure @inline(always)
 fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
         if ptr_read_u8(a, i) != ptr_read_u8(b, i) {

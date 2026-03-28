@@ -22,7 +22,7 @@
 // Bit-width calculation: find minimum bits needed for max value in array
 // ---------------------------------------------------------------------------
 
-@pure
+@pure @inline(always)
 fn find_max_value(input: ptr[i32], n: i32) -> i32 {
     let max_val: i32 = 0;
     for i: i32 in range(0, n) {
@@ -34,7 +34,7 @@ fn find_max_value(input: ptr[i32], n: i32) -> i32 {
     return max_val;
 }
 
-@pure
+@pure @inline(always)
 fn bit_width(val: i32) -> i32 {
     // Count bits needed to represent val (0 needs 0 bits, but we return 1 minimum)
     if val == 0 {
@@ -58,6 +58,7 @@ fn bit_width(val: i32) -> i32 {
 // Algorithm: maintain a bit buffer (32-bit accumulator). For each value,
 // OR it into the accumulator at the current bit offset, flush full bytes.
 
+@inline(always)
 fn bitpack_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
     let max_val: i32 = find_max_value(input, n);
     let bits: i32 = bit_width(max_val);
@@ -101,6 +102,7 @@ fn bitpack_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
 // Decodes n integers from input byte stream into output[].
 // bits = number of bits per integer (read from header by caller).
 
+@inline(always)
 fn bitpack_decode(input: ptr[i32], start: i32, n: i32, bits: i32, output: ptr[i32]) {
     let in_pos: i32 = start;
     let bit_buf: i32 = 0;
@@ -131,6 +133,7 @@ fn bitpack_decode(input: ptr[i32], start: i32, n: i32, bits: i32, output: ptr[i3
 // ---------------------------------------------------------------------------
 // For sorted input [100, 103, 107, 115], output = [100, 3, 4, 8].
 
+@inline(always)
 fn delta_encode(input: ptr[i32], n: i32, output: ptr[i32]) {
     if n < 1 {
         return;
@@ -146,6 +149,7 @@ fn delta_encode(input: ptr[i32], n: i32, output: ptr[i32]) {
 // Delta decode: reconstruct original values from deltas
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn delta_decode(input: ptr[i32], n: i32, output: ptr[i32]) {
     if n < 1 {
         return;
@@ -164,6 +168,7 @@ fn delta_decode(input: ptr[i32], n: i32, output: ptr[i32]) {
 // Low 7 bits carry payload.
 // Returns: number of bytes written.
 
+@inline(always)
 fn vbyte_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
     let out_pos: i32 = 0;
     for i: i32 in range(0, n) {
@@ -198,6 +203,7 @@ fn vbyte_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
 // Decodes n integers from input byte stream into output[].
 // Returns: number of bytes consumed from input.
 
+@inline(always)
 fn vbyte_decode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
     let in_pos: i32 = 0;
     for i: i32 in range(0, n) {
@@ -222,6 +228,7 @@ fn vbyte_decode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
 // Combined pipeline: delta + bitpack encode
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn delta_bitpack_encode(input: ptr[i32], n: i32,
                         delta_buf: ptr[i32],
                         output: ptr[i32]) -> i32 {
@@ -233,6 +240,7 @@ fn delta_bitpack_encode(input: ptr[i32], n: i32,
 // Combined pipeline: bitpack + delta decode
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn delta_bitpack_decode(input: ptr[i32], n: i32,
                         delta_buf: ptr[i32],
                         output: ptr[i32]) {
@@ -247,7 +255,7 @@ fn delta_bitpack_decode(input: ptr[i32], n: i32,
 // Verify: compare two i32 arrays
 // ---------------------------------------------------------------------------
 
-@pure
+@pure @inline(always)
 fn arrays_equal(a: ptr[i32], b: ptr[i32], n: i32) -> i32 {
     for i: i32 in range(0, n) {
         if ptr_read_i32(a, i) != ptr_read_i32(b, i) {
@@ -261,6 +269,7 @@ fn arrays_equal(a: ptr[i32], b: ptr[i32], n: i32) -> i32 {
 // Pseudo-random number generator (LCG)
 // ---------------------------------------------------------------------------
 
+@pure @inline(always)
 fn lcg_next(state: ptr[i32]) -> i32 {
     let s: i32 = ptr_read_i32(state, 0);
     // LCG: next = (s * 1103515245 + 12345) & 0x7FFFFFFF

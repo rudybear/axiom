@@ -84,6 +84,7 @@ fn lz4_hash(val: i32) -> i32 {
 // Write extended length (run-length encoded with 255-byte chunks)
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn write_extended_length(dst: ptr[i32], pos: i32, length: i32) -> i32 {
     let rem: i32 = length;
     let p: i32 = pos;
@@ -109,11 +110,7 @@ fn lz4_compress(src: ptr[i32], src_len: i32,
     }
 
     // Allocate hash table (4096 entries * 4 bytes)
-    let hash_table: ptr[i32] = heap_alloc(HASH_TABLE_SIZE(), 4);
-    // Initialize hash table to 0
-    for i: i32 in range(0, HASH_TABLE_SIZE()) {
-        ptr_write_i32(hash_table, i, 0);
-    }
+    let hash_table: ptr[i32] = heap_alloc_zeroed(HASH_TABLE_SIZE(), 4);
 
     let src_pos: i32 = 0;
     let dst_pos: i32 = 0;
@@ -350,7 +347,7 @@ fn lz4_decompress(src: ptr[i32], src_len: i32,
 // Verify: compare two byte buffers
 // ---------------------------------------------------------------------------
 
-@pure
+@pure @inline(always)
 fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
         if ptr_read_u8(a, i) != ptr_read_u8(b, i) {

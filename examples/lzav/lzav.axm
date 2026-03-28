@@ -136,7 +136,7 @@ fn write_offset_long(dst: ptr[i32], pos: i32, offset: i32) -> i32 {
 // Compute match length between two positions
 // ---------------------------------------------------------------------------
 
-@inline(always)
+@pure @inline(always)
 fn match_length(src: ptr[i32], pos1: i32, pos2: i32, max_len: i32) -> i32 {
     let len: i32 = 0;
     while len < max_len {
@@ -496,7 +496,7 @@ fn lzav_decompress(src: ptr[i32], src_len: i32,
 // Verify: compare two byte buffers
 // ---------------------------------------------------------------------------
 
-@pure
+@pure @inline(always)
 fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
         if ptr_read_u8(a, i) != ptr_read_u8(b, i) {

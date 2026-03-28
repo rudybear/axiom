@@ -44,6 +44,7 @@
 // GAP: Cannot store ptr in i32 slot. We pass the output buffer separately.
 
 // Write `count` bits from `value` (MSB first) to the output buffer
+@inline(always)
 fn bits_write(outbuf: ptr[i32], pos: ptr[i32], value: i32, count: i32) {
     // pos[0] = byte_pos, pos[1] = bit_pos, pos[2] = current_byte
     let byte_pos: i32 = ptr_read_i32(pos, 0);
@@ -75,6 +76,7 @@ fn bits_write(outbuf: ptr[i32], pos: ptr[i32], value: i32, count: i32) {
 }
 
 // Flush remaining bits (pad with zeros)
+@inline(always)
 fn bits_flush(outbuf: ptr[i32], pos: ptr[i32]) {
     let bit_pos: i32 = ptr_read_i32(pos, 1);
     if bit_pos > 0 {
@@ -92,6 +94,7 @@ fn bits_flush(outbuf: ptr[i32], pos: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // pos[0] = byte_pos, pos[1] = bit_pos
 
+@inline(always)
 fn bits_read(inbuf: ptr[i32], pos: ptr[i32], count: i32) -> i32 {
     let byte_pos: i32 = ptr_read_i32(pos, 0);
     let bit_pos: i32 = ptr_read_i32(pos, 1);
@@ -117,7 +120,7 @@ fn bits_read(inbuf: ptr[i32], pos: ptr[i32], count: i32) -> i32 {
 // Find best match in the window
 // ---------------------------------------------------------------------------
 // Returns match_offset in out[0], match_length in out[1]
-@pure
+@pure @inline(always)
 fn find_best_match(input: ptr[i32], input_len: i32, pos: i32, out: ptr[i32]) {
     let best_len: i32 = 0;
     let best_off: i32 = 0;
@@ -248,7 +251,7 @@ fn heatshrink_decompress(input: ptr[i32], input_bits_len: i32,
 // ---------------------------------------------------------------------------
 // Verify: compare two byte buffers
 // ---------------------------------------------------------------------------
-@pure
+@pure @inline(always)
 fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
         if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
