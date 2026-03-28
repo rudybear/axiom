@@ -382,3 +382,34 @@ For unsigned types (u32), use `lshr()`. For signed types (i32), use `shr()`.
 - LLVM remarks tell the LLM WHAT to optimize (missed passes)
 - History tells the LLM what was already tried
 - Git tracking preserves every optimization step for rollback
+
+## Anti-pattern 7: Don't blindly add readonly_ptr/writeonly_ptr
+
+**Observation:** Changing `ptr[T]` to `readonly_ptr[T]` on function parameters was expected
+to improve performance by giving LLVM better alias information. In practice, it REGRESSED
+performance on QOI (-34%), AES (-50%), LZAV (-68%), and others.
+
+**Why it hurts:** AXIOM already adds `noalias` to ALL pointer params via `@pure`. The
+`readonly` attribute on top of `noalias` doesn't help and may interfere with LLVM's
+optimization passes by restricting how the optimizer can transform loads/stores.
+
+**Rule:** Do NOT add `readonly_ptr`/`writeonly_ptr` for performance. These are for
+semantic documentation only. The `@pure` annotation already provides the key LLVM
+attributes (`noalias`, `memory(none)` or `memory(argmem: read)`).
+
+## Anti-pattern 8: Don't restructure working code for "optimization"
+
+**Observation:** AI agents restructured several ports (QOI encoder, AES round functions)
+to be "more optimized" — but the restructured code was consistently SLOWER than the
+original. Changes included reordering operations, merging loops, and extracting sub-expressions.
+
+**Why it hurts:** LLVM's optimizer is extremely sensitive to IR patterns. Code that looks
+"optimized" at the source level may break LLVM's pattern matching for vectorization,
+loop unrolling, or strength reduction. The original code, while seemingly naive, may
+have been in a form that LLVM optimized perfectly.
+
+**Rule:** Only make source-level changes that CANNOT be done by LLVM:
+- `@pure` / `@inline(always)` (annotations LLVM can't infer from C)
+- `memcpy` replacing byte loops (LLVM sometimes misses this)
+- `array_const` for static tables (LLVM can't create globals from runtime code)
+- Algorithmic improvements (different algorithm, not code reshuffling)
