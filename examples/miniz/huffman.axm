@@ -385,11 +385,9 @@ fn huffman_encode(input: ptr[i32], in_len: i32, output: ptr[i32], out_max: i32) 
     build_tree(freq, nodes, root_holder, count_holder);
     let root: i32 = ptr_read_i32(root_holder, 0);
 
-    // Step 3: Generate code lengths
+    // Step 3: Generate code lengths (zeroed via memset)
     let code_lens: ptr[i32] = heap_alloc(NUM_SYMBOLS(), 4);
-    for i: i32 in range(0, NUM_SYMBOLS()) {
-        ptr_write_i32(code_lens, i, 0);
-    }
+    memset(code_lens, 0, 1024);
     generate_lengths_recurse(nodes, root, 0, code_lens);
 
     // Step 4: Build canonical codes
@@ -484,10 +482,7 @@ fn huffman_decode(input: ptr[i32], in_len: i32, output: ptr[i32], out_max: i32) 
     let pos: i32 = 4;
 
     // Read (symbol, bit_length) pairs
-    let code_lens: ptr[i32] = heap_alloc(NUM_SYMBOLS(), 4);
-    for i: i32 in range(0, NUM_SYMBOLS()) {
-        ptr_write_i32(code_lens, i, 0);
-    }
+    let code_lens: ptr[i32] = heap_alloc_zeroed(NUM_SYMBOLS(), 4);
 
     for i: i32 in range(0, num_unique) {
         let sym: i32 = ptr_read_u8(input, pos);
@@ -514,13 +509,10 @@ fn huffman_decode(input: ptr[i32], in_len: i32, output: ptr[i32], out_max: i32) 
     let table_bits: i32 = MAX_CODE_LEN();
     let table_size: i32 = shl(1, table_bits); // 32768
     let decode_sym: ptr[i32] = heap_alloc(table_size, 4);
-    let decode_len: ptr[i32] = heap_alloc(table_size, 4);
+    let decode_len: ptr[i32] = heap_alloc_zeroed(table_size, 4);
 
-    // Initialize to invalid
-    for i: i32 in range(0, table_size) {
-        ptr_write_i32(decode_sym, i, 0 - 1);
-        ptr_write_i32(decode_len, i, 0);
-    }
+    // Initialize decode_sym to -1 (0xFF bytes => i32 = -1)
+    memset(decode_sym, 0xFF, widen(table_size) * 4);
 
     // Fill lookup table
     for sym: i32 in range(0, NUM_SYMBOLS()) {

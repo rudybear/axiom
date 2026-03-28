@@ -320,9 +320,9 @@ fn inflate(input: ptr[i32], input_len: i32,
     let br_state: ptr[i32] = heap_alloc(5, 4);
     br_init(br_state, input_len);
 
-    // Build fixed Huffman tables
-    let lit_table: ptr[i32] = heap_alloc(HUFFMAN_TABLE_SIZE(), 4);
-    let dist_table: ptr[i32] = heap_alloc(HUFFMAN_TABLE_SIZE(), 4);
+    // Build fixed Huffman tables (global arrays avoid malloc/free per call)
+    let lit_table: ptr[i32] = global_array_i32(512);
+    let dist_table: ptr[i32] = global_array_i32(512);
     build_fixed_lit_table(lit_table);
     build_fixed_dist_table(dist_table);
 
@@ -364,8 +364,7 @@ fn inflate(input: ptr[i32], input_len: i32,
     }
 
     heap_free(br_state);
-    heap_free(lit_table);
-    heap_free(dist_table);
+    // lit_table, dist_table are global arrays, no heap_free needed
     return total_out;
 }
 

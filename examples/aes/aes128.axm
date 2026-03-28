@@ -129,14 +129,8 @@ fn gmul(a: i32, b: i32) -> i32 {
 // Key Expansion
 // ---------------------------------------------------------------------------
 fn key_expansion(key: ptr[i32], round_key: ptr[i32], sbox: ptr[i32], rcon: ptr[i32]) {
-    // First round key is the key itself
-    for i: i32 in range(0, NK()) {
-        let base: i32 = i * 4;
-        ptr_write_u8(round_key, base, ptr_read_u8(key, base));
-        ptr_write_u8(round_key, base + 1, ptr_read_u8(key, base + 1));
-        ptr_write_u8(round_key, base + 2, ptr_read_u8(key, base + 2));
-        ptr_write_u8(round_key, base + 3, ptr_read_u8(key, base + 3));
-    }
+    // First round key is the key itself (16 bytes = NK*4)
+    memcpy(round_key, key, 16);
 
     // Generate remaining round keys
     let i: i32 = NK();

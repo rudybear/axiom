@@ -17,7 +17,6 @@
 //      + optional extended lengths (255-byte run-length encoding)
 //
 // GAP: AXIOM has no u32 type. We use i32 with wrapping ops (*%, +%).
-// GAP: No memcpy/memmove. We copy byte-by-byte.
 // GAP: No global mutable state. Hash table is allocated per call.
 // =============================================================================
 
@@ -109,8 +108,9 @@ fn lz4_compress(src: ptr[i32], src_len: i32,
         return 0;
     }
 
-    // Allocate hash table (4096 entries * 4 bytes)
-    let hash_table: ptr[i32] = heap_alloc_zeroed(HASH_TABLE_SIZE(), 4);
+    // Use global array for hash table (avoids malloc/free per call) + memset to zero
+    let hash_table: ptr[i32] = global_array_i32(4096);
+    memset(hash_table, 0, 16384);
 
     let src_pos: i32 = 0;
     let dst_pos: i32 = 0;
@@ -133,12 +133,10 @@ fn lz4_compress(src: ptr[i32], src_len: i32,
             ptr_write_u8(dst, dst_pos, token);
             dst_pos = dst_pos + 1;
         }
-        // Copy literals
-        for i: i32 in range(0, lit_len) {
-            ptr_write_u8(dst, dst_pos, ptr_read_u8(src, anchor + i));
-            dst_pos = dst_pos + 1;
-        }
-        heap_free(hash_table);
+        // Copy literals (memcpy: non-overlapping src->dst)
+        memcpy(ptr_offset(dst, dst_pos), ptr_offset(src, anchor), widen(lit_len));
+        dst_pos = dst_pos + lit_len;
+
         return dst_pos;
     }
 
@@ -186,7 +184,7 @@ fn lz4_compress(src: ptr[i32], src_len: i32,
 
                 // Check output space
                 if dst_pos + 1 + lit_len + 2 + 4 > dst_max {
-                    heap_free(hash_table);
+            
                     return 0;
                 }
 
@@ -198,11 +196,9 @@ fn lz4_compress(src: ptr[i32], src_len: i32,
                     dst_pos = write_extended_length(dst, dst_pos, lit_len - RUN_MASK());
                 }
 
-                // Copy literal bytes
-                for i: i32 in range(0, lit_len) {
-                    ptr_write_u8(dst, dst_pos, ptr_read_u8(src, anchor + i));
-                    dst_pos = dst_pos + 1;
-                }
+                // Copy literal bytes (memcpy: non-overlapping src->dst)
+                memcpy(ptr_offset(dst, dst_pos), ptr_offset(src, anchor), widen(lit_len));
+                dst_pos = dst_pos + lit_len;
 
                 // Write match offset (little-endian, 2 bytes)
                 write16_le(dst, dst_pos, offset);
@@ -246,13 +242,10 @@ fn lz4_compress(src: ptr[i32], src_len: i32,
             dst_pos = write_extended_length(dst, dst_pos, last_lit_len - RUN_MASK());
         }
 
-        for i: i32 in range(0, last_lit_len) {
-            ptr_write_u8(dst, dst_pos, ptr_read_u8(src, anchor + i));
-            dst_pos = dst_pos + 1;
-        }
+        memcpy(ptr_offset(dst, dst_pos), ptr_offset(src, anchor), widen(last_lit_len));
+        dst_pos = dst_pos + last_lit_len;
     }
 
-    heap_free(hash_table);
     return dst_pos;
 }
 
@@ -286,13 +279,11 @@ fn lz4_decompress(src: ptr[i32], src_len: i32,
             }
         }
 
-        // Copy literals
+        // Copy literals (non-overlapping src->dst, safe for memcpy)
         if dst_pos + lit_len > dst_max {
             return 0;
         }
-        for i: i32 in range(0, lit_len) {
-            ptr_write_u8(dst, dst_pos + i, ptr_read_u8(src, src_pos + i));
-        }
+        memcpy(ptr_offset(dst, dst_pos), ptr_offset(src, src_pos), widen(lit_len));
         src_pos = src_pos + lit_len;
         dst_pos = dst_pos + lit_len;
 

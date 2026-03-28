@@ -153,12 +153,7 @@ fn main() -> i32 {
     // Test with a simple known input: 16 bytes of zeros, seed=0
     // We use a small test buffer for verification
     let test_len: i32 = 16;
-    let test_data: ptr[i32] = heap_alloc(test_len, 1);
-
-    // Fill with zeros
-    for i: i32 in range(0, test_len) {
-        ptr_write_u8(test_data, i, 0);
-    }
+    let test_data: ptr[i32] = heap_alloc_zeroed(test_len, 1);
 
     let hash_zeros: i32 = xxhash32(test_data, test_len, 0);
     print("xxHash32(16 zeros, seed=0) = ");

@@ -18,7 +18,7 @@
 //   Lit 280-287: 8-bit codes 0xC0-0xC7 (11000000 to 11000111)
 //
 // GAP: No u32 type; use i32 with wrapping ops for CRC.
-// GAP: No global mutable arrays; CRC table built at runtime.
+// Uses global_array_i32 for CRC table (avoids heap alloc/free).
 // =============================================================================
 
 // ---------------------------------------------------------------------------
@@ -384,7 +384,7 @@ fn deflate_fixed_literals(src: ptr[i32], src_len: i32,
 fn test_crc32() -> i32 {
     print("--- Test: CRC32 ---\n");
 
-    let table: ptr[i32] = heap_alloc(256, 4);
+    let table: ptr[i32] = global_array_i32(256);
     build_crc32_table(table);
 
     // "123456789" -> CRC32 = 0xCBF43926
@@ -415,7 +415,6 @@ fn test_crc32() -> i32 {
         print("PASS: CRC32(\"123456789\") correct\n");
     }
 
-    heap_free(table);
     heap_free(test_data);
     return pass;
 }
@@ -572,7 +571,7 @@ fn test_inflate() -> i32 {
 fn bench_crc32() {
     print("\n--- Benchmark: CRC32 ---\n");
 
-    let table: ptr[i32] = heap_alloc(256, 4);
+    let table: ptr[i32] = global_array_i32(256);
     build_crc32_table(table);
 
     let data_len: i32 = 4096;
@@ -606,7 +605,6 @@ fn bench_crc32() {
         print(" MB/s\n");
     }
 
-    heap_free(table);
     heap_free(data);
 }
 

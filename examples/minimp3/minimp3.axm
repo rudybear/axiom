@@ -225,8 +225,8 @@ fn huff_decode_block(bitstream: ptr[i32], bit_pos: i32, count: i32,
 fn test_imdct() -> i32 {
     print("--- Test: IMDCT-36 ---\n");
 
-    // Allocate tables
-    let cos_tab: ptr[i32] = heap_alloc(648, 8);   // 36*18 f64
+    // Allocate tables (global array avoids heap alloc)
+    let cos_tab: ptr[i32] = global_array_f64(648);   // 36*18 f64
     build_imdct_cos_table(cos_tab);
 
     // Test input: unit impulse at k=0 (DC)
@@ -296,7 +296,7 @@ fn test_imdct() -> i32 {
 
     heap_free(input);
     heap_free(output);
-    heap_free(cos_tab);
+    // cos_tab is global array, no heap_free needed
     return pass;
 }
 
@@ -380,10 +380,10 @@ fn test_huffman() -> i32 {
 fn bench_imdct() {
     print("\n--- Benchmark: 1M IMDCT-36 transforms ---\n");
 
-    let cos_tab: ptr[i32] = heap_alloc(648, 8);
+    let cos_tab: ptr[i32] = global_array_f64(648);
     build_imdct_cos_table(cos_tab);
 
-    let window: ptr[i32] = heap_alloc(36, 8);
+    let window: ptr[i32] = global_array_f64(36);
     build_imdct_window(window);
 
     let input: ptr[i32] = heap_alloc(18, 8);
@@ -426,8 +426,7 @@ fn bench_imdct() {
         print("\n");
     }
 
-    heap_free(cos_tab);
-    heap_free(window);
+    // cos_tab, window are global arrays, no heap_free needed
     heap_free(input);
     heap_free(output);
     heap_free(overlap);

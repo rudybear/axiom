@@ -454,13 +454,9 @@ fn filter_image(image: ptr[i32], width: i32, height: i32,
 
         // Write filtered row using the best filter
         if best == FILTER_NONE() {
-            for i: i32 in range(0, wb) {
-                ptr_write_u8(filtered, out_offset + 1 + i, ptr_read_u8(image, row_offset + i));
-            }
+            memcpy(ptr_offset(filtered, out_offset + 1), ptr_offset(image, row_offset), widen(wb));
         } else if best == FILTER_SUB() {
-            for i: i32 in range(0, BPP()) {
-                ptr_write_u8(filtered, out_offset + 1 + i, ptr_read_u8(image, row_offset + i));
-            }
+            memcpy(ptr_offset(filtered, out_offset + 1), ptr_offset(image, row_offset), widen(BPP()));
             for i: i32 in range(BPP(), wb) {
                 let orig: i32 = ptr_read_u8(image, row_offset + i);
                 let left: i32 = ptr_read_u8(image, row_offset + i - BPP());
@@ -491,9 +487,7 @@ fn filter_image(image: ptr[i32], width: i32, height: i32,
         }
 
         // Save current row as prev_row for next iteration
-        for i: i32 in range(0, wb) {
-            ptr_write_u8(prev_row_buf, i, ptr_read_u8(image, row_offset + i));
-        }
+        memcpy(prev_row_buf, ptr_offset(image, row_offset), widen(wb));
 
         total_filtered = total_filtered + wb + 1;
     }
@@ -607,10 +601,10 @@ fn test_filters() -> i32 {
 fn test_crc32() -> i32 {
     print("--- Test: CRC32 (basic + slice-by-4) ---\n");
 
-    let table: ptr[i32] = heap_alloc(256, 4);
+    let table: ptr[i32] = global_array_i32(256);
     build_crc32_table(table);
 
-    let tables_sb4: ptr[i32] = heap_alloc(1024, 4);
+    let tables_sb4: ptr[i32] = global_array_i32(1024);
     build_crc32_tables_sb4(tables_sb4);
 
     // "123456789" -> CRC32 = 0xCBF43926 = -873187034
@@ -672,8 +666,7 @@ fn test_crc32() -> i32 {
         print("PASS: CRC32 large data basic == slice-by-4\n");
     }
 
-    heap_free(table);
-    heap_free(tables_sb4);
+    // table and tables_sb4 are global arrays, no heap_free needed
     heap_free(test_data);
     heap_free(large_data);
     return pass;
@@ -745,7 +738,7 @@ fn bench_filter() {
 fn bench_crc32() {
     print("\n--- Benchmark: CRC32 (basic vs slice-by-4) ---\n");
 
-    let tables_sb4: ptr[i32] = heap_alloc(1024, 4);
+    let tables_sb4: ptr[i32] = global_array_i32(1024);
     build_crc32_tables_sb4(tables_sb4);
 
     let data_len: i32 = 4096;
@@ -803,7 +796,7 @@ fn bench_crc32() {
     print_i32(checksum_sb4);
     print("\n");
 
-    heap_free(tables_sb4);
+    // tables_sb4 is a global array, no heap_free needed
     heap_free(data);
 }
 

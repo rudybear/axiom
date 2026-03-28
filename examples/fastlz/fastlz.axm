@@ -90,12 +90,10 @@ fn emit_literals(src: ptr[i32], src_start: i32, count: i32,
         ptr_write_u8(dst, p, run - 1);
         p = p + 1;
 
-        // Copy literal bytes
-        for i: i32 in range(0, run) {
-            ptr_write_u8(dst, p, ptr_read_u8(src, src_pos));
-            p = p + 1;
-            src_pos = src_pos + 1;
-        }
+        // Copy literal bytes (memcpy: non-overlapping src->dst)
+        memcpy(ptr_offset(dst, p), ptr_offset(src, src_pos), widen(run));
+        p = p + run;
+        src_pos = src_pos + run;
 
         remaining = remaining - run;
     }
@@ -166,8 +164,9 @@ fn fastlz_compress(src: ptr[i32], src_len: i32,
         return emit_literals(src, 0, src_len, dst, 0);
     }
 
-    // Allocate hash table
-    let htab: ptr[i32] = heap_alloc_zeroed(HASH_SIZE(), 4);
+    // Use global array for hash table (avoids malloc/free per call) + memset to zero
+    let htab: ptr[i32] = global_array_i32(8192);
+    memset(htab, 0, 32768);
 
     let src_pos: i32 = 0;
     let dst_pos: i32 = 0;
@@ -233,7 +232,6 @@ fn fastlz_compress(src: ptr[i32], src_len: i32,
         dst_pos = emit_literals(src, anchor, final_lits, dst, dst_pos);
     }
 
-    heap_free(htab);
     return dst_pos;
 }
 
@@ -263,9 +261,7 @@ fn fastlz_decompress(src: ptr[i32], src_len: i32,
                 return 0;
             }
 
-            for i: i32 in range(0, run_len) {
-                ptr_write_u8(dst, dst_pos + i, ptr_read_u8(src, src_pos + i));
-            }
+            memcpy(ptr_offset(dst, dst_pos), ptr_offset(src, src_pos), widen(run_len));
             src_pos = src_pos + run_len;
             dst_pos = dst_pos + run_len;
         } else {

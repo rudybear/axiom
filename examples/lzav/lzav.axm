@@ -17,7 +17,7 @@
 //
 // GAP: No unsigned types. We use i32 with band/lshr for unsigned semantics.
 // GAP: No global mutable state. Hash table allocated per call.
-// GAP: No memcpy. Byte-by-byte copy.
+// Uses memcpy for non-overlapping literal copies, byte-by-byte for match copies.
 // GAP: No unions or tagged enums at codegen level. Use integer encoding.
 // =============================================================================
 
@@ -160,11 +160,9 @@ fn lzav_compress(src: ptr[i32], src_len: i32,
         return 0;
     }
 
-    // Allocate and zero hash table
-    let hash_table: ptr[i32] = heap_alloc(HASH_TABLE_SIZE(), 4);
-    for i: i32 in range(0, HASH_TABLE_SIZE()) {
-        ptr_write_i32(hash_table, i, 0 - 1);
-    }
+    // Use global array for hash table (avoids malloc/free per call) + memset to -1
+    let hash_table: ptr[i32] = global_array_i32(16384);
+    memset(hash_table, 0xFF, 65536);
 
     let src_pos: i32 = 0;
     let dst_pos: i32 = 0;
@@ -185,11 +183,8 @@ fn lzav_compress(src: ptr[i32], src_len: i32,
         if lit_len > MAX_TOKEN_LEN() {
             dst_pos = write_extended_length(dst, dst_pos, lit_len - MAX_TOKEN_LEN());
         }
-        for i: i32 in range(0, lit_len) {
-            ptr_write_u8(dst, dst_pos, ptr_read_u8(src, i));
-            dst_pos = dst_pos + 1;
-        }
-        heap_free(hash_table);
+        memcpy(ptr_offset(dst, dst_pos), src, widen(lit_len));
+        dst_pos = dst_pos + lit_len;
         return dst_pos;
     }
 
@@ -257,7 +252,6 @@ fn lzav_compress(src: ptr[i32], src_len: i32,
 
             // Check output space
             if dst_pos + 1 + lit_len + 3 + 4 > dst_max {
-                heap_free(hash_table);
                 return 0;
             }
 
@@ -266,10 +260,8 @@ fn lzav_compress(src: ptr[i32], src_len: i32,
             if lit_len > MAX_TOKEN_LEN() {
                 dst_pos = write_extended_length(dst, dst_pos, lit_len - MAX_TOKEN_LEN());
             }
-            for i: i32 in range(0, lit_len) {
-                ptr_write_u8(dst, dst_pos, ptr_read_u8(src, anchor + i));
-                dst_pos = dst_pos + 1;
-            }
+            memcpy(ptr_offset(dst, dst_pos), ptr_offset(src, anchor), widen(lit_len));
+            dst_pos = dst_pos + lit_len;
         }
 
         // Emit match token
@@ -281,7 +273,6 @@ fn lzav_compress(src: ptr[i32], src_len: i32,
 
         // Check output space
         if dst_pos + 4 > dst_max {
-            heap_free(hash_table);
             return 0;
         }
 
@@ -321,7 +312,6 @@ fn lzav_compress(src: ptr[i32], src_len: i32,
             tok_len2 = MAX_TOKEN_LEN();
         }
         if dst_pos + 1 + last_lit_len + 4 > dst_max {
-            heap_free(hash_table);
             return 0;
         }
         write_token(dst, dst_pos, TYPE_LITERAL(), tok_len2);
@@ -329,13 +319,10 @@ fn lzav_compress(src: ptr[i32], src_len: i32,
         if last_lit_len > MAX_TOKEN_LEN() {
             dst_pos = write_extended_length(dst, dst_pos, last_lit_len - MAX_TOKEN_LEN());
         }
-        for i: i32 in range(0, last_lit_len) {
-            ptr_write_u8(dst, dst_pos, ptr_read_u8(src, anchor + i));
-            dst_pos = dst_pos + 1;
-        }
+        memcpy(ptr_offset(dst, dst_pos), ptr_offset(src, anchor), widen(last_lit_len));
+        dst_pos = dst_pos + last_lit_len;
     }
 
-    heap_free(hash_table);
     return dst_pos;
 }
 
@@ -381,9 +368,7 @@ fn lzav_decompress(src: ptr[i32], src_len: i32,
                 heap_free(tmp_pos);
                 return 0;
             }
-            for i: i32 in range(0, lit_len) {
-                ptr_write_u8(dst, dst_pos + i, ptr_read_u8(src, src_pos + i));
-            }
+            memcpy(ptr_offset(dst, dst_pos), ptr_offset(src, src_pos), widen(lit_len));
             src_pos = src_pos + lit_len;
             dst_pos = dst_pos + lit_len;
 
