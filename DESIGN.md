@@ -4,7 +4,7 @@ This is the living design document for AXIOM. It summarizes the current
 implementation state, references the formal specification files, and tracks
 design decisions and open questions.
 
-**Project stats:** ~42,000 LOC, 565 tests, 115/115 benchmarks pass (1.01x avg vs C), 39 examples (including 21 C project ports), 24 samples. ALL 47 milestones COMPLETE across 8 tracks, plus Phase L verified development pipeline.
+**Project stats:** ~42,000 LOC, 579 tests, 115/115 benchmarks pass (1.01x avg vs C), 39 examples (including 21 C project ports), 24 samples. ALL 47 milestones COMPLETE across 8 tracks, plus Phase L verified development pipeline.
 
 **FINAL benchmark result:** 115/115 benchmarks pass, 1.01x average ratio vs C (parity). 21 real-world C project ports (~60K+ combined GitHub stars) all at parity or faster. Raytracer: AXIOM scalar 42ms (+7% faster than C -O2 47ms), AXIOM AOS vec3 44ms (+2% faster). Optimization Knowledge Base: 14 rules + 6 anti-patterns, grows with each LLM session.
 
@@ -77,7 +77,7 @@ The `spec/` directory contains the formal language specification:
   `Constraint`, `Target`, `Strategy`, `Transfer`, `Vectorizable`, `Parallel`,
   `Layout`, `Align`, `OptimizationLog`, `Export`, `Lifetime`, `ParallelFor`,
   `Strict`, `Precondition`, `Postcondition`, `Test`, `Link`, `Trace`,
-  `Requires`, `Ensures`, `Invariant`, `Custom`.
+  `Requires`, `Ensures`, `Invariant`, `Cfg`, `Custom`.
 - Duplicate detection for functions, structs, and type aliases.
 - Re-exports AST types that are identical between AST and HIR (BinOp, UnaryOp,
   InlineHint, LayoutKind, AnnotationValue, StrategyBlock, StrategyValue,
@@ -87,21 +87,26 @@ The `spec/` directory contains the formal language specification:
 
 - HIR-to-LLVM-IR text generation for the full language subset: functions with
   all primitive types, arithmetic (with `nsw`), if/else/else-if, for loops (with
-  break/continue), while loops, return, function calls, extern function declarations,
-  `@export` functions, struct literal constructors, struct return from functions,
-  local constants (`const NAME: Type = value`), `range(start, end, step)` with
-  optional step, `@lifetime(scope)` on let bindings for stack promotion.
-- ~206 builtin functions covering: I/O, math (25 including trig/log/exp), vector
-  construction & math (vec2/vec3/vec4/ivec2-4/fvec2-4/dot/cross/length/normalize/reflect/lerp),
-  matrix operations (mat3/mat4 identity/mul/transpose/rotate/translate/perspective/look_at),
+  break/continue), while loops, match statements (integers/booleans), return,
+  function calls, extern function declarations, `@export` functions, struct literal
+  constructors, struct return from functions, local constants (`const NAME: Type = value`),
+  `range(start, end, step)` with optional step, `@lifetime(scope)` on let bindings
+  for stack promotion, tuple field access (`.0`, `.1`).
+- ~220 builtin functions covering: I/O (print/print_hex/format_*/flush), math (25
+  including trig/log/exp), vector construction & math
+  (vec2/vec3/vec4/ivec2-4/fvec2-4/dot/cross/length/normalize/reflect/lerp),
+  SIMD intrinsics (simd_min/max/abs/sqrt/floor/ceil on vector types), matrix
+  operations (mat3/mat4 identity/mul/transpose/rotate/translate/perspective/look_at),
   conversions (including f32_to_f64/f64_to_f32), bitwise, heap memory (including
-  narrow ptr reads/writes for u8/i16/f32 and ptr_offset), arena allocation, file
-  I/O, system, coroutines, threading, atomics, mutex, job system (with dependency
-  graph), renderer/Vulkan FFI (12), GPU/PBR/glTF (22 including procedural mesh
-  generation, texture uploads, and blit), option, string, vec, function pointers,
-  result/error handling, CPU feature detection, input system, audio, debug/verification
-  (assert, debug_print), global constant arrays (array_const_*), global mutable arrays
-  (global_array_*), low-level memory operations (memcpy, memset, memmove).
+  narrow ptr reads/writes for u8/i16/f32 and ptr_offset), pointer casts
+  (ptr_to_i64/i64_to_ptr), arena allocation, file I/O, system, coroutines,
+  threading, atomics, mutex, job system (with dependency graph), renderer/Vulkan
+  FFI (12), GPU/PBR/glTF (22 including procedural mesh generation, texture uploads,
+  and blit), option, string, vec, function pointers (fn_ptr/call_fn_ptr_i32/
+  call_fn_ptr_f64/call_ptr), result/error handling, CPU feature detection, input
+  system, audio, debug/verification (assert, debug_print), global constant arrays
+  (array_const_*), global mutable arrays (global_array_*), low-level memory
+  operations (memcpy, memset, memmove, memcmp).
 - GLSL-style swizzles on vec2/vec3/vec4: `.xy`, `.zyx`, `.xxx`, etc.
 - `@pure` -> `memory(none)` or `memory(argmem: read)`, `readnone`/`readonly`,
   fast-math flags on float operations.
@@ -248,8 +253,8 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 |----------|-------|---------|
 | Primitive types | 26 | i8-i128, u8-u128 (u32 has proper unsigned semantics: udiv, urem, icmp ult, add nuw), f16, bf16, f32, f64, bool, vec2/3/4, ivec2/3/4, fvec2/3/4, mat3, mat4 |
 | Compound types | 11 | array, ptr, readonly_ptr, writeonly_ptr, slice, tensor, tuple, fn, struct |
-| Annotations | 28 | pure, const, inline, complexity, intent, module, constraint, target, strategy, vectorizable, parallel, parallel_for, layout, align, lifetime, export, strict, precondition, postcondition, test, requires, ensures, invariant, trace, link, transfer, optimization_log, custom |
-| Builtin functions | ~206 | I/O (4), math (25), vector math (9), ivec/fvec construction (6), vector conversions (12), matrix ops (14), conversions (5), bitwise (11), memory heap (10), memory narrow ptr (7), arena (4), global const arrays (3), global mutable arrays (3), memory ops (3: memcpy/memset/memmove), slices (6), file (3), system (3), coroutines (5), threads (2), atomics (4), mutex (4), jobs (8), renderer (12), GPU/PBR/glTF (22), option (5), string (5), vec (9), fn_ptr (3), result (6), cpu (1), input (4), audio (2), debug (2) |
+| Annotations | 29 | pure, const, inline, complexity, intent, module, constraint, target, strategy, vectorizable, parallel, parallel_for, layout, align, lifetime, export, strict, precondition, postcondition, test, requires, ensures, invariant, trace, link, cfg, transfer, optimization_log, custom |
+| Builtin functions | ~220 | I/O (8: print/format/flush/print_hex), math (25), vector math (9), ivec/fvec construction (6), vector conversions (12), matrix ops (14), conversions (5), bitwise (11), memory heap (10), memory narrow ptr (7), arena (4), global const arrays (3), global mutable arrays (3), memory ops (4: memcpy/memset/memmove/memcmp), SIMD intrinsics (6: simd_min/max/abs/sqrt/floor/ceil), ptr casts (2: ptr_to_i64/i64_to_ptr), slices (6), file (3), system (3), coroutines (5), threads (2), atomics (4), mutex (4), jobs (8), renderer (12), GPU/PBR/glTF (22), option (5), string (5), vec (9), fn_ptr (4: fn_ptr/call_fn_ptr_i32/call_fn_ptr_f64/call_ptr), result (6), cpu (1), input (4), audio (2), debug (2) |
 | CLI commands | 16 | compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test, replay |
 | Keywords | 21 | fn, let, mut, return, if, else, for, while, in, struct, type, module, import, pub, unsafe, extern, and, or, not, true, false |
 | Type keywords | 33 | i8-i128 (5), u8-u128 (5), f16, bf16, f32, f64, bool, vec2/3/4, ivec2/3/4, fvec2/3/4, mat3, mat4, tensor, array, slice, ptr, readonly_ptr, writeonly_ptr |
@@ -258,8 +263,17 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 
 ## Resolved Questions
 
-- **Verified development**: `@strict` enforcement, `@precondition`/`@postcondition` runtime checks, `@test` inline tests, `axiom verify`, `axiom test --fuzz`.
-- **Pattern matching**: Option/Result use builtin functions. While-let/if-let codegen complete.
+- **Verified development**: `@strict` enforcement, `@precondition`/`@postcondition` runtime checks, `@test` inline tests, `axiom verify`, `axiom test --fuzz`. All 21 real-world ports use `@strict`.
+- **Pattern matching**: `match` statement with integer/boolean patterns fully implemented in codegen. Option/Result use builtin functions. While-let/if-let codegen complete.
+- **Format/print builtins**: `format_i32`, `format_f64`, `format_hex`, `format_i64`, `print_hex_i32`, `print_hex_i64`, `flush` implemented.
+- **SIMD intrinsics**: `simd_min`, `simd_max`, `simd_abs`, `simd_sqrt`, `simd_floor`, `simd_ceil` on vector types implemented.
+- **Tuple field access**: `.0` / `.1` field access on tuple types implemented in codegen.
+- **Pointer casts**: `ptr_to_i64` / `i64_to_ptr` implemented.
+- **memcmp**: `memcmp(a, b, n)` builtin implemented.
+- **call_ptr**: Generic function pointer call builtin implemented.
+- **@cfg**: Conditional compilation annotation implemented; items excluded at HIR lowering time.
+- **Test harness**: Fixed test harness for `@test` inline tests; vacuous warning suppressed for empty test suites.
+- **Arg validation**: Builtin argument count/type validation improved; better error messages.
 - **Generics**: Parsed with monomorphization codegen implemented.
 - **Module system**: `import` parsed, lowered, and separate compilation implemented.
 - **Real Vulkan**: Production renderer with ash crate, instancing, multi-light, depth buffer.

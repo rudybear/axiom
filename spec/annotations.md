@@ -554,6 +554,41 @@ extern fn my_native_func(x: i32) -> i32;
 
 ---
 
+## Conditional Compilation
+
+### `@cfg`
+
+**Syntax:** `@cfg(condition)` where condition is `key = "value"` or `key`
+**Valid targets:** Function, Module
+**Meaning:** Conditionally includes a function or module based on a compile-time
+condition. The condition is checked during HIR lowering; items that do not match
+the current configuration are excluded from the HIR (and thus from code generation).
+**Recognized condition keys:**
+- `target_os = "windows"` / `target_os = "linux"` / `target_os = "macos"` -- operating system
+- `target_arch = "x86_64"` / `target_arch = "aarch64"` -- CPU architecture
+- `debug` -- true in `--debug` builds
+- Any other key is treated as a custom feature flag passed via `--cfg key=value`
+
+**Effect on compilation:** Items failing the condition are dropped before codegen.
+This is the only mechanism for platform-specific code in AXIOM -- no preprocessor,
+no ifdef.
+
+```axiom
+@cfg(target_os = "windows")
+fn platform_init() -> i32 {
+    // Windows-only initialization
+    return 0;
+}
+
+@cfg(target_os = "linux")
+fn platform_init() -> i32 {
+    // Linux-only initialization
+    return 0;
+}
+```
+
+---
+
 ## Custom Annotations
 
 ### `@<name>` (unrecognized names)

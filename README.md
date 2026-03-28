@@ -6,7 +6,7 @@ A programming language designed as the canonical transfer format between AI agen
 
 > **This is NOT a language for humans to program in. This is a language for AI agents to communicate optimized computation through.**
 
-> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 21 real-world C project ports (~60K+ combined GitHub stars) all at parity or faster. ~42,000 LOC. 565 tests. 115/115 benchmarks pass (1.01x avg vs C). ALL 47 milestones COMPLETE.
+> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 21 real-world C project ports (~60K+ combined GitHub stars) all at parity or faster. ~42,000 LOC. 579 tests. 115/115 benchmarks pass (1.01x avg vs C). ALL 47 milestones COMPLETE.
 
 ## Why AXIOM Exists
 
@@ -64,7 +64,7 @@ The `?params` are optimization holes that AI agents fill in, benchmark, and iter
 
 ### Real-World C Project Ports (21 projects, ~60K+ combined GitHub stars)
 
-AXIOM ports of popular open-source C libraries, benchmarked against the original C compiled with `clang -O3 -march=native -ffast-math`. Each port uses only general AXIOM optimizations -- no benchmark-specific cheating.
+AXIOM ports of popular open-source C libraries, benchmarked against the original C compiled with `clang -O3 -march=native -ffast-math`. Each port uses only general AXIOM optimizations -- no benchmark-specific cheating. All 21 ports are annotated with `@strict` (every function carries `@pure`/`@intent`/`@complexity`).
 
 | Project | GitHub Stars | Category | Result |
 |---------|-------------|----------|--------|
@@ -341,6 +341,19 @@ let data: ptr[f64] = global_array_f64(64);     // 64-element writable global f64
 memcpy(dst, src, 8);              // Copy 8 bytes (non-overlapping) -> llvm.memcpy
 memset(buf, 0, 64);              // Zero-fill 64 bytes -> llvm.memset
 memmove(dst, src, 32);           // Copy 32 bytes (overlapping safe) -> llvm.memmove
+memcmp(a, b, 16);                // Compare 16 bytes -> 0 if equal
+ptr_to_i64(ptr)                  // Cast pointer to i64
+i64_to_ptr(n)                    // Cast i64 to pointer
+```
+
+### SIMD Intrinsics
+```axiom
+simd_min(a, b)    // Elementwise min on vec2/vec3/vec4/fvec* types
+simd_max(a, b)    // Elementwise max
+simd_abs(v)       // Elementwise absolute value
+simd_sqrt(v)      // Elementwise square root
+simd_floor(v)     // Elementwise floor
+simd_ceil(v)      // Elementwise ceil
 ```
 
 ### Bitwise Operations
@@ -400,6 +413,7 @@ for i in range(0, 10, 2) { }        // range with optional step
 break;                                // Break out of loop
 continue;                             // Skip to next iteration
 if x > 0 { } else if x == 0 { } else { }  // else if chains
+match x { 1 => ..., 2 => ..., _ => ... }  // Pattern match (integers, booleans)
 ```
 
 ### Struct Constructors
@@ -450,6 +464,13 @@ print("hello");               // Print string
 print_i32(42);                // Print i32
 print_i64(100);               // Print i64
 print_f64(3.14);              // Print f64
+print_hex_i32(n)              // Print i32 as hex
+print_hex_i64(n)              // Print i64 as hex
+flush()                       // Flush stdout
+format_i32(n)                 // Format i32 to string (ptr[i32])
+format_i64(n)                 // Format i64 to string
+format_f64(x)                 // Format f64 to string
+format_hex(n)                 // Format integer as hex string
 file_read(path)               // Read entire file
 file_write(path, data, len)   // Write bytes to file
 file_size(path)               // Get file size
@@ -464,6 +485,7 @@ cpu_features()                // CPUID feature bitmask
 let fp: ptr[i32] = fn_ptr(my_function);
 let result: i32 = call_fn_ptr_i32(fp, arg);
 let result: f64 = call_fn_ptr_f64(fp, arg);
+let result: i32 = call_ptr(fp, arg1, arg2);  // Generic call through function pointer
 ```
 
 ### C Interop / FFI
@@ -624,10 +646,10 @@ axiom/
 ## Stats
 
 - **~40,100 lines of Rust** across 7 crates
-- **565 tests** (all passing)
+- **579 tests** (all passing)
 - **115/115 benchmarks pass** (1.01x avg ratio vs C)
 - **21 real-world C project ports** (~60K+ combined GitHub stars) -- all at parity or faster (3 wins)
-- **~171 builtin functions** (I/O, math, vector math, matrix ops, memory, memcpy/memset/memmove, concurrency, collections, debug, slices, global constant/mutable arrays)
+- **~185 builtin functions** (I/O, math, vector math, matrix ops, memory, memcpy/memset/memmove/memcmp, SIMD intrinsics, format/print_hex, concurrency, collections, debug, slices, global constant/mutable arrays, ptr_to_i64/i64_to_ptr, call_ptr)
 - **18 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test, replay
 - **38 example programs** (including 21 C project ports), **24 sample programs**
 - **5 formal specification documents**
