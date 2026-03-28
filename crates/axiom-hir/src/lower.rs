@@ -588,6 +588,13 @@ impl LoweringContext {
             },
             ast::Stmt::Break => HirStmtKind::Break,
             ast::Stmt::Continue => HirStmtKind::Continue,
+            ast::Stmt::Match { value, arms, default } => HirStmtKind::Match {
+                value: self.lower_expr(value, span),
+                arms: arms.iter().map(|(pat, block)| {
+                    (self.lower_expr(pat, span), self.lower_block(block, span))
+                }).collect(),
+                default: default.as_ref().map(|b| self.lower_block(b, span)),
+            },
             ast::Stmt::Expr(expr) => HirStmtKind::Expr {
                 expr: self.lower_expr(expr, span),
             },
@@ -1649,6 +1656,7 @@ struct Point {
                     HirStmtKind::For { iterable, .. } => check_expr(iterable, kind_check),
                     HirStmtKind::While { condition, .. } => check_expr(condition, kind_check),
                     HirStmtKind::Break | HirStmtKind::Continue => false,
+                    HirStmtKind::Match { value, .. } => check_expr(value, kind_check),
                     HirStmtKind::Expr { expr } => check_expr(expr, kind_check),
                 };
                 if found {

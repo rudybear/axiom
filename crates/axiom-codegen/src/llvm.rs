@@ -1383,6 +1383,11 @@ fn function_writes_through_ptrs(body: &HirBlock) -> bool {
                 expr_has_ptr_write(condition) || block_has_ptr_write(body)
             }
             HirStmtKind::Break | HirStmtKind::Continue => false,
+            HirStmtKind::Match { value, arms, default } => {
+                expr_has_ptr_write(value)
+                    || arms.iter().any(|(p, b)| expr_has_ptr_write(p) || block_has_ptr_write(b))
+                    || default.as_ref().is_some_and(block_has_ptr_write)
+            }
             HirStmtKind::Expr { expr } => expr_has_ptr_write(expr),
         }
     }
@@ -1986,6 +1991,53 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
                     context: "continue statement".to_string(),
                 });
             }
+        }
+        HirStmtKind::Match { value, arms, default } => {
+            let val = emit_expr(ctx, value, None);
+            let end_label = ctx.fresh_label("match.end");
+            let default_label = if default.is_some() {
+                ctx.fresh_label("match.default")
+            } else {
+                end_label.clone()
+            };
+
+            // Build switch cases
+            let mut arm_labels = Vec::new();
+            let mut case_strs = Vec::new();
+            for (i, (pattern, _)) in arms.iter().enumerate() {
+                let label = ctx.fresh_label(&format!("match.arm.{i}"));
+                let pat_val = emit_expr(ctx, pattern, Some(&val.ty));
+                case_strs.push(format!("    {} {}, label %{}", val.ty, pat_val.reg, label));
+                arm_labels.push(label);
+            }
+
+            ctx.emit(&format!(
+                "switch {} {}, label %{} [\n{}\n  ]",
+                val.ty, val.reg, default_label, case_strs.join("\n")
+            ));
+
+            // Emit arm blocks
+            for (i, (_, block)) in arms.iter().enumerate() {
+                ctx.block_terminated = false;
+                ctx.emit_raw(&format!("{}:", arm_labels[i]));
+                emit_block(ctx, block);
+                if !ctx.block_terminated {
+                    ctx.emit(&format!("br label %{end_label}"));
+                }
+            }
+
+            // Default block
+            if let Some(def_block) = default {
+                ctx.block_terminated = false;
+                ctx.emit_raw(&format!("{default_label}:"));
+                emit_block(ctx, def_block);
+                if !ctx.block_terminated {
+                    ctx.emit(&format!("br label %{end_label}"));
+                }
+            }
+
+            ctx.block_terminated = false;
+            ctx.emit_raw(&format!("{end_label}:"));
         }
         HirStmtKind::Expr { expr } => {
             emit_expr(ctx, expr, None);

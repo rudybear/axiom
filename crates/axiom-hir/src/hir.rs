@@ -300,6 +300,12 @@ pub enum HirStmtKind {
     Break,
     /// `continue;` — skip to the next iteration of the innermost loop.
     Continue,
+    /// `match value { pattern { block } ... _ { block } }`.
+    Match {
+        value: HirExpr,
+        arms: Vec<(HirExpr, HirBlock)>,
+        default: Option<HirBlock>,
+    },
     /// Expression statement.
     Expr {
         /// The expression.

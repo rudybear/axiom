@@ -1874,6 +1874,7 @@ impl<'src> Parser<'src> {
             TokenKind::For => Some(self.parse_for_stmt()),
             TokenKind::While => Some(self.parse_while_stmt()),
             TokenKind::Ident(ref name) if name == "const" => Some(self.parse_const_stmt()),
+            TokenKind::Ident(ref name) if name == "match" => Some(self.parse_match_stmt()),
             _ => Some(self.parse_assign_or_expr_stmt()),
         }
     }
@@ -1987,6 +1988,37 @@ impl<'src> Parser<'src> {
         self.expect_semicolon();
         let end_span = self.prev_span();
         Spanned::new(Stmt::Continue, start_span.merge(end_span))
+    }
+
+    /// Parse a match statement: `match expr { pattern { block } ... _ { block } }`.
+    fn parse_match_stmt(&mut self) -> Spanned<Stmt> {
+        let start_span = self.current_span();
+        self.advance(); // consume "match"
+        let value = self.parse_expr();
+        self.expect(&TokenKind::LBrace, "'{'"); // outer {
+        let mut arms = Vec::new();
+        let mut default = None;
+        while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+            // Check for _ (default arm)
+            let is_default = matches!(self.peek(), TokenKind::Ident(ref n) if n == "_");
+            if is_default {
+                self.advance(); // consume _
+                // parse_block consumes { ... } itself
+                let block = self.parse_block();
+                default = Some(block);
+            } else {
+                let pattern = self.parse_expr();
+                // parse_block consumes { ... } itself
+                let block = self.parse_block();
+                arms.push((pattern, block));
+            }
+        }
+        self.expect(&TokenKind::RBrace, "'}'"); // outer }
+        let end_span = self.prev_span();
+        Spanned::new(
+            Stmt::Match { value, arms, default },
+            start_span.merge(end_span),
+        )
     }
 
     /// Parse an if statement: `if cond { } else { }`.

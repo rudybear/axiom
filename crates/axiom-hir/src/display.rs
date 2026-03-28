@@ -270,6 +270,20 @@ fn write_stmt(f: &mut fmt::Formatter<'_>, stmt: &HirStmt, indent: usize) -> fmt:
         HirStmtKind::Continue => {
             writeln!(f, "{prefix}continue;  // [node:{}]", stmt.id)?;
         }
+        HirStmtKind::Match { value, arms, default } => {
+            writeln!(f, "{prefix}match {value} {{  // [node:{}]", stmt.id)?;
+            for (pat, block) in arms {
+                writeln!(f, "{prefix}  {pat} {{")?;
+                write_block_contents(f, block, indent + 2)?;
+                writeln!(f, "{prefix}  }}")?;
+            }
+            if let Some(def) = default {
+                writeln!(f, "{prefix}  _ {{")?;
+                write_block_contents(f, def, indent + 2)?;
+                writeln!(f, "{prefix}  }}")?;
+            }
+            writeln!(f, "{prefix}}}")?;
+        }
         HirStmtKind::Expr { expr } => {
             writeln!(f, "{prefix}{expr};  // [node:{}]", stmt.id)?;
         }

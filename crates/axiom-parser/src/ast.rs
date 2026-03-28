@@ -133,6 +133,11 @@ pub enum Stmt {
     },
     Break,
     Continue,
+    Match {
+        value: Expr,
+        arms: Vec<(Expr, Block)>,
+        default: Option<Block>,
+    },
     Expr(Expr),
 }
 
