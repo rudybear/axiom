@@ -3140,7 +3140,7 @@ fn test_ptr_read_write_i32() {
     let ir = codegen(&m).expect("codegen should succeed");
     // ptr_write: GEP + store
     assert!(
-        ir.contains("getelementptr i32, ptr"),
+        ir.contains("getelementptr inbounds i32, ptr"),
         "ptr_write should emit GEP: {ir}"
     );
     assert!(
@@ -3197,7 +3197,7 @@ fn test_ptr_read_write_f64() {
 
     let ir = codegen(&m).expect("codegen should succeed");
     assert!(
-        ir.contains("getelementptr double, ptr"),
+        ir.contains("getelementptr inbounds double, ptr"),
         "ptr_write_f64 should emit GEP with double: {ir}"
     );
     assert!(
@@ -3253,7 +3253,7 @@ fn test_ptr_read_write_i64() {
 
     let ir = codegen(&m).expect("codegen should succeed");
     assert!(
-        ir.contains("getelementptr i64, ptr"),
+        ir.contains("getelementptr inbounds i64, ptr"),
         "ptr_write_i64 should emit GEP with i64: {ir}"
     );
     assert!(
@@ -3352,7 +3352,7 @@ fn test_heap_program_full_integration() {
         "should emit malloc: {ir}"
     );
     assert!(
-        ir.contains("getelementptr i32, ptr"),
+        ir.contains("getelementptr inbounds i32, ptr"),
         "should emit GEP for ptr_write/read: {ir}"
     );
     assert!(
@@ -6759,7 +6759,7 @@ fn test_ptr_read_write_f32() {
         "ptr_write_f32 should emit fptrunc: {ir}"
     );
     assert!(
-        ir.contains("getelementptr float, ptr"),
+        ir.contains("getelementptr inbounds float, ptr"),
         "ptr_write_f32 should emit GEP float: {ir}"
     );
     assert!(
@@ -6815,7 +6815,7 @@ fn test_ptr_read_i16() {
 
     let ir = codegen(&m).expect("codegen should succeed");
     assert!(
-        ir.contains("getelementptr i16, ptr"),
+        ir.contains("getelementptr inbounds i16, ptr"),
         "ptr_read_i16 should emit GEP i16: {ir}"
     );
     assert!(
@@ -6866,8 +6866,8 @@ fn test_ptr_read_u8() {
 
     let ir = codegen(&m).expect("codegen should succeed");
     assert!(
-        ir.contains("getelementptr i8, ptr"),
-        "ptr_read_u8 should emit GEP i8: {ir}"
+        ir.contains("getelementptr inbounds i8, ptr"),
+        "ptr_read_u8 should emit GEP inbounds i8: {ir}"
     );
     assert!(
         ir.contains("load i8, ptr"),

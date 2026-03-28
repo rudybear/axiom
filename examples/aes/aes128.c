@@ -4,7 +4,11 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <time.h>
+#endif
 
 #define NB 4
 #define NK 4
@@ -194,8 +198,14 @@ int main(void) {
     // Benchmark
     int iterations = 1000000;
     printf("Benchmarking: 1M encrypt/decrypt cycles...\n");
+#ifdef _WIN32
+    LARGE_INTEGER freq, t0, t1;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+#else
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
+#endif
 
     uint32_t checksum = 0;
     for (int iter = 0; iter < iterations; iter++) {
@@ -210,8 +220,13 @@ int main(void) {
         checksum += c2[0] + d2[0];
     }
 
+#ifdef _WIN32
+    QueryPerformanceCounter(&t1);
+    long elapsed_ms = (long)((t1.QuadPart - t0.QuadPart) * 1000 / freq.QuadPart);
+#else
     clock_gettime(CLOCK_MONOTONIC, &t1);
     long elapsed_ms = (t1.tv_sec-t0.tv_sec)*1000 + (t1.tv_nsec-t0.tv_nsec)/1000000;
+#endif
     printf("Elapsed: %ld ms\n", elapsed_ms);
     printf("Checksum: %u\n", checksum);
     if (elapsed_ms > 0) {

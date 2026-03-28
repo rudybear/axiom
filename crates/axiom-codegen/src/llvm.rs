@@ -246,6 +246,13 @@ struct CodegenContext {
     /// function call overhead and enabling LLVM to see the constant address.
     /// Key: function name, Value: global constant name (e.g., "@.const.arr.0").
     const_returning_fns: HashMap<String, String>,
+    /// Interprocedural const pointer propagation: if ALL call sites for a
+    /// (function_name, param_index) pass the same global constant, record it here.
+    /// Key: (function_name, param_index), Value: global constant name.
+    const_param_globals: HashMap<(String, usize), String>,
+    /// Metadata for global constant arrays: global_name -> (elem_type, array_size).
+    /// Used to emit array-typed GEPs with inbounds for known constant arrays.
+    const_array_meta: HashMap<String, (String, usize)>,
     /// Whether the `@llvm.fshl.i64` intrinsic is needed (64-bit rotate left).
     needs_fshl_i64: bool,
     /// Whether the `@llvm.fshr.i64` intrinsic is needed (64-bit rotate right).
@@ -326,6 +333,8 @@ impl CodegenContext {
             const_arrays: Vec::new(),
             const_ptr_vars: HashMap::new(),
             const_returning_fns: HashMap::new(),
+            const_param_globals: HashMap::new(),
+            const_array_meta: HashMap::new(),
             needs_fshl_i64: false,
             needs_fshr_i64: false,
         }
@@ -495,11 +504,206 @@ fn pre_scan_const_returning_fns(ctx: &mut CodegenContext, functions: &[HirFuncti
                         "{global_name} = private unnamed_addr constant {array_type} [{initializer}]"
                     ));
 
+                    // Track array metadata for array-typed GEPs.
+                    ctx.const_array_meta
+                        .insert(global_name.clone(), (elem_type.to_string(), n));
+
                     ctx.const_returning_fns
                         .insert(func.name.clone(), global_name);
                 }
             }
         }
+    }
+}
+
+/// Pre-scan pass: interprocedural const pointer propagation.
+///
+/// For each call site in every function body, check if the argument resolves to
+/// a known global constant (from `const_returning_fns` or a local variable that
+/// holds such a constant). If ALL call sites for a (function, param_index) pass
+/// the same global constant, record it in `const_param_globals`. This is then
+/// used in `emit_function` to populate `const_ptr_vars` for parameters, enabling
+/// direct GEP into .rodata for known constant arrays (critical for AES S-box).
+fn pre_scan_const_params(ctx: &mut CodegenContext, functions: &[HirFunction]) {
+    // First, build a map: for each (callee_name, param_index), collect the set
+    // of global constants passed at all call sites.
+    // None means "not a known global" (invalidates propagation).
+    let mut param_globals: HashMap<(String, usize), Option<String>> = HashMap::new();
+
+    // Build a per-function map of local variables that are known to hold
+    // a const-returning function result (e.g., `let sbox = get_sbox();`).
+    for func in functions {
+        // Scan this function's body for let-bindings that call const-returning fns.
+        let mut local_const_vars: HashMap<String, String> = HashMap::new();
+        collect_local_const_vars(&func.body.stmts, &ctx.const_returning_fns, &mut local_const_vars);
+
+        // Now scan call sites in the body.
+        collect_call_site_const_args(
+            &func.body.stmts,
+            &ctx.const_returning_fns,
+            &local_const_vars,
+            &mut param_globals,
+        );
+    }
+
+    // For each (func, param_index) where ALL call sites pass the same global, record it.
+    for ((func_name, param_idx), maybe_global) in param_globals {
+        if let Some(global_name) = maybe_global {
+            ctx.const_param_globals
+                .insert((func_name, param_idx), global_name);
+        }
+    }
+}
+
+/// Collect local variables in a function that are initialized from const-returning functions.
+fn collect_local_const_vars(
+    stmts: &[HirStmt],
+    const_returning_fns: &HashMap<String, String>,
+    local_const_vars: &mut HashMap<String, String>,
+) {
+    for stmt in stmts {
+        match &stmt.kind {
+            HirStmtKind::Let { name, value: Some(ref val_expr), .. } => {
+                // Check if value is a call to a const-returning function.
+                if let HirExprKind::Call { func: ref callee, .. } = val_expr.kind {
+                    if let HirExprKind::Ident { name: ref callee_name } = callee.kind {
+                        if let Some(global) = const_returning_fns.get(callee_name.as_str()) {
+                            local_const_vars.insert(name.clone(), global.clone());
+                        }
+                    }
+                }
+            }
+            HirStmtKind::If { then_block, else_block, .. } => {
+                // Don't recurse into conditionals for local_const_vars since
+                // the variable might not always be assigned.
+                // But we do need to scan for call sites.
+                let _ = then_block;
+                let _ = else_block;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Recursively scan statements for call sites, tracking which global constants
+/// are passed to each (function, param_index).
+fn collect_call_site_const_args(
+    stmts: &[HirStmt],
+    const_returning_fns: &HashMap<String, String>,
+    local_const_vars: &HashMap<String, String>,
+    param_globals: &mut HashMap<(String, usize), Option<String>>,
+) {
+    for stmt in stmts {
+        collect_call_sites_in_stmt(&stmt.kind, const_returning_fns, local_const_vars, param_globals);
+    }
+}
+
+fn collect_call_sites_in_stmt(
+    stmt_kind: &HirStmtKind,
+    const_returning_fns: &HashMap<String, String>,
+    local_const_vars: &HashMap<String, String>,
+    param_globals: &mut HashMap<(String, usize), Option<String>>,
+) {
+    match stmt_kind {
+        HirStmtKind::Expr { expr } => {
+            collect_call_sites_in_expr(&expr.kind, const_returning_fns, local_const_vars, param_globals);
+        }
+        HirStmtKind::Let { value: Some(ref val_expr), .. } => {
+            collect_call_sites_in_expr(&val_expr.kind, const_returning_fns, local_const_vars, param_globals);
+        }
+        HirStmtKind::Assign { value, .. } => {
+            collect_call_sites_in_expr(&value.kind, const_returning_fns, local_const_vars, param_globals);
+        }
+        HirStmtKind::Return { value: Some(ref ret_expr) } => {
+            collect_call_sites_in_expr(&ret_expr.kind, const_returning_fns, local_const_vars, param_globals);
+        }
+        HirStmtKind::If { condition, then_block, else_block, .. } => {
+            collect_call_sites_in_expr(&condition.kind, const_returning_fns, local_const_vars, param_globals);
+            collect_call_site_const_args(&then_block.stmts, const_returning_fns, local_const_vars, param_globals);
+            if let Some(ref else_blk) = else_block {
+                collect_call_site_const_args(&else_blk.stmts, const_returning_fns, local_const_vars, param_globals);
+            }
+        }
+        HirStmtKind::While { condition, body, .. } => {
+            collect_call_sites_in_expr(&condition.kind, const_returning_fns, local_const_vars, param_globals);
+            collect_call_site_const_args(&body.stmts, const_returning_fns, local_const_vars, param_globals);
+        }
+        HirStmtKind::For { body, .. } => {
+            collect_call_site_const_args(&body.stmts, const_returning_fns, local_const_vars, param_globals);
+        }
+        _ => {}
+    }
+}
+
+fn collect_call_sites_in_expr(
+    expr_kind: &HirExprKind,
+    const_returning_fns: &HashMap<String, String>,
+    local_const_vars: &HashMap<String, String>,
+    param_globals: &mut HashMap<(String, usize), Option<String>>,
+) {
+    match expr_kind {
+        HirExprKind::Call { func: ref callee, ref args } => {
+            if let HirExprKind::Ident { ref name } = callee.kind {
+                // For each argument, check if it resolves to a known global.
+                for (i, arg) in args.iter().enumerate() {
+                    let global = resolve_arg_to_global(arg, const_returning_fns, local_const_vars);
+                    let key = (name.clone(), i);
+                    match param_globals.get(&key) {
+                        None => {
+                            // First call site for this (func, param).
+                            param_globals.insert(key, global);
+                        }
+                        Some(existing) => {
+                            if *existing != global {
+                                // Conflict: different call sites pass different values.
+                                param_globals.insert(key, None);
+                            }
+                        }
+                    }
+                }
+            }
+            // Also recurse into the arguments for nested calls.
+            for arg in args {
+                collect_call_sites_in_expr(&arg.kind, const_returning_fns, local_const_vars, param_globals);
+            }
+        }
+        HirExprKind::BinaryOp { lhs, rhs, .. } => {
+            collect_call_sites_in_expr(&lhs.kind, const_returning_fns, local_const_vars, param_globals);
+            collect_call_sites_in_expr(&rhs.kind, const_returning_fns, local_const_vars, param_globals);
+        }
+        HirExprKind::UnaryOp { operand, .. } => {
+            collect_call_sites_in_expr(&operand.kind, const_returning_fns, local_const_vars, param_globals);
+        }
+        HirExprKind::Index { expr, indices } => {
+            collect_call_sites_in_expr(&expr.kind, const_returning_fns, local_const_vars, param_globals);
+            for idx in indices {
+                collect_call_sites_in_expr(&idx.kind, const_returning_fns, local_const_vars, param_globals);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Resolve a call argument to a global constant name, if possible.
+fn resolve_arg_to_global(
+    arg: &HirExpr,
+    const_returning_fns: &HashMap<String, String>,
+    local_const_vars: &HashMap<String, String>,
+) -> Option<String> {
+    match &arg.kind {
+        HirExprKind::Ident { ref name } => {
+            // Check if this identifier is a known local const var.
+            local_const_vars.get(name).cloned()
+        }
+        HirExprKind::Call { func: ref callee, .. } => {
+            // Check if this is a call to a const-returning function.
+            if let HirExprKind::Ident { ref name } = callee.kind {
+                const_returning_fns.get(name.as_str()).cloned()
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -599,6 +803,12 @@ fn codegen_inner(
     // without it, the pointer goes through alloca+store+load, which prevents
     // LLVM from seeing that it points to a constant table in .rodata.
     pre_scan_const_returning_fns(ctx, &module.functions);
+
+    // Pre-scan pass 2: interprocedural const pointer propagation.
+    // If ALL call sites for a (function, param_index) pass the same known global
+    // constant, record it so that emit_function can populate const_ptr_vars for
+    // those parameters, enabling direct GEP into .rodata.
+    pre_scan_const_params(ctx, &module.functions);
 
     // First pass: emit all functions to a buffer (so we know what globals are needed).
     let mut func_output = String::with_capacity(4096);
@@ -1220,6 +1430,7 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     ctx.next_reg = 0;
     ctx.next_label = 0;
     ctx.variables.clear();
+    ctx.const_ptr_vars.clear();
     ctx.param_ownership.clear();
     ctx.block_terminated = false;
     ctx.current_return_type = String::new();
@@ -1290,6 +1501,15 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
 
     // Alloca + store for each parameter.
     emit_param_allocas(ctx, &func.params);
+
+    // Interprocedural const pointer propagation: if ALL call sites for this
+    // function pass the same global constant for a parameter, track it in
+    // const_ptr_vars so that emit_ident returns the global directly.
+    for (i, param) in func.params.iter().enumerate() {
+        if let Some(global_name) = ctx.const_param_globals.get(&(func.name.clone(), i)).cloned() {
+            ctx.const_ptr_vars.insert(param.name.clone(), global_name);
+        }
+    }
 
     // In debug mode, install the crash handler at the start of main().
     if is_main && ctx.debug_mode {
@@ -7357,10 +7577,25 @@ fn emit_builtin_ptr_read(
     ));
 
     let gep_reg = ctx.fresh_reg();
-    ctx.emit(&format!(
-        "{gep_reg} = getelementptr {elem_type}, ptr {}, i64 {idx64}",
-        ptr_val.reg
-    ));
+    // Use array-typed GEP with inbounds when the pointer is a known global constant array.
+    if let Some((ref arr_elem_type, arr_size)) = ctx.const_array_meta.get(&ptr_val.reg).cloned() {
+        if arr_elem_type == elem_type {
+            ctx.emit(&format!(
+                "{gep_reg} = getelementptr inbounds [{arr_size} x {elem_type}], ptr {}, i64 0, i64 {idx64}",
+                ptr_val.reg
+            ));
+        } else {
+            ctx.emit(&format!(
+                "{gep_reg} = getelementptr inbounds {elem_type}, ptr {}, i64 {idx64}",
+                ptr_val.reg
+            ));
+        }
+    } else {
+        ctx.emit(&format!(
+            "{gep_reg} = getelementptr inbounds {elem_type}, ptr {}, i64 {idx64}",
+            ptr_val.reg
+        ));
+    }
 
     let result_reg = ctx.fresh_reg();
     ctx.emit(&format!(
@@ -7418,7 +7653,7 @@ fn emit_builtin_ptr_write(
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
-        "{gep_reg} = getelementptr {elem_type}, ptr {}, i64 {idx64}",
+        "{gep_reg} = getelementptr inbounds {elem_type}, ptr {}, i64 {idx64}",
         ptr_val.reg
     ));
 
@@ -7472,7 +7707,7 @@ fn emit_builtin_ptr_read_f32(
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
-        "{gep_reg} = getelementptr float, ptr {}, i64 {idx64}",
+        "{gep_reg} = getelementptr inbounds float, ptr {}, i64 {idx64}",
         ptr_val.reg
     ));
 
@@ -7532,7 +7767,7 @@ fn emit_builtin_ptr_write_f32(
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
-        "{gep_reg} = getelementptr float, ptr {}, i64 {idx64}",
+        "{gep_reg} = getelementptr inbounds float, ptr {}, i64 {idx64}",
         ptr_val.reg
     ));
 
@@ -7583,7 +7818,7 @@ fn emit_builtin_ptr_read_i16(
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
-        "{gep_reg} = getelementptr i16, ptr {}, i64 {idx64}",
+        "{gep_reg} = getelementptr inbounds i16, ptr {}, i64 {idx64}",
         ptr_val.reg
     ));
 
@@ -7638,10 +7873,25 @@ fn emit_builtin_ptr_read_u8(
     ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
 
     let gep_reg = ctx.fresh_reg();
-    ctx.emit(&format!(
-        "{gep_reg} = getelementptr i8, ptr {}, i64 {idx64}",
-        ptr_val.reg
-    ));
+    // Use array-typed GEP with inbounds when the pointer is a known global constant array.
+    if let Some((ref arr_elem_type, arr_size)) = ctx.const_array_meta.get(&ptr_val.reg).cloned() {
+        if arr_elem_type == "i8" {
+            ctx.emit(&format!(
+                "{gep_reg} = getelementptr inbounds [{arr_size} x i8], ptr {}, i64 0, i64 {idx64}",
+                ptr_val.reg
+            ));
+        } else {
+            ctx.emit(&format!(
+                "{gep_reg} = getelementptr inbounds i8, ptr {}, i64 {idx64}",
+                ptr_val.reg
+            ));
+        }
+    } else {
+        ctx.emit(&format!(
+            "{gep_reg} = getelementptr inbounds i8, ptr {}, i64 {idx64}",
+            ptr_val.reg
+        ));
+    }
 
     let i8_reg = ctx.fresh_reg();
     ctx.emit(&format!("{i8_reg} = load i8, ptr {gep_reg}"));
@@ -7700,7 +7950,7 @@ fn emit_builtin_ptr_write_u8(
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
-        "{gep_reg} = getelementptr i8, ptr {}, i64 {idx64}",
+        "{gep_reg} = getelementptr inbounds i8, ptr {}, i64 {idx64}",
         ptr_val.reg
     ));
 
@@ -7756,7 +8006,7 @@ fn emit_builtin_ptr_write_i16(
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
-        "{gep_reg} = getelementptr i16, ptr {}, i64 {idx64}",
+        "{gep_reg} = getelementptr inbounds i16, ptr {}, i64 {idx64}",
         ptr_val.reg
     ));
 
@@ -10399,6 +10649,10 @@ fn emit_builtin_array_const(
     ctx.const_arrays.push(format!(
         "{global_name} = private unnamed_addr constant {array_type} [{initializer}]"
     ));
+
+    // Track array metadata for array-typed GEPs.
+    ctx.const_array_meta
+        .insert(global_name.clone(), (elem_type.to_string(), n));
 
     LlvmValue {
         reg: global_name,

@@ -8,13 +8,10 @@
 // Implements AES-128 encryption and decryption in ECB mode.
 // Key size: 16 bytes (128 bits), Block size: 16 bytes, Rounds: 10
 //
-// GAP: AXIOM has no u8 type; we use i32 to hold byte values [0..255].
-//      All byte operations mask with band(x, 255) where needed.
-// GAP: No multi-dimensional arrays; state[4][4] is flat array[i32, 16].
-//      Indexing: state[row][col] = state[row * 4 + col] (row-major for state).
-//      Note: AES state is column-major: state[row][col] where col is the
-//      byte index within a column. We store as flat[row * 4 + col].
-// RESOLVED: S-box and tables use array_const_i32 for global constant arrays in .rodata.
+// All byte-level storage uses u8 (1 byte per element) for cache efficiency.
+// ptr_read_u8 returns i32 (zero-extended), so all bitwise ops work on i32.
+// No multi-dimensional arrays; state[4][4] is flat 16-byte buffer.
+// S-box and tables use array_const_u8 for global constant arrays in .rodata.
 // =============================================================================
 
 // ---------------------------------------------------------------------------
@@ -31,7 +28,7 @@
 // ---------------------------------------------------------------------------
 @pure
 fn get_sbox() -> ptr[i32] {
-    return array_const_i32(
+    return array_const_u8(
         0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76,
         0xCA, 0x82, 0xC9, 0x7D, 0xFA, 0x59, 0x47, 0xF0, 0xAD, 0xD4, 0xA2, 0xAF, 0x9C, 0xA4, 0x72, 0xC0,
         0xB7, 0xFD, 0x93, 0x26, 0x36, 0x3F, 0xF7, 0xCC, 0x34, 0xA5, 0xE5, 0xF1, 0x71, 0xD8, 0x31, 0x15,
@@ -56,7 +53,7 @@ fn get_sbox() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 @pure
 fn get_rsbox() -> ptr[i32] {
-    return array_const_i32(
+    return array_const_u8(
         0x52, 0x09, 0x6A, 0xD5, 0x30, 0x36, 0xA5, 0x38, 0xBF, 0x40, 0xA3, 0x9E, 0x81, 0xF3, 0xD7, 0xFB,
         0x7C, 0xE3, 0x39, 0x82, 0x9B, 0x2F, 0xFF, 0x87, 0x34, 0x8E, 0x43, 0x44, 0xC4, 0xDE, 0xE9, 0xCB,
         0x54, 0x7B, 0x94, 0x32, 0xA6, 0xC2, 0x23, 0x3D, 0xEE, 0x4C, 0x95, 0x0B, 0x42, 0xFA, 0xC3, 0x4E,
@@ -81,7 +78,7 @@ fn get_rsbox() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 @pure
 fn get_rcon() -> ptr[i32] {
-    return array_const_i32(
+    return array_const_u8(
         0x8D, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36
     );
 }
@@ -135,20 +132,20 @@ fn key_expansion(key: ptr[i32], round_key: ptr[i32], sbox: ptr[i32], rcon: ptr[i
     // First round key is the key itself
     for i: i32 in range(0, NK()) {
         let base: i32 = i * 4;
-        ptr_write_i32(round_key, base, ptr_read_i32(key, base));
-        ptr_write_i32(round_key, base + 1, ptr_read_i32(key, base + 1));
-        ptr_write_i32(round_key, base + 2, ptr_read_i32(key, base + 2));
-        ptr_write_i32(round_key, base + 3, ptr_read_i32(key, base + 3));
+        ptr_write_u8(round_key, base, ptr_read_u8(key, base));
+        ptr_write_u8(round_key, base + 1, ptr_read_u8(key, base + 1));
+        ptr_write_u8(round_key, base + 2, ptr_read_u8(key, base + 2));
+        ptr_write_u8(round_key, base + 3, ptr_read_u8(key, base + 3));
     }
 
     // Generate remaining round keys
     let i: i32 = NK();
     while i < NB() * (NR() + 1) {
         let k: i32 = (i - 1) * 4;
-        let t0: i32 = ptr_read_i32(round_key, k);
-        let t1: i32 = ptr_read_i32(round_key, k + 1);
-        let t2: i32 = ptr_read_i32(round_key, k + 2);
-        let t3: i32 = ptr_read_i32(round_key, k + 3);
+        let t0: i32 = ptr_read_u8(round_key, k);
+        let t1: i32 = ptr_read_u8(round_key, k + 1);
+        let t2: i32 = ptr_read_u8(round_key, k + 2);
+        let t3: i32 = ptr_read_u8(round_key, k + 3);
 
         if i % NK() == 0 {
             // RotWord: rotate left by one byte
@@ -158,20 +155,20 @@ fn key_expansion(key: ptr[i32], round_key: ptr[i32], sbox: ptr[i32], rcon: ptr[i
             t2 = t3;
             t3 = tmp;
             // SubWord: apply S-box
-            t0 = ptr_read_i32(sbox, t0);
-            t1 = ptr_read_i32(sbox, t1);
-            t2 = ptr_read_i32(sbox, t2);
-            t3 = ptr_read_i32(sbox, t3);
+            t0 = ptr_read_u8(sbox, t0);
+            t1 = ptr_read_u8(sbox, t1);
+            t2 = ptr_read_u8(sbox, t2);
+            t3 = ptr_read_u8(sbox, t3);
             // XOR with Rcon
-            t0 = bxor(t0, ptr_read_i32(rcon, i / NK()));
+            t0 = bxor(t0, ptr_read_u8(rcon, i / NK()));
         }
 
         let prev: i32 = (i - NK()) * 4;
         let cur: i32 = i * 4;
-        ptr_write_i32(round_key, cur, bxor(ptr_read_i32(round_key, prev), t0));
-        ptr_write_i32(round_key, cur + 1, bxor(ptr_read_i32(round_key, prev + 1), t1));
-        ptr_write_i32(round_key, cur + 2, bxor(ptr_read_i32(round_key, prev + 2), t2));
-        ptr_write_i32(round_key, cur + 3, bxor(ptr_read_i32(round_key, prev + 3), t3));
+        ptr_write_u8(round_key, cur, bxor(ptr_read_u8(round_key, prev), t0));
+        ptr_write_u8(round_key, cur + 1, bxor(ptr_read_u8(round_key, prev + 1), t1));
+        ptr_write_u8(round_key, cur + 2, bxor(ptr_read_u8(round_key, prev + 2), t2));
+        ptr_write_u8(round_key, cur + 3, bxor(ptr_read_u8(round_key, prev + 3), t3));
 
         i = i + 1;
     }
@@ -188,9 +185,9 @@ fn add_round_key(round: i32, state: ptr[i32], round_key: ptr[i32]) {
         for row: i32 in range(0, 4) {
             let si: i32 = row * 4 + col;
             let ki: i32 = (round * NB() + col) * 4 + row;
-            let sv: i32 = ptr_read_i32(state, si);
-            let kv: i32 = ptr_read_i32(round_key, ki);
-            ptr_write_i32(state, si, bxor(sv, kv));
+            let sv: i32 = ptr_read_u8(state, si);
+            let kv: i32 = ptr_read_u8(round_key, ki);
+            ptr_write_u8(state, si, bxor(sv, kv));
         }
     }
 }
@@ -201,7 +198,7 @@ fn add_round_key(round: i32, state: ptr[i32], round_key: ptr[i32]) {
 @inline(always)
 fn sub_bytes(state: ptr[i32], sbox: ptr[i32]) {
     for i: i32 in range(0, 16) {
-        ptr_write_i32(state, i, ptr_read_i32(sbox, ptr_read_i32(state, i)));
+        ptr_write_u8(state, i, ptr_read_u8(sbox, ptr_read_u8(state, i)));
     }
 }
 
@@ -211,7 +208,7 @@ fn sub_bytes(state: ptr[i32], sbox: ptr[i32]) {
 @inline(always)
 fn inv_sub_bytes(state: ptr[i32], rsbox: ptr[i32]) {
     for i: i32 in range(0, 16) {
-        ptr_write_i32(state, i, ptr_read_i32(rsbox, ptr_read_i32(state, i)));
+        ptr_write_u8(state, i, ptr_read_u8(rsbox, ptr_read_u8(state, i)));
     }
 }
 
@@ -222,26 +219,26 @@ fn inv_sub_bytes(state: ptr[i32], rsbox: ptr[i32]) {
 fn shift_rows(state: ptr[i32]) {
     // Row 0: no shift
     // Row 1: shift left by 1
-    let t: i32 = ptr_read_i32(state, 1 * 4 + 0);
-    ptr_write_i32(state, 1 * 4 + 0, ptr_read_i32(state, 1 * 4 + 1));
-    ptr_write_i32(state, 1 * 4 + 1, ptr_read_i32(state, 1 * 4 + 2));
-    ptr_write_i32(state, 1 * 4 + 2, ptr_read_i32(state, 1 * 4 + 3));
-    ptr_write_i32(state, 1 * 4 + 3, t);
+    let t: i32 = ptr_read_u8(state, 1 * 4 + 0);
+    ptr_write_u8(state, 1 * 4 + 0, ptr_read_u8(state, 1 * 4 + 1));
+    ptr_write_u8(state, 1 * 4 + 1, ptr_read_u8(state, 1 * 4 + 2));
+    ptr_write_u8(state, 1 * 4 + 2, ptr_read_u8(state, 1 * 4 + 3));
+    ptr_write_u8(state, 1 * 4 + 3, t);
 
     // Row 2: shift left by 2
-    let t0: i32 = ptr_read_i32(state, 2 * 4 + 0);
-    let t1: i32 = ptr_read_i32(state, 2 * 4 + 1);
-    ptr_write_i32(state, 2 * 4 + 0, ptr_read_i32(state, 2 * 4 + 2));
-    ptr_write_i32(state, 2 * 4 + 1, ptr_read_i32(state, 2 * 4 + 3));
-    ptr_write_i32(state, 2 * 4 + 2, t0);
-    ptr_write_i32(state, 2 * 4 + 3, t1);
+    let t0: i32 = ptr_read_u8(state, 2 * 4 + 0);
+    let t1: i32 = ptr_read_u8(state, 2 * 4 + 1);
+    ptr_write_u8(state, 2 * 4 + 0, ptr_read_u8(state, 2 * 4 + 2));
+    ptr_write_u8(state, 2 * 4 + 1, ptr_read_u8(state, 2 * 4 + 3));
+    ptr_write_u8(state, 2 * 4 + 2, t0);
+    ptr_write_u8(state, 2 * 4 + 3, t1);
 
     // Row 3: shift left by 3 = shift right by 1
-    let t3: i32 = ptr_read_i32(state, 3 * 4 + 3);
-    ptr_write_i32(state, 3 * 4 + 3, ptr_read_i32(state, 3 * 4 + 2));
-    ptr_write_i32(state, 3 * 4 + 2, ptr_read_i32(state, 3 * 4 + 1));
-    ptr_write_i32(state, 3 * 4 + 1, ptr_read_i32(state, 3 * 4 + 0));
-    ptr_write_i32(state, 3 * 4 + 0, t3);
+    let t3: i32 = ptr_read_u8(state, 3 * 4 + 3);
+    ptr_write_u8(state, 3 * 4 + 3, ptr_read_u8(state, 3 * 4 + 2));
+    ptr_write_u8(state, 3 * 4 + 2, ptr_read_u8(state, 3 * 4 + 1));
+    ptr_write_u8(state, 3 * 4 + 1, ptr_read_u8(state, 3 * 4 + 0));
+    ptr_write_u8(state, 3 * 4 + 0, t3);
 }
 
 // ---------------------------------------------------------------------------
@@ -250,26 +247,26 @@ fn shift_rows(state: ptr[i32]) {
 @inline(always)
 fn inv_shift_rows(state: ptr[i32]) {
     // Row 1: shift right by 1
-    let t: i32 = ptr_read_i32(state, 1 * 4 + 3);
-    ptr_write_i32(state, 1 * 4 + 3, ptr_read_i32(state, 1 * 4 + 2));
-    ptr_write_i32(state, 1 * 4 + 2, ptr_read_i32(state, 1 * 4 + 1));
-    ptr_write_i32(state, 1 * 4 + 1, ptr_read_i32(state, 1 * 4 + 0));
-    ptr_write_i32(state, 1 * 4 + 0, t);
+    let t: i32 = ptr_read_u8(state, 1 * 4 + 3);
+    ptr_write_u8(state, 1 * 4 + 3, ptr_read_u8(state, 1 * 4 + 2));
+    ptr_write_u8(state, 1 * 4 + 2, ptr_read_u8(state, 1 * 4 + 1));
+    ptr_write_u8(state, 1 * 4 + 1, ptr_read_u8(state, 1 * 4 + 0));
+    ptr_write_u8(state, 1 * 4 + 0, t);
 
     // Row 2: shift right by 2
-    let t0: i32 = ptr_read_i32(state, 2 * 4 + 0);
-    let t1: i32 = ptr_read_i32(state, 2 * 4 + 1);
-    ptr_write_i32(state, 2 * 4 + 0, ptr_read_i32(state, 2 * 4 + 2));
-    ptr_write_i32(state, 2 * 4 + 1, ptr_read_i32(state, 2 * 4 + 3));
-    ptr_write_i32(state, 2 * 4 + 2, t0);
-    ptr_write_i32(state, 2 * 4 + 3, t1);
+    let t0: i32 = ptr_read_u8(state, 2 * 4 + 0);
+    let t1: i32 = ptr_read_u8(state, 2 * 4 + 1);
+    ptr_write_u8(state, 2 * 4 + 0, ptr_read_u8(state, 2 * 4 + 2));
+    ptr_write_u8(state, 2 * 4 + 1, ptr_read_u8(state, 2 * 4 + 3));
+    ptr_write_u8(state, 2 * 4 + 2, t0);
+    ptr_write_u8(state, 2 * 4 + 3, t1);
 
     // Row 3: shift right by 3 = shift left by 1
-    let t3: i32 = ptr_read_i32(state, 3 * 4 + 0);
-    ptr_write_i32(state, 3 * 4 + 0, ptr_read_i32(state, 3 * 4 + 1));
-    ptr_write_i32(state, 3 * 4 + 1, ptr_read_i32(state, 3 * 4 + 2));
-    ptr_write_i32(state, 3 * 4 + 2, ptr_read_i32(state, 3 * 4 + 3));
-    ptr_write_i32(state, 3 * 4 + 3, t3);
+    let t3: i32 = ptr_read_u8(state, 3 * 4 + 0);
+    ptr_write_u8(state, 3 * 4 + 0, ptr_read_u8(state, 3 * 4 + 1));
+    ptr_write_u8(state, 3 * 4 + 1, ptr_read_u8(state, 3 * 4 + 2));
+    ptr_write_u8(state, 3 * 4 + 2, ptr_read_u8(state, 3 * 4 + 3));
+    ptr_write_u8(state, 3 * 4 + 3, t3);
 }
 
 // ---------------------------------------------------------------------------
@@ -278,25 +275,25 @@ fn inv_shift_rows(state: ptr[i32]) {
 @inline(always)
 fn mix_columns(state: ptr[i32]) {
     for col: i32 in range(0, 4) {
-        let s0: i32 = ptr_read_i32(state, 0 * 4 + col);
-        let s1: i32 = ptr_read_i32(state, 1 * 4 + col);
-        let s2: i32 = ptr_read_i32(state, 2 * 4 + col);
-        let s3: i32 = ptr_read_i32(state, 3 * 4 + col);
+        let s0: i32 = ptr_read_u8(state, 0 * 4 + col);
+        let s1: i32 = ptr_read_u8(state, 1 * 4 + col);
+        let s2: i32 = ptr_read_u8(state, 2 * 4 + col);
+        let s3: i32 = ptr_read_u8(state, 3 * 4 + col);
 
         let t: i32 = bxor(bxor(s0, s1), bxor(s2, s3));
 
         let u0: i32 = s0;
         let x: i32 = xtime(bxor(s0, s1));
-        ptr_write_i32(state, 0 * 4 + col, bxor(bxor(s0, x), t));
+        ptr_write_u8(state, 0 * 4 + col, bxor(bxor(s0, x), t));
 
         x = xtime(bxor(s1, s2));
-        ptr_write_i32(state, 1 * 4 + col, bxor(bxor(s1, x), t));
+        ptr_write_u8(state, 1 * 4 + col, bxor(bxor(s1, x), t));
 
         x = xtime(bxor(s2, s3));
-        ptr_write_i32(state, 2 * 4 + col, bxor(bxor(s2, x), t));
+        ptr_write_u8(state, 2 * 4 + col, bxor(bxor(s2, x), t));
 
         x = xtime(bxor(s3, u0));
-        ptr_write_i32(state, 3 * 4 + col, bxor(bxor(s3, x), t));
+        ptr_write_u8(state, 3 * 4 + col, bxor(bxor(s3, x), t));
     }
 }
 
@@ -306,18 +303,18 @@ fn mix_columns(state: ptr[i32]) {
 @inline(always)
 fn inv_mix_columns(state: ptr[i32]) {
     for col: i32 in range(0, 4) {
-        let s0: i32 = ptr_read_i32(state, 0 * 4 + col);
-        let s1: i32 = ptr_read_i32(state, 1 * 4 + col);
-        let s2: i32 = ptr_read_i32(state, 2 * 4 + col);
-        let s3: i32 = ptr_read_i32(state, 3 * 4 + col);
+        let s0: i32 = ptr_read_u8(state, 0 * 4 + col);
+        let s1: i32 = ptr_read_u8(state, 1 * 4 + col);
+        let s2: i32 = ptr_read_u8(state, 2 * 4 + col);
+        let s3: i32 = ptr_read_u8(state, 3 * 4 + col);
 
-        ptr_write_i32(state, 0 * 4 + col,
+        ptr_write_u8(state, 0 * 4 + col,
             band(bxor(bxor(gmul(s0, 14), gmul(s1, 11)), bxor(gmul(s2, 13), gmul(s3, 9))), 0xFF));
-        ptr_write_i32(state, 1 * 4 + col,
+        ptr_write_u8(state, 1 * 4 + col,
             band(bxor(bxor(gmul(s0, 9), gmul(s1, 14)), bxor(gmul(s2, 11), gmul(s3, 13))), 0xFF));
-        ptr_write_i32(state, 2 * 4 + col,
+        ptr_write_u8(state, 2 * 4 + col,
             band(bxor(bxor(gmul(s0, 13), gmul(s1, 9)), bxor(gmul(s2, 14), gmul(s3, 11))), 0xFF));
-        ptr_write_i32(state, 3 * 4 + col,
+        ptr_write_u8(state, 3 * 4 + col,
             band(bxor(bxor(gmul(s0, 11), gmul(s1, 13)), bxor(gmul(s2, 9), gmul(s3, 14))), 0xFF));
     }
 }
@@ -326,6 +323,7 @@ fn inv_mix_columns(state: ptr[i32]) {
 // AES-128 Encrypt one block (16 bytes) in-place
 // State layout: state[row * 4 + col], input is column-major from plaintext
 // ---------------------------------------------------------------------------
+@inline(always)
 fn aes_encrypt_block(state: ptr[i32], round_key: ptr[i32], sbox: ptr[i32]) {
     // Initial round key addition
     add_round_key(0, state, round_key);
@@ -347,6 +345,7 @@ fn aes_encrypt_block(state: ptr[i32], round_key: ptr[i32], sbox: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // AES-128 Decrypt one block (16 bytes) in-place
 // ---------------------------------------------------------------------------
+@inline(always)
 fn aes_decrypt_block(state: ptr[i32], round_key: ptr[i32], rsbox: ptr[i32]) {
     // Initial round key addition (last round key)
     add_round_key(NR(), state, round_key);
@@ -371,10 +370,11 @@ fn aes_decrypt_block(state: ptr[i32], round_key: ptr[i32], rsbox: ptr[i32]) {
 // Load 16 bytes from plaintext into AES state (column-major)
 // plaintext[col*4 + row] -> state[row * 4 + col]
 // ---------------------------------------------------------------------------
+@inline(always)
 fn load_state(state: ptr[i32], input: ptr[i32]) {
     for col: i32 in range(0, 4) {
         for row: i32 in range(0, 4) {
-            ptr_write_i32(state, row * 4 + col, ptr_read_i32(input, col * 4 + row));
+            ptr_write_u8(state, row * 4 + col, ptr_read_u8(input, col * 4 + row));
         }
     }
 }
@@ -383,10 +383,11 @@ fn load_state(state: ptr[i32], input: ptr[i32]) {
 // Store AES state back to output (column-major)
 // state[row * 4 + col] -> output[col*4 + row]
 // ---------------------------------------------------------------------------
+@inline(always)
 fn store_state(output: ptr[i32], state: ptr[i32]) {
     for col: i32 in range(0, 4) {
         for row: i32 in range(0, 4) {
-            ptr_write_i32(output, col * 4 + row, ptr_read_i32(state, row * 4 + col));
+            ptr_write_u8(output, col * 4 + row, ptr_read_u8(state, row * 4 + col));
         }
     }
 }
@@ -405,7 +406,7 @@ fn print_hex_byte(val: i32) {
 fn print_block(label: ptr[i32], data: ptr[i32]) {
     // GAP: Cannot pass string to generic print. Using print() for label.
     for i: i32 in range(0, 16) {
-        print_i32(ptr_read_i32(data, i));
+        print_i32(ptr_read_u8(data, i));
         print(" ");
     }
     print("\n");
@@ -417,7 +418,7 @@ fn print_block(label: ptr[i32], data: ptr[i32]) {
 @pure
 fn blocks_equal(a: ptr[i32], b: ptr[i32]) -> i32 {
     for i: i32 in range(0, 16) {
-        if ptr_read_i32(a, i) != ptr_read_i32(b, i) {
+        if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
             return 0;
         }
     }
@@ -435,33 +436,33 @@ fn main() -> i32 {
     let rsbox: ptr[i32] = get_rsbox();
     let rcon: ptr[i32] = get_rcon();
 
-    // Allocate working buffers
-    let key: ptr[i32] = heap_alloc(16, 4);
-    let round_key: ptr[i32] = heap_alloc(176, 4);
-    let state: ptr[i32] = heap_alloc(16, 4);
-    let plaintext: ptr[i32] = heap_alloc(16, 4);
-    let ciphertext: ptr[i32] = heap_alloc(16, 4);
-    let decrypted: ptr[i32] = heap_alloc(16, 4);
-    let expected_cipher: ptr[i32] = heap_alloc(16, 4);
+    // Allocate working buffers (u8 storage: 1 byte per element)
+    let key: ptr[i32] = heap_alloc(16, 1);
+    let round_key: ptr[i32] = heap_alloc(176, 1);
+    let state: ptr[i32] = heap_alloc(16, 1);
+    let plaintext: ptr[i32] = heap_alloc(16, 1);
+    let ciphertext: ptr[i32] = heap_alloc(16, 1);
+    let decrypted: ptr[i32] = heap_alloc(16, 1);
+    let expected_cipher: ptr[i32] = heap_alloc(16, 1);
 
     // --- NIST Test Vector ---
     // Key: 2b7e151628aed2a6abf7158809cf4f3c
-    ptr_write_i32(key, 0, 0x2B); ptr_write_i32(key, 1, 0x7E); ptr_write_i32(key, 2, 0x15); ptr_write_i32(key, 3, 0x16);
-    ptr_write_i32(key, 4, 0x28); ptr_write_i32(key, 5, 0xAE); ptr_write_i32(key, 6, 0xD2); ptr_write_i32(key, 7, 0xA6);
-    ptr_write_i32(key, 8, 0xAB); ptr_write_i32(key, 9, 0xF7); ptr_write_i32(key, 10, 0x15); ptr_write_i32(key, 11, 0x88);
-    ptr_write_i32(key, 12, 0x09); ptr_write_i32(key, 13, 0xCF); ptr_write_i32(key, 14, 0x4F); ptr_write_i32(key, 15, 0x3C);
+    ptr_write_u8(key, 0, 0x2B); ptr_write_u8(key, 1, 0x7E); ptr_write_u8(key, 2, 0x15); ptr_write_u8(key, 3, 0x16);
+    ptr_write_u8(key, 4, 0x28); ptr_write_u8(key, 5, 0xAE); ptr_write_u8(key, 6, 0xD2); ptr_write_u8(key, 7, 0xA6);
+    ptr_write_u8(key, 8, 0xAB); ptr_write_u8(key, 9, 0xF7); ptr_write_u8(key, 10, 0x15); ptr_write_u8(key, 11, 0x88);
+    ptr_write_u8(key, 12, 0x09); ptr_write_u8(key, 13, 0xCF); ptr_write_u8(key, 14, 0x4F); ptr_write_u8(key, 15, 0x3C);
 
     // Plaintext: 6bc1bee22e409f96e93d7e117393172a
-    ptr_write_i32(plaintext, 0, 0x6B); ptr_write_i32(plaintext, 1, 0xC1); ptr_write_i32(plaintext, 2, 0xBE); ptr_write_i32(plaintext, 3, 0xE2);
-    ptr_write_i32(plaintext, 4, 0x2E); ptr_write_i32(plaintext, 5, 0x40); ptr_write_i32(plaintext, 6, 0x9F); ptr_write_i32(plaintext, 7, 0x96);
-    ptr_write_i32(plaintext, 8, 0xE9); ptr_write_i32(plaintext, 9, 0x3D); ptr_write_i32(plaintext, 10, 0x7E); ptr_write_i32(plaintext, 11, 0x11);
-    ptr_write_i32(plaintext, 12, 0x73); ptr_write_i32(plaintext, 13, 0x93); ptr_write_i32(plaintext, 14, 0x17); ptr_write_i32(plaintext, 15, 0x2A);
+    ptr_write_u8(plaintext, 0, 0x6B); ptr_write_u8(plaintext, 1, 0xC1); ptr_write_u8(plaintext, 2, 0xBE); ptr_write_u8(plaintext, 3, 0xE2);
+    ptr_write_u8(plaintext, 4, 0x2E); ptr_write_u8(plaintext, 5, 0x40); ptr_write_u8(plaintext, 6, 0x9F); ptr_write_u8(plaintext, 7, 0x96);
+    ptr_write_u8(plaintext, 8, 0xE9); ptr_write_u8(plaintext, 9, 0x3D); ptr_write_u8(plaintext, 10, 0x7E); ptr_write_u8(plaintext, 11, 0x11);
+    ptr_write_u8(plaintext, 12, 0x73); ptr_write_u8(plaintext, 13, 0x93); ptr_write_u8(plaintext, 14, 0x17); ptr_write_u8(plaintext, 15, 0x2A);
 
     // Expected ciphertext: 3ad77bb40d7a3660a89ecaf32466ef97
-    ptr_write_i32(expected_cipher, 0, 0x3A); ptr_write_i32(expected_cipher, 1, 0xD7); ptr_write_i32(expected_cipher, 2, 0x7B); ptr_write_i32(expected_cipher, 3, 0xB4);
-    ptr_write_i32(expected_cipher, 4, 0x0D); ptr_write_i32(expected_cipher, 5, 0x7A); ptr_write_i32(expected_cipher, 6, 0x36); ptr_write_i32(expected_cipher, 7, 0x60);
-    ptr_write_i32(expected_cipher, 8, 0xA8); ptr_write_i32(expected_cipher, 9, 0x9E); ptr_write_i32(expected_cipher, 10, 0xCA); ptr_write_i32(expected_cipher, 11, 0xF3);
-    ptr_write_i32(expected_cipher, 12, 0x24); ptr_write_i32(expected_cipher, 13, 0x66); ptr_write_i32(expected_cipher, 14, 0xEF); ptr_write_i32(expected_cipher, 15, 0x97);
+    ptr_write_u8(expected_cipher, 0, 0x3A); ptr_write_u8(expected_cipher, 1, 0xD7); ptr_write_u8(expected_cipher, 2, 0x7B); ptr_write_u8(expected_cipher, 3, 0xB4);
+    ptr_write_u8(expected_cipher, 4, 0x0D); ptr_write_u8(expected_cipher, 5, 0x7A); ptr_write_u8(expected_cipher, 6, 0x36); ptr_write_u8(expected_cipher, 7, 0x60);
+    ptr_write_u8(expected_cipher, 8, 0xA8); ptr_write_u8(expected_cipher, 9, 0x9E); ptr_write_u8(expected_cipher, 10, 0xCA); ptr_write_u8(expected_cipher, 11, 0xF3);
+    ptr_write_u8(expected_cipher, 12, 0x24); ptr_write_u8(expected_cipher, 13, 0x66); ptr_write_u8(expected_cipher, 14, 0xEF); ptr_write_u8(expected_cipher, 15, 0x97);
 
     // Expand key
     key_expansion(key, round_key, sbox, rcon);
@@ -521,8 +522,8 @@ fn main() -> i32 {
         store_state(decrypted, state);
 
         // Accumulate checksum to prevent DCE
-        checksum = checksum +% ptr_read_i32(ciphertext, 0);
-        checksum = checksum +% ptr_read_i32(decrypted, 0);
+        checksum = checksum +% ptr_read_u8(ciphertext, 0);
+        checksum = checksum +% ptr_read_u8(decrypted, 0);
     }
 
     let t1: i64 = clock_ns();

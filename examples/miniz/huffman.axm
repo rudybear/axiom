@@ -1,0 +1,848 @@
+@module huffman;
+@intent("Huffman compression/decompression -- core building block of deflate/inflate, with verification and benchmark");
+
+// =============================================================================
+// Huffman Codec -- Core deflate/inflate building block
+// =============================================================================
+//
+// Algorithm:
+//   Encode:
+//     1. Count byte frequencies (256-entry histogram)
+//     2. Build Huffman tree via sorted node merging (priority queue)
+//     3. Generate code table: symbol -> (bit pattern, bit length)
+//     4. Write header: symbol count + (symbol, bit_length) pairs + canonical codes
+//     5. Encode each input byte as its variable-length Huffman code
+//
+//   Decode:
+//     1. Read header, reconstruct canonical Huffman codes
+//     2. Build lookup table for fast decoding
+//     3. Read bits, look up symbol, output byte
+//
+// Uses canonical Huffman codes for compact header representation.
+// Only the bit lengths per symbol need to be stored; codes are derived
+// deterministically from lengths sorted by (length, symbol).
+//
+// GAP: AXIOM has no u8/u16 types for direct use. We use i32 with masking.
+// GAP: No struct type at codegen level. We use ptr[i32] with named offsets.
+// GAP: No dynamic arrays. We use heap-allocated buffers with manual sizing.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+@const fn NUM_SYMBOLS() -> i32 { return 256; }
+@const fn MAX_CODE_LEN() -> i32 { return 15; }
+// Max tree nodes: 256 leaves + 255 internal = 511
+@const fn MAX_NODES() -> i32 { return 511; }
+
+// ---------------------------------------------------------------------------
+// Node layout in flat array (each node = 4 i32 slots)
+// ---------------------------------------------------------------------------
+// node[i*4 + 0] = frequency (or combined frequency for internal nodes)
+// node[i*4 + 1] = symbol (-1 for internal nodes, 0-255 for leaves)
+// node[i*4 + 2] = left child index (-1 for leaves)
+// node[i*4 + 3] = right child index (-1 for leaves)
+
+@const fn NODE_SIZE() -> i32 { return 4; }
+@const fn NODE_FREQ() -> i32 { return 0; }
+@const fn NODE_SYM() -> i32 { return 1; }
+@const fn NODE_LEFT() -> i32 { return 2; }
+@const fn NODE_RIGHT() -> i32 { return 3; }
+
+// ---------------------------------------------------------------------------
+// Bit writer state layout (3 i32 slots via ptr[i32])
+// ---------------------------------------------------------------------------
+// [0] = byte_pos  (current write position in output buffer)
+// [1] = bit_pos   (bits used in current byte, 0-7)
+// [2] = cur_byte  (byte being accumulated)
+
+@const fn BW_BYTE_POS() -> i32 { return 0; }
+@const fn BW_BIT_POS() -> i32 { return 1; }
+@const fn BW_CUR_BYTE() -> i32 { return 2; }
+
+// ---------------------------------------------------------------------------
+// Bit writer: write `count` bits from `value` (MSB first)
+// ---------------------------------------------------------------------------
+
+fn bw_init(state: ptr[i32]) {
+    ptr_write_i32(state, BW_BYTE_POS(), 0);
+    ptr_write_i32(state, BW_BIT_POS(), 0);
+    ptr_write_i32(state, BW_CUR_BYTE(), 0);
+}
+
+fn bw_write_bits(outbuf: ptr[i32], state: ptr[i32], value: i32, count: i32) {
+    let byte_pos: i32 = ptr_read_i32(state, BW_BYTE_POS());
+    let bit_pos: i32 = ptr_read_i32(state, BW_BIT_POS());
+    let cur_byte: i32 = ptr_read_i32(state, BW_CUR_BYTE());
+
+    let i: i32 = 0;
+    while i < count {
+        // Extract bit (MSB first): bit at position (count - 1 - i)
+        let bit: i32 = band(lshr(value, count - 1 - i), 1);
+        cur_byte = bor(cur_byte, shl(bit, 7 - bit_pos));
+        bit_pos = bit_pos + 1;
+
+        if bit_pos == 8 {
+            ptr_write_u8(outbuf, byte_pos, cur_byte);
+            byte_pos = byte_pos + 1;
+            bit_pos = 0;
+            cur_byte = 0;
+        }
+        i = i + 1;
+    }
+
+    ptr_write_i32(state, BW_BYTE_POS(), byte_pos);
+    ptr_write_i32(state, BW_BIT_POS(), bit_pos);
+    ptr_write_i32(state, BW_CUR_BYTE(), cur_byte);
+}
+
+// Flush any remaining partial byte
+fn bw_flush(outbuf: ptr[i32], state: ptr[i32]) {
+    let bit_pos: i32 = ptr_read_i32(state, BW_BIT_POS());
+    if bit_pos > 0 {
+        let byte_pos: i32 = ptr_read_i32(state, BW_BYTE_POS());
+        let cur_byte: i32 = ptr_read_i32(state, BW_CUR_BYTE());
+        ptr_write_u8(outbuf, byte_pos, cur_byte);
+        ptr_write_i32(state, BW_BYTE_POS(), byte_pos + 1);
+        ptr_write_i32(state, BW_BIT_POS(), 0);
+        ptr_write_i32(state, BW_CUR_BYTE(), 0);
+    }
+}
+
+fn bw_get_pos(state: ptr[i32]) -> i32 {
+    return ptr_read_i32(state, BW_BYTE_POS());
+}
+
+// ---------------------------------------------------------------------------
+// Bit reader state layout (3 i32 slots via ptr[i32])
+// ---------------------------------------------------------------------------
+// [0] = byte_pos
+// [1] = bit_pos (bits consumed in current byte, 0-7)
+// [2] = cur_byte
+
+@const fn BR_BYTE_POS() -> i32 { return 0; }
+@const fn BR_BIT_POS() -> i32 { return 1; }
+@const fn BR_CUR_BYTE() -> i32 { return 2; }
+
+fn br_init(state: ptr[i32], inbuf: ptr[i32]) {
+    ptr_write_i32(state, BR_BYTE_POS(), 0);
+    ptr_write_i32(state, BR_BIT_POS(), 0);
+    ptr_write_i32(state, BR_CUR_BYTE(), ptr_read_u8(inbuf, 0));
+}
+
+@inline(always)
+fn br_read_bit(inbuf: ptr[i32], state: ptr[i32]) -> i32 {
+    let bit_pos: i32 = ptr_read_i32(state, BR_BIT_POS());
+    let cur_byte: i32 = ptr_read_i32(state, BR_CUR_BYTE());
+
+    // Extract bit (MSB first)
+    let bit: i32 = band(lshr(cur_byte, 7 - bit_pos), 1);
+    bit_pos = bit_pos + 1;
+
+    if bit_pos == 8 {
+        let byte_pos: i32 = ptr_read_i32(state, BR_BYTE_POS()) + 1;
+        ptr_write_i32(state, BR_BYTE_POS(), byte_pos);
+        ptr_write_i32(state, BR_CUR_BYTE(), ptr_read_u8(inbuf, byte_pos));
+        bit_pos = 0;
+    }
+
+    ptr_write_i32(state, BR_BIT_POS(), bit_pos);
+    return bit;
+}
+
+fn br_read_bits(inbuf: ptr[i32], state: ptr[i32], count: i32) -> i32 {
+    let result: i32 = 0;
+    let i: i32 = 0;
+    while i < count {
+        result = bor(shl(result, 1), br_read_bit(inbuf, state));
+        i = i + 1;
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Count byte frequencies
+// ---------------------------------------------------------------------------
+
+fn count_frequencies(input: ptr[i32], in_len: i32, freq: ptr[i32]) {
+    // Zero out frequency table
+    for i: i32 in range(0, NUM_SYMBOLS()) {
+        ptr_write_i32(freq, i, 0);
+    }
+    // Count
+    for i: i32 in range(0, in_len) {
+        let sym: i32 = ptr_read_u8(input, i);
+        ptr_write_i32(freq, sym, ptr_read_i32(freq, sym) + 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Find minimum-frequency node in pool (that hasn't been used)
+// used[i] = 1 means node i has been consumed
+// ---------------------------------------------------------------------------
+
+@inline(always)
+fn find_min_node(nodes: ptr[i32], used: ptr[i32], node_count: i32) -> i32 {
+    let min_idx: i32 = 0 - 1;
+    let min_freq: i32 = 2147483647; // i32 max
+    let i: i32 = 0;
+    while i < node_count {
+        if ptr_read_i32(used, i) == 0 {
+            let f: i32 = ptr_read_i32(nodes, i * NODE_SIZE() + NODE_FREQ());
+            if f < min_freq {
+                min_freq = f;
+                min_idx = i;
+            }
+        }
+        i = i + 1;
+    }
+    return min_idx;
+}
+
+// ---------------------------------------------------------------------------
+// Build Huffman tree from frequency table
+// Returns root node index and total node count via out params
+// ---------------------------------------------------------------------------
+
+fn build_tree(freq: ptr[i32], nodes: ptr[i32], out_root: ptr[i32], out_count: ptr[i32]) {
+    // Create leaf nodes for all symbols with freq > 0
+    let node_count: i32 = 0;
+
+    for sym: i32 in range(0, NUM_SYMBOLS()) {
+        let f: i32 = ptr_read_i32(freq, sym);
+        if f > 0 {
+            let base: i32 = node_count * NODE_SIZE();
+            ptr_write_i32(nodes, base + NODE_FREQ(), f);
+            ptr_write_i32(nodes, base + NODE_SYM(), sym);
+            ptr_write_i32(nodes, base + NODE_LEFT(), 0 - 1);
+            ptr_write_i32(nodes, base + NODE_RIGHT(), 0 - 1);
+            node_count = node_count + 1;
+        }
+    }
+
+    // Handle edge case: only 1 unique symbol
+    if node_count == 1 {
+        ptr_write_i32(out_root, 0, 0);
+        ptr_write_i32(out_count, 0, 1);
+        return;
+    }
+
+    // Allocate "used" flags
+    let used: ptr[i32] = heap_alloc(MAX_NODES(), 4);
+    for i: i32 in range(0, MAX_NODES()) {
+        ptr_write_i32(used, i, 0);
+    }
+
+    // Repeatedly merge two lowest-frequency nodes
+    let remaining: i32 = node_count;
+
+    while remaining > 1 {
+        // Find first minimum
+        let a: i32 = find_min_node(nodes, used, node_count);
+        ptr_write_i32(used, a, 1);
+
+        // Find second minimum
+        let b: i32 = find_min_node(nodes, used, node_count);
+        ptr_write_i32(used, b, 1);
+
+        // Create internal node
+        let fa: i32 = ptr_read_i32(nodes, a * NODE_SIZE() + NODE_FREQ());
+        let fb: i32 = ptr_read_i32(nodes, b * NODE_SIZE() + NODE_FREQ());
+        let base: i32 = node_count * NODE_SIZE();
+        ptr_write_i32(nodes, base + NODE_FREQ(), fa + fb);
+        ptr_write_i32(nodes, base + NODE_SYM(), 0 - 1);
+        ptr_write_i32(nodes, base + NODE_LEFT(), a);
+        ptr_write_i32(nodes, base + NODE_RIGHT(), b);
+        node_count = node_count + 1;
+        remaining = remaining - 1;
+    }
+
+    heap_free(used);
+
+    // Root is the last node created
+    ptr_write_i32(out_root, 0, node_count - 1);
+    ptr_write_i32(out_count, 0, node_count);
+}
+
+// ---------------------------------------------------------------------------
+// Generate code lengths by traversing the tree
+// code_lens[sym] = bit length of code for symbol sym
+// ---------------------------------------------------------------------------
+
+fn generate_lengths_recurse(nodes: ptr[i32], node_idx: i32, depth: i32, code_lens: ptr[i32]) {
+    let base: i32 = node_idx * NODE_SIZE();
+    let left: i32 = ptr_read_i32(nodes, base + NODE_LEFT());
+    let right: i32 = ptr_read_i32(nodes, base + NODE_RIGHT());
+
+    if left == 0 - 1 and right == 0 - 1 {
+        // Leaf node
+        let sym: i32 = ptr_read_i32(nodes, base + NODE_SYM());
+        let len: i32 = depth;
+        // Clamp to MAX_CODE_LEN (shouldn't happen with reasonable data)
+        if len > MAX_CODE_LEN() {
+            len = MAX_CODE_LEN();
+        }
+        // For single-symbol case, ensure at least length 1
+        if len == 0 {
+            len = 1;
+        }
+        ptr_write_i32(code_lens, sym, len);
+        return;
+    }
+
+    if left >= 0 {
+        generate_lengths_recurse(nodes, left, depth + 1, code_lens);
+    }
+    if right >= 0 {
+        generate_lengths_recurse(nodes, right, depth + 1, code_lens);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Build canonical Huffman codes from bit lengths
+//
+// Canonical construction:
+//   1. Sort symbols by (code_length, symbol_value)
+//   2. First code = 0, length = min_length
+//   3. For each subsequent symbol:
+//      code = (prev_code + 1) << (cur_len - prev_len)
+// ---------------------------------------------------------------------------
+
+fn build_canonical_codes(code_lens: ptr[i32], codes: ptr[i32]) {
+    // Count symbols per bit length
+    let bl_count: ptr[i32] = heap_alloc(MAX_CODE_LEN() + 1, 4);
+    for i: i32 in range(0, MAX_CODE_LEN() + 1) {
+        ptr_write_i32(bl_count, i, 0);
+    }
+
+    let num_active: i32 = 0;
+    for sym: i32 in range(0, NUM_SYMBOLS()) {
+        let len: i32 = ptr_read_i32(code_lens, sym);
+        if len > 0 {
+            ptr_write_i32(bl_count, len, ptr_read_i32(bl_count, len) + 1);
+            num_active = num_active + 1;
+        }
+    }
+
+    // Compute first code for each bit length
+    let next_code: ptr[i32] = heap_alloc(MAX_CODE_LEN() + 1, 4);
+    ptr_write_i32(next_code, 0, 0);
+    let code: i32 = 0;
+    for bits: i32 in range(1, MAX_CODE_LEN() + 1) {
+        code = shl(code + ptr_read_i32(bl_count, bits - 1), 1);
+        ptr_write_i32(next_code, bits, code);
+    }
+
+    // Assign codes to symbols
+    for sym: i32 in range(0, NUM_SYMBOLS()) {
+        let len: i32 = ptr_read_i32(code_lens, sym);
+        if len > 0 {
+            let c: i32 = ptr_read_i32(next_code, len);
+            ptr_write_i32(codes, sym, c);
+            ptr_write_i32(next_code, len, c + 1);
+        } else {
+            ptr_write_i32(codes, sym, 0);
+        }
+    }
+
+    heap_free(bl_count);
+    heap_free(next_code);
+}
+
+// ---------------------------------------------------------------------------
+// Huffman Encode
+// ---------------------------------------------------------------------------
+// Output format:
+//   Header:
+//     [0..1]  = original data length (16-bit LE)
+//     [2]     = number of unique symbols (1 byte)
+//     For each unique symbol:
+//       [byte] = symbol value
+//       [byte] = code bit length
+//   Body:
+//     Huffman-coded bits (MSB first, padded to byte boundary)
+//
+// Returns compressed size in bytes, or 0 on failure.
+
+fn huffman_encode(input: ptr[i32], in_len: i32, output: ptr[i32], out_max: i32) -> i32 {
+    if in_len < 1 or in_len > 65535 {
+        return 0;
+    }
+
+    // Step 1: Count frequencies
+    let freq: ptr[i32] = heap_alloc(NUM_SYMBOLS(), 4);
+    count_frequencies(input, in_len, freq);
+
+    // Step 2: Build Huffman tree
+    let nodes: ptr[i32] = heap_alloc(MAX_NODES() * NODE_SIZE(), 4);
+    let root_holder: ptr[i32] = heap_alloc(1, 4);
+    let count_holder: ptr[i32] = heap_alloc(1, 4);
+    build_tree(freq, nodes, root_holder, count_holder);
+    let root: i32 = ptr_read_i32(root_holder, 0);
+
+    // Step 3: Generate code lengths
+    let code_lens: ptr[i32] = heap_alloc(NUM_SYMBOLS(), 4);
+    for i: i32 in range(0, NUM_SYMBOLS()) {
+        ptr_write_i32(code_lens, i, 0);
+    }
+    generate_lengths_recurse(nodes, root, 0, code_lens);
+
+    // Step 4: Build canonical codes
+    let codes: ptr[i32] = heap_alloc(NUM_SYMBOLS(), 4);
+    build_canonical_codes(code_lens, codes);
+
+    // Step 5: Write header
+    let pos: i32 = 0;
+
+    // Original length (16-bit LE)
+    ptr_write_u8(output, pos, band(in_len, 255));
+    pos = pos + 1;
+    ptr_write_u8(output, pos, band(lshr(in_len, 8), 255));
+    pos = pos + 1;
+
+    // Count unique symbols
+    let num_unique: i32 = 0;
+    for sym: i32 in range(0, NUM_SYMBOLS()) {
+        if ptr_read_i32(code_lens, sym) > 0 {
+            num_unique = num_unique + 1;
+        }
+    }
+
+    // Write number of unique symbols (2 bytes for up to 256)
+    ptr_write_u8(output, pos, band(num_unique, 255));
+    pos = pos + 1;
+    ptr_write_u8(output, pos, band(lshr(num_unique, 8), 255));
+    pos = pos + 1;
+
+    // Write (symbol, bit_length) pairs
+    for sym: i32 in range(0, NUM_SYMBOLS()) {
+        let len: i32 = ptr_read_i32(code_lens, sym);
+        if len > 0 {
+            ptr_write_u8(output, pos, sym);
+            pos = pos + 1;
+            ptr_write_u8(output, pos, len);
+            pos = pos + 1;
+        }
+    }
+
+    // Step 6: Encode data as Huffman bits
+    let bw_state: ptr[i32] = heap_alloc(3, 4);
+    bw_init(bw_state);
+    // Set the bit writer to start at current header end position
+    ptr_write_i32(bw_state, BW_BYTE_POS(), pos);
+
+    for i: i32 in range(0, in_len) {
+        let sym: i32 = ptr_read_u8(input, i);
+        let c: i32 = ptr_read_i32(codes, sym);
+        let cl: i32 = ptr_read_i32(code_lens, sym);
+        bw_write_bits(output, bw_state, c, cl);
+    }
+
+    bw_flush(output, bw_state);
+    let total_size: i32 = bw_get_pos(bw_state);
+
+    // Cleanup
+    heap_free(freq);
+    heap_free(nodes);
+    heap_free(root_holder);
+    heap_free(count_holder);
+    heap_free(code_lens);
+    heap_free(codes);
+    heap_free(bw_state);
+
+    return total_size;
+}
+
+// ---------------------------------------------------------------------------
+// Huffman Decode
+// ---------------------------------------------------------------------------
+// Reads the header, reconstructs canonical codes, decodes the bitstream.
+// Returns number of bytes decoded, or 0 on failure.
+
+fn huffman_decode(input: ptr[i32], in_len: i32, output: ptr[i32], out_max: i32) -> i32 {
+    if in_len < 4 {
+        return 0;
+    }
+
+    // Read original length (16-bit LE)
+    let orig_len: i32 = bor(ptr_read_u8(input, 0), shl(ptr_read_u8(input, 1), 8));
+    if orig_len > out_max {
+        return 0;
+    }
+
+    // Read number of unique symbols (2 bytes)
+    let num_unique: i32 = bor(ptr_read_u8(input, 2), shl(ptr_read_u8(input, 3), 8));
+    if num_unique < 1 or num_unique > NUM_SYMBOLS() {
+        return 0;
+    }
+
+    let pos: i32 = 4;
+
+    // Read (symbol, bit_length) pairs
+    let code_lens: ptr[i32] = heap_alloc(NUM_SYMBOLS(), 4);
+    for i: i32 in range(0, NUM_SYMBOLS()) {
+        ptr_write_i32(code_lens, i, 0);
+    }
+
+    for i: i32 in range(0, num_unique) {
+        let sym: i32 = ptr_read_u8(input, pos);
+        pos = pos + 1;
+        let len: i32 = ptr_read_u8(input, pos);
+        pos = pos + 1;
+        ptr_write_i32(code_lens, sym, len);
+    }
+
+    // Rebuild canonical codes
+    let codes: ptr[i32] = heap_alloc(NUM_SYMBOLS(), 4);
+    build_canonical_codes(code_lens, codes);
+
+    // Build decode table: for each (code, length) -> symbol
+    // We use a simple approach: create sorted arrays of (length, code, symbol)
+    // and do a linear scan per symbol. For performance, we build a lookup table
+    // indexed by code prefix.
+    //
+    // Fast approach: table indexed by MAX_CODE_LEN bits
+    // table_size = 2^MAX_CODE_LEN = 32768
+    // Each entry: symbol (or -1 if invalid)
+    // For a code of length L, fill all entries where the top L bits match.
+
+    let table_bits: i32 = MAX_CODE_LEN();
+    let table_size: i32 = shl(1, table_bits); // 32768
+    let decode_sym: ptr[i32] = heap_alloc(table_size, 4);
+    let decode_len: ptr[i32] = heap_alloc(table_size, 4);
+
+    // Initialize to invalid
+    for i: i32 in range(0, table_size) {
+        ptr_write_i32(decode_sym, i, 0 - 1);
+        ptr_write_i32(decode_len, i, 0);
+    }
+
+    // Fill lookup table
+    for sym: i32 in range(0, NUM_SYMBOLS()) {
+        let cl: i32 = ptr_read_i32(code_lens, sym);
+        if cl > 0 {
+            let c: i32 = ptr_read_i32(codes, sym);
+            // Left-align code to table_bits
+            let prefix: i32 = shl(c, table_bits - cl);
+            let fill_count: i32 = shl(1, table_bits - cl);
+            let j: i32 = 0;
+            while j < fill_count {
+                ptr_write_i32(decode_sym, prefix + j, sym);
+                ptr_write_i32(decode_len, prefix + j, cl);
+                j = j + 1;
+            }
+        }
+    }
+
+    // Decode bitstream
+    let br_state: ptr[i32] = heap_alloc(3, 4);
+    br_init(br_state, input);
+    // Advance bit reader past header
+    // We need to skip `pos` bytes
+    ptr_write_i32(br_state, BR_BYTE_POS(), pos);
+    ptr_write_i32(br_state, BR_BIT_POS(), 0);
+    ptr_write_i32(br_state, BR_CUR_BYTE(), ptr_read_u8(input, pos));
+
+    let out_pos: i32 = 0;
+    while out_pos < orig_len {
+        // Peek MAX_CODE_LEN bits
+        let peek_val: i32 = 0;
+        // Save bit reader state so we can consume only what we need
+        let saved_byte_pos: i32 = ptr_read_i32(br_state, BR_BYTE_POS());
+        let saved_bit_pos: i32 = ptr_read_i32(br_state, BR_BIT_POS());
+        let saved_cur_byte: i32 = ptr_read_i32(br_state, BR_CUR_BYTE());
+
+        peek_val = br_read_bits(input, br_state, table_bits);
+
+        let sym: i32 = ptr_read_i32(decode_sym, peek_val);
+        let cl: i32 = ptr_read_i32(decode_len, peek_val);
+
+        if sym < 0 or cl == 0 {
+            // Invalid code -- data corruption
+            heap_free(code_lens);
+            heap_free(codes);
+            heap_free(decode_sym);
+            heap_free(decode_len);
+            heap_free(br_state);
+            return 0;
+        }
+
+        // Restore bit reader and advance by actual code length
+        ptr_write_i32(br_state, BR_BYTE_POS(), saved_byte_pos);
+        ptr_write_i32(br_state, BR_BIT_POS(), saved_bit_pos);
+        ptr_write_i32(br_state, BR_CUR_BYTE(), saved_cur_byte);
+        // Now consume exactly cl bits (discard the result, we already have sym)
+        let dummy: i32 = br_read_bits(input, br_state, cl);
+
+        ptr_write_u8(output, out_pos, sym);
+        out_pos = out_pos + 1;
+    }
+
+    // Cleanup
+    heap_free(code_lens);
+    heap_free(codes);
+    heap_free(decode_sym);
+    heap_free(decode_len);
+    heap_free(br_state);
+
+    return out_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Verify: compare two byte buffers
+// ---------------------------------------------------------------------------
+
+@pure
+fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
+    for i: i32 in range(0, len) {
+        if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Test data generators
+// ---------------------------------------------------------------------------
+
+// Fill with English-like text (highly compressible by Huffman)
+fn fill_text_like(buf: ptr[i32], len: i32) {
+    // "the quick brown fox jumps over the lazy dog " repeated
+    let pattern_len: i32 = 44;
+    let pat: ptr[i32] = heap_alloc(pattern_len, 1);
+    ptr_write_u8(pat, 0, 116); ptr_write_u8(pat, 1, 104); ptr_write_u8(pat, 2, 101); ptr_write_u8(pat, 3, 32);
+    ptr_write_u8(pat, 4, 113); ptr_write_u8(pat, 5, 117); ptr_write_u8(pat, 6, 105); ptr_write_u8(pat, 7, 99);
+    ptr_write_u8(pat, 8, 107); ptr_write_u8(pat, 9, 32); ptr_write_u8(pat, 10, 98); ptr_write_u8(pat, 11, 114);
+    ptr_write_u8(pat, 12, 111); ptr_write_u8(pat, 13, 119); ptr_write_u8(pat, 14, 110); ptr_write_u8(pat, 15, 32);
+    ptr_write_u8(pat, 16, 102); ptr_write_u8(pat, 17, 111); ptr_write_u8(pat, 18, 120); ptr_write_u8(pat, 19, 32);
+    ptr_write_u8(pat, 20, 106); ptr_write_u8(pat, 21, 117); ptr_write_u8(pat, 22, 109); ptr_write_u8(pat, 23, 112);
+    ptr_write_u8(pat, 24, 115); ptr_write_u8(pat, 25, 32); ptr_write_u8(pat, 26, 111); ptr_write_u8(pat, 27, 118);
+    ptr_write_u8(pat, 28, 101); ptr_write_u8(pat, 29, 114); ptr_write_u8(pat, 30, 32); ptr_write_u8(pat, 31, 116);
+    ptr_write_u8(pat, 32, 104); ptr_write_u8(pat, 33, 101); ptr_write_u8(pat, 34, 32); ptr_write_u8(pat, 35, 108);
+    ptr_write_u8(pat, 36, 97); ptr_write_u8(pat, 37, 122); ptr_write_u8(pat, 38, 121); ptr_write_u8(pat, 39, 32);
+    ptr_write_u8(pat, 40, 100); ptr_write_u8(pat, 41, 111); ptr_write_u8(pat, 42, 103); ptr_write_u8(pat, 43, 32);
+    for i: i32 in range(0, len) {
+        ptr_write_u8(buf, i, ptr_read_u8(pat, i % pattern_len));
+    }
+    heap_free(pat);
+}
+
+// Fill with skewed byte distribution (simulating real-world text)
+fn fill_skewed(buf: ptr[i32], len: i32) {
+    // Simulate text: space(32) ~18%, e(101) ~13%, t(116) ~9%, etc.
+    // Use a simple PRNG biased toward common ASCII chars
+    let seed: i32 = 12345;
+    for i: i32 in range(0, len) {
+        // LCG: seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+        seed = band(seed *% 1103515245 +% 12345, 2147483647);
+        let r: i32 = band(lshr(seed, 16), 255);
+        // Bias toward common chars
+        let ch: i32 = 0;
+        if r < 46 {
+            ch = 32;          // space: ~18%
+        } else if r < 79 {
+            ch = 101;         // 'e': ~13%
+        } else if r < 102 {
+            ch = 116;         // 't': ~9%
+        } else if r < 122 {
+            ch = 97;          // 'a': ~8%
+        } else if r < 140 {
+            ch = 111;         // 'o': ~7%
+        } else if r < 155 {
+            ch = 105;         // 'i': ~6%
+        } else if r < 168 {
+            ch = 110;         // 'n': ~5%
+        } else if r < 180 {
+            ch = 115;         // 's': ~5%
+        } else if r < 190 {
+            ch = 114;         // 'r': ~4%
+        } else if r < 199 {
+            ch = 104;         // 'h': ~4%
+        } else if r < 210 {
+            ch = 108;         // 'l': ~4%
+        } else if r < 225 {
+            ch = band(r, 31) + 97; // other lowercase
+        } else {
+            ch = band(r, 127); // misc ASCII
+        }
+        ptr_write_u8(buf, i, ch);
+    }
+}
+
+// Fill with uniform random (worst case for Huffman -- minimal compression)
+fn fill_uniform(buf: ptr[i32], len: i32) {
+    let seed: i32 = 98765;
+    for i: i32 in range(0, len) {
+        seed = band(seed *% 1103515245 +% 12345, 2147483647);
+        ptr_write_u8(buf, i, band(lshr(seed, 16), 255));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run a round-trip test
+// Returns 1 on success, 0 on failure
+// ---------------------------------------------------------------------------
+
+fn run_test(name_msg: ptr[i32], data: ptr[i32], data_len: i32) -> i32 {
+    // Allocate output buffers (worst case: compressed could be larger than input)
+    let comp_max: i32 = data_len + data_len / 2 + 1024;
+    let comp_buf: ptr[i32] = heap_alloc(comp_max, 1);
+    let decomp_buf: ptr[i32] = heap_alloc(data_len + 64, 1);
+
+    let comp_size: i32 = huffman_encode(data, data_len, comp_buf, comp_max);
+    print("Original: ");
+    print_i32(data_len);
+    print(" bytes\n");
+    print("Compressed: ");
+    print_i32(comp_size);
+    print(" bytes\n");
+
+    let result: i32 = 0;
+
+    if comp_size > 0 {
+        let ratio: i32 = (comp_size * 100) / data_len;
+        print("Ratio: ");
+        print_i32(ratio);
+        print("%\n");
+
+        let decomp_size: i32 = huffman_decode(comp_buf, comp_size, decomp_buf, data_len + 64);
+        print("Decompressed: ");
+        print_i32(decomp_size);
+        print(" bytes\n");
+
+        if decomp_size == data_len and buffers_equal(data, decomp_buf, data_len) == 1 {
+            print("PASS: Round-trip verified\n");
+            result = 1;
+        } else {
+            print("FAIL: Round-trip mismatch\n");
+            if decomp_size != data_len {
+                print("  Expected length: ");
+                print_i32(data_len);
+                print(", got: ");
+                print_i32(decomp_size);
+                print("\n");
+            }
+        }
+    } else {
+        print("FAIL: Compression returned 0\n");
+    }
+
+    heap_free(comp_buf);
+    heap_free(decomp_buf);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Main: verify round-trip, then benchmark
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    print("=== Huffman Codec (miniz core) ===\n");
+
+    let pass_count: i32 = 0;
+    let test_count: i32 = 0;
+
+    // --- Test 1: Small text-like data ---
+    print("\n--- Test 1: Text-like data (1024 bytes) ---\n");
+    let test1_len: i32 = 1024;
+    let test1_buf: ptr[i32] = heap_alloc(test1_len, 1);
+    fill_text_like(test1_buf, test1_len);
+    test_count = test_count + 1;
+    pass_count = pass_count + run_test(test1_buf, test1_buf, test1_len);
+    heap_free(test1_buf);
+
+    // --- Test 2: Skewed distribution (4096 bytes) ---
+    print("\n--- Test 2: Skewed distribution (4096 bytes) ---\n");
+    let test2_len: i32 = 4096;
+    let test2_buf: ptr[i32] = heap_alloc(test2_len, 1);
+    fill_skewed(test2_buf, test2_len);
+    test_count = test_count + 1;
+    pass_count = pass_count + run_test(test2_buf, test2_buf, test2_len);
+    heap_free(test2_buf);
+
+    // --- Test 3: Uniform random (worst case, 2048 bytes) ---
+    print("\n--- Test 3: Uniform random (2048 bytes) ---\n");
+    let test3_len: i32 = 2048;
+    let test3_buf: ptr[i32] = heap_alloc(test3_len, 1);
+    fill_uniform(test3_buf, test3_len);
+    test_count = test_count + 1;
+    pass_count = pass_count + run_test(test3_buf, test3_buf, test3_len);
+    heap_free(test3_buf);
+
+    // --- Test 4: Large text-like data (64KB) ---
+    print("\n--- Test 4: Large text (65536 bytes) ---\n");
+    let test4_len: i32 = 65535;
+    let test4_buf: ptr[i32] = heap_alloc(test4_len, 1);
+    fill_skewed(test4_buf, test4_len);
+    test_count = test_count + 1;
+    pass_count = pass_count + run_test(test4_buf, test4_buf, test4_len);
+    heap_free(test4_buf);
+
+    // --- Test 5: Single repeated byte ---
+    print("\n--- Test 5: Single byte repeated (1024 bytes) ---\n");
+    let test5_len: i32 = 1024;
+    let test5_buf: ptr[i32] = heap_alloc(test5_len, 1);
+    for i: i32 in range(0, test5_len) {
+        ptr_write_u8(test5_buf, i, 65); // 'A'
+    }
+    test_count = test_count + 1;
+    pass_count = pass_count + run_test(test5_buf, test5_buf, test5_len);
+    heap_free(test5_buf);
+
+    // --- Summary ---
+    print("\n--- Summary ---\n");
+    print("Tests passed: ");
+    print_i32(pass_count);
+    print("/");
+    print_i32(test_count);
+    print("\n");
+
+    // --- Benchmark: encode + decode 64KB skewed data ---
+    print("\n--- Benchmark: 64KB skewed data x 1000 encode+decode ---\n");
+
+    let bench_len: i32 = 65535;
+    let bench_src: ptr[i32] = heap_alloc(bench_len, 1);
+    fill_skewed(bench_src, bench_len);
+
+    let bench_comp_max: i32 = bench_len + bench_len / 2 + 1024;
+    let bench_comp: ptr[i32] = heap_alloc(bench_comp_max, 1);
+    let bench_decomp: ptr[i32] = heap_alloc(bench_len + 64, 1);
+
+    let iterations: i32 = 1000;
+    let t0: i64 = clock_ns();
+    let checksum: i32 = 0;
+
+    for iter: i32 in range(0, iterations) {
+        let csz: i32 = huffman_encode(bench_src, bench_len, bench_comp, bench_comp_max);
+        let dsz: i32 = huffman_decode(bench_comp, csz, bench_decomp, bench_len + 64);
+        checksum = checksum +% csz +% dsz;
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        // Total data processed = iterations * bench_len * 2 (encode + decode)
+        let total_mb: i64 = (widen(iterations) * widen(bench_len) * 2) / 1048576;
+        let throughput: i64 = (total_mb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(throughput);
+        print(" MB/s\n");
+    }
+
+    heap_free(bench_src);
+    heap_free(bench_comp);
+    heap_free(bench_decomp);
+
+    print("\n=== Huffman codec complete ===\n");
+    return 0;
+}
