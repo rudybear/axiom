@@ -1,0 +1,338 @@
+@module base64;
+@intent("Base64 encode/decode codec ported from Turbo-Base64 core algorithm, with verification and benchmark");
+
+// =============================================================================
+// Base64 Codec -- Turbo-Base64 Core Algorithm
+// =============================================================================
+//
+// Encode: 3 input bytes -> 4 ASCII chars via 6-bit lookup table
+// Decode: 4 ASCII chars -> 3 bytes via reverse 256-entry lookup table
+//
+// The encode table has 64 entries (A-Z, a-z, 0-9, +, /).
+// The decode table has 256 entries mapping ASCII back to 6-bit values.
+// Invalid chars decode to 0xFF (255).
+//
+// GAP: No u8 type for direct unsigned arithmetic. We use i32 with
+//      band(val, 0xFF) to mask to byte range.
+// GAP: No string indexing. We use ptr_read_u8/ptr_write_u8 on byte buffers.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Base64 encode table: 64 entries (indices 0..63 -> ASCII chars)
+// A=65..Z=90, a=97..z=122, 0=48..9=57, +=43, /=47
+// ---------------------------------------------------------------------------
+@pure
+fn get_encode_table() -> ptr[i32] {
+    return array_const_u8(
+        65,  66,  67,  68,  69,  70,  71,  72,  73,  74,  75,  76,  77,  78,  79,  80,
+        81,  82,  83,  84,  85,  86,  87,  88,  89,  90,  97,  98,  99, 100, 101, 102,
+       103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118,
+       119, 120, 121, 122,  48,  49,  50,  51,  52,  53,  54,  55,  56,  57,  43,  47
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Base64 decode table: 256 entries (ASCII char -> 6-bit value, 0xFF=invalid)
+// ---------------------------------------------------------------------------
+@pure
+fn get_decode_table() -> ptr[i32] {
+    return array_const_u8(
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,  62, 255, 255, 255,  63,
+         52,  53,  54,  55,  56,  57,  58,  59,  60,  61, 255, 255, 255, 255, 255, 255,
+        255,   0,   1,   2,   3,   4,   5,   6,   7,   8,   9,  10,  11,  12,  13,  14,
+         15,  16,  17,  18,  19,  20,  21,  22,  23,  24,  25, 255, 255, 255, 255, 255,
+        255,  26,  27,  28,  29,  30,  31,  32,  33,  34,  35,  36,  37,  38,  39,  40,
+         41,  42,  43,  44,  45,  46,  47,  48,  49,  50,  51, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Base64 encode: src (src_len bytes) -> dst (returns encoded length)
+// Output buffer must be at least ((src_len + 2) / 3) * 4 bytes.
+// ---------------------------------------------------------------------------
+@inline(always)
+fn base64_encode(src: ptr[i32], src_len: i32, dst: ptr[i32]) -> i32 {
+    let enc: ptr[i32] = get_encode_table();
+    let si: i32 = 0;
+    let di: i32 = 0;
+
+    // Process 3-byte groups
+    let limit: i32 = src_len - 2;
+    while si < limit {
+        let b0: i32 = ptr_read_u8(src, si);
+        let b1: i32 = ptr_read_u8(src, si + 1);
+        let b2: i32 = ptr_read_u8(src, si + 2);
+
+        // Extract 4 x 6-bit indices from 24 bits
+        let i0: i32 = lshr(b0, 2);
+        let i1: i32 = bor(shl(band(b0, 3), 4), lshr(b1, 4));
+        let i2: i32 = bor(shl(band(b1, 15), 2), lshr(b2, 6));
+        let i3: i32 = band(b2, 63);
+
+        ptr_write_u8(dst, di,     ptr_read_u8(enc, i0));
+        ptr_write_u8(dst, di + 1, ptr_read_u8(enc, i1));
+        ptr_write_u8(dst, di + 2, ptr_read_u8(enc, i2));
+        ptr_write_u8(dst, di + 3, ptr_read_u8(enc, i3));
+
+        si = si + 3;
+        di = di + 4;
+    }
+
+    // Handle remaining 1 or 2 bytes
+    let remain: i32 = src_len - si;
+    if remain == 1 {
+        let b0: i32 = ptr_read_u8(src, si);
+        ptr_write_u8(dst, di,     ptr_read_u8(enc, lshr(b0, 2)));
+        ptr_write_u8(dst, di + 1, ptr_read_u8(enc, shl(band(b0, 3), 4)));
+        ptr_write_u8(dst, di + 2, 61);  // '='
+        ptr_write_u8(dst, di + 3, 61);  // '='
+        di = di + 4;
+    }
+    if remain == 2 {
+        let b0: i32 = ptr_read_u8(src, si);
+        let b1: i32 = ptr_read_u8(src, si + 1);
+        ptr_write_u8(dst, di,     ptr_read_u8(enc, lshr(b0, 2)));
+        ptr_write_u8(dst, di + 1, ptr_read_u8(enc, bor(shl(band(b0, 3), 4), lshr(b1, 4))));
+        ptr_write_u8(dst, di + 2, ptr_read_u8(enc, shl(band(b1, 15), 2)));
+        ptr_write_u8(dst, di + 3, 61);  // '='
+        di = di + 4;
+    }
+
+    return di;
+}
+
+// ---------------------------------------------------------------------------
+// Base64 decode: src (src_len chars) -> dst (returns decoded length)
+// src_len must be a multiple of 4. Handles '=' padding.
+// Output buffer must be at least (src_len / 4) * 3 bytes.
+// ---------------------------------------------------------------------------
+@inline(always)
+fn base64_decode(src: ptr[i32], src_len: i32, dst: ptr[i32]) -> i32 {
+    let dec: ptr[i32] = get_decode_table();
+    let si: i32 = 0;
+    let di: i32 = 0;
+
+    // Process 4-char groups
+    while si < src_len {
+        let c0: i32 = ptr_read_u8(src, si);
+        let c1: i32 = ptr_read_u8(src, si + 1);
+        let c2: i32 = ptr_read_u8(src, si + 2);
+        let c3: i32 = ptr_read_u8(src, si + 3);
+
+        let v0: i32 = ptr_read_u8(dec, c0);
+        let v1: i32 = ptr_read_u8(dec, c1);
+        let v2: i32 = ptr_read_u8(dec, c2);
+        let v3: i32 = ptr_read_u8(dec, c3);
+
+        // Reconstruct 3 bytes from 4 x 6-bit values
+        ptr_write_u8(dst, di, band(bor(shl(v0, 2), lshr(v1, 4)), 0xFF));
+        di = di + 1;
+
+        // Check for padding
+        if c2 != 61 {
+            ptr_write_u8(dst, di, band(bor(shl(v1, 4), lshr(v2, 2)), 0xFF));
+            di = di + 1;
+        }
+        if c3 != 61 {
+            ptr_write_u8(dst, di, band(bor(shl(v2, 6), v3), 0xFF));
+            di = di + 1;
+        }
+
+        si = si + 4;
+    }
+
+    return di;
+}
+
+// ---------------------------------------------------------------------------
+// Verification helpers
+// ---------------------------------------------------------------------------
+
+fn bytes_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
+    for i: i32 in range(0, len) {
+        if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+fn print_bytes_as_ascii(buf: ptr[i32], len: i32) {
+    // Print encoded output as characters
+    for i: i32 in range(0, len) {
+        let c: i32 = ptr_read_u8(buf, i);
+        // Print as individual ASCII chars via print_i32 for debugging
+        ptr_write_u8(buf, i, c);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fill buffer with deterministic test data
+// ---------------------------------------------------------------------------
+fn fill_test_data(buf: ptr[i32], len: i32) {
+    for i: i32 in range(0, len) {
+        ptr_write_u8(buf, i, band(i *% 137 +% 73, 255));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main: verify against known values, then benchmark
+// ---------------------------------------------------------------------------
+fn main() -> i32 {
+    print("=== Base64 Codec (Turbo-Base64 Core) ===\n");
+
+    // --- Verification ---
+    // Test: encode "Hello, World!" -> "SGVsbG8sIFdvcmxkIQ=="
+    // "Hello, World!" = 72,101,108,108,111,44,32,87,111,114,108,100,33 (13 bytes)
+    let input_len: i32 = 13;
+    let input: ptr[i32] = heap_alloc(input_len, 1);
+    ptr_write_u8(input, 0, 72);    // H
+    ptr_write_u8(input, 1, 101);   // e
+    ptr_write_u8(input, 2, 108);   // l
+    ptr_write_u8(input, 3, 108);   // l
+    ptr_write_u8(input, 4, 111);   // o
+    ptr_write_u8(input, 5, 44);    // ,
+    ptr_write_u8(input, 6, 32);    // (space)
+    ptr_write_u8(input, 7, 87);    // W
+    ptr_write_u8(input, 8, 111);   // o
+    ptr_write_u8(input, 9, 114);   // r
+    ptr_write_u8(input, 10, 108);  // l
+    ptr_write_u8(input, 11, 100);  // d
+    ptr_write_u8(input, 12, 33);   // !
+
+    // Encode
+    let enc_buf_len: i32 = 20;
+    let enc_buf: ptr[i32] = heap_alloc(enc_buf_len, 1);
+    let enc_len: i32 = base64_encode(input, input_len, enc_buf);
+
+    print("Encoded length: ");
+    print_i32(enc_len);
+    print("\n");
+
+    // Expected: "SGVsbG8sIFdvcmxkIQ==" = 83,71,86,115,98,71,56,115,73,70,100,118,99,109,120,107,73,81,61,61
+    let expected: ptr[i32] = heap_alloc(20, 1);
+    ptr_write_u8(expected, 0, 83);    // S
+    ptr_write_u8(expected, 1, 71);    // G
+    ptr_write_u8(expected, 2, 86);    // V
+    ptr_write_u8(expected, 3, 115);   // s
+    ptr_write_u8(expected, 4, 98);    // b
+    ptr_write_u8(expected, 5, 71);    // G
+    ptr_write_u8(expected, 6, 56);    // 8
+    ptr_write_u8(expected, 7, 115);   // s
+    ptr_write_u8(expected, 8, 73);    // I
+    ptr_write_u8(expected, 9, 70);    // F
+    ptr_write_u8(expected, 10, 100);  // d
+    ptr_write_u8(expected, 11, 118);  // v
+    ptr_write_u8(expected, 12, 99);   // c
+    ptr_write_u8(expected, 13, 109);  // m
+    ptr_write_u8(expected, 14, 120);  // x
+    ptr_write_u8(expected, 15, 107);  // k
+    ptr_write_u8(expected, 16, 73);   // I
+    ptr_write_u8(expected, 17, 81);   // Q
+    ptr_write_u8(expected, 18, 61);   // =
+    ptr_write_u8(expected, 19, 61);   // =
+
+    if bytes_equal(enc_buf, expected, 20) == 1 {
+        print("PASS: encode \"Hello, World!\" matches expected\n");
+    } else {
+        print("FAIL: encode mismatch\n");
+    }
+
+    // Decode back
+    let dec_buf: ptr[i32] = heap_alloc(16, 1);
+    let dec_len: i32 = base64_decode(enc_buf, enc_len, dec_buf);
+
+    print("Decoded length: ");
+    print_i32(dec_len);
+    print("\n");
+
+    if dec_len == input_len {
+        if bytes_equal(dec_buf, input, input_len) == 1 {
+            print("PASS: decode roundtrip matches original\n");
+        } else {
+            print("FAIL: decode data mismatch\n");
+        }
+    } else {
+        print("FAIL: decode length mismatch\n");
+    }
+
+    heap_free(input);
+    heap_free(enc_buf);
+    heap_free(expected);
+    heap_free(dec_buf);
+
+    // --- Benchmark: 100MB encode + decode ---
+    let bench_size: i32 = 1048576;  // 1MB per iteration
+    let bench_iters: i32 = 100;     // 100 iterations = 100MB total
+    let enc_size: i32 = ((bench_size + 2) / 3) * 4;
+
+    let bench_src: ptr[i32] = heap_alloc(bench_size, 1);
+    let bench_enc: ptr[i32] = heap_alloc(enc_size + 4, 1);
+    let bench_dec: ptr[i32] = heap_alloc(bench_size + 4, 1);
+
+    fill_test_data(bench_src, bench_size);
+
+    print("Benchmarking: 100MB encode + decode...\n");
+
+    // Encode benchmark
+    let t0: i64 = clock_ns();
+    let checksum: i32 = 0;
+    for iter: i32 in range(0, bench_iters) {
+        let elen: i32 = base64_encode(bench_src, bench_size, bench_enc);
+        checksum = checksum +% elen;
+    }
+    let t1: i64 = clock_ns();
+    let encode_ms: i64 = (t1 - t0) / 1000000;
+
+    // Decode benchmark
+    let enc_out_len: i32 = base64_encode(bench_src, bench_size, bench_enc);
+    let t2: i64 = clock_ns();
+    for iter: i32 in range(0, bench_iters) {
+        let dlen: i32 = base64_decode(bench_enc, enc_out_len, bench_dec);
+        checksum = checksum +% dlen;
+    }
+    let t3: i64 = clock_ns();
+    let decode_ms: i64 = (t3 - t2) / 1000000;
+
+    print("Encode: ");
+    print_i64(encode_ms);
+    print(" ms\n");
+    print("Decode: ");
+    print_i64(decode_ms);
+    print(" ms\n");
+
+    let total_bytes: i64 = widen(bench_size) * widen(bench_iters);
+    if encode_ms > 0 {
+        let enc_mbps: i64 = (total_bytes * 1000) / (encode_ms * 1048576);
+        print("Encode throughput: ");
+        print_i64(enc_mbps);
+        print(" MB/s\n");
+    }
+    if decode_ms > 0 {
+        let dec_mbps: i64 = (total_bytes * 1000) / (decode_ms * 1048576);
+        print("Decode throughput: ");
+        print_i64(dec_mbps);
+        print(" MB/s\n");
+    }
+
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    heap_free(bench_src);
+    heap_free(bench_enc);
+    heap_free(bench_dec);
+
+    print("=== Base64 complete ===\n");
+    return 0;
+}

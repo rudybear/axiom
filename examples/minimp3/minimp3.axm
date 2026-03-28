@@ -1,0 +1,515 @@
+@module minimp3;
+@intent("MP3 IMDCT-36 core transform + Huffman table decode, ported from minimp3");
+
+// =============================================================================
+// minimp3 core -- IMDCT-36 + Huffman decode
+// =============================================================================
+//
+// The hot path in MP3 decoding is:
+//   1. Huffman decode: lookup spectral coefficients from bitstream
+//   2. IMDCT-36: Inverse Modified Discrete Cosine Transform (36-point)
+//
+// The IMDCT-36 is the dominant DSP kernel. MP3 Layer III uses 36-point IMDCT
+// for long blocks. The algorithm:
+//   - Input: 18 frequency-domain coefficients
+//   - Output: 36 time-domain samples
+//   - Formula: x[n] = sum(k=0..17) { X[k] * cos(PI/36 * (2*n + 1 + 18) * (2*k + 1)) }
+//
+// We precompute the 36x18 cosine table for maximum throughput.
+//
+// GAP: No f64 global arrays; we build the cosine table at init via cos().
+// GAP: No struct; Huffman table entries stored as parallel arrays.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+@const fn IMDCT_N() -> i32 { return 36; }
+@const fn IMDCT_HALF() -> i32 { return 18; }
+@const fn PI() -> f64 { return 3.14159265358979323846; }
+
+// Huffman table sizes (simplified MP3 table)
+@const fn HUFF_TABLE_SIZE() -> i32 { return 256; }
+@const fn HUFF_MAX_BITS() -> i32 { return 8; }
+
+// ---------------------------------------------------------------------------
+// Build IMDCT cosine table: cos_table[n*18 + k] for n=0..35, k=0..17
+// Total 648 entries stored as f64
+// ---------------------------------------------------------------------------
+fn build_imdct_cos_table(table: ptr[i32]) {
+    for n: i32 in range(0, 36) {
+        for k: i32 in range(0, 18) {
+            // cos(PI/36 * (2*n + 1 + 18) * (2*k + 1))
+            let n_f: f64 = to_f64(n);
+            let k_f: f64 = to_f64(k);
+            let angle: f64 = PI() / 36.0 * (2.0 * n_f + 19.0) * (2.0 * k_f + 1.0);
+            let c: f64 = cos(angle);
+            ptr_write_f64(table, n * 18 + k, c);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IMDCT-36: transform 18 frequency coefficients -> 36 time samples
+// ---------------------------------------------------------------------------
+// input:  ptr to 18 f64 values (frequency domain)
+// output: ptr to 36 f64 values (time domain)
+// cos_tab: precomputed 648-entry cosine table
+//
+@inline(always)
+fn imdct36(input: ptr[i32], output: ptr[i32], cos_tab: ptr[i32]) {
+    for n: i32 in range(0, 36) {
+        let sum: f64 = 0.0;
+        let base: i32 = n * 18;
+        for k: i32 in range(0, 18) {
+            let x_k: f64 = ptr_read_f64(input, k);
+            let c: f64 = ptr_read_f64(cos_tab, base + k);
+            sum = sum + x_k * c;
+        }
+        ptr_write_f64(output, n, sum);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windowed IMDCT-36: apply the MP3 window after IMDCT
+// ---------------------------------------------------------------------------
+// MP3 uses a sine window: w[n] = sin(PI/36 * (n + 0.5))
+// This is applied to the IMDCT output, then overlap-added with previous block.
+//
+fn build_imdct_window(win: ptr[i32]) {
+    for n: i32 in range(0, 36) {
+        let n_f: f64 = to_f64(n);
+        let w: f64 = sin(PI() / 36.0 * (n_f + 0.5));
+        ptr_write_f64(win, n, w);
+    }
+}
+
+@inline(always)
+fn imdct36_windowed(input: ptr[i32], output: ptr[i32],
+                    cos_tab: ptr[i32], window: ptr[i32],
+                    overlap: ptr[i32]) {
+    // Compute raw IMDCT into output
+    imdct36(input, output, cos_tab);
+
+    // Apply window and overlap-add
+    // First half: output[n] = raw[n] * window[n] + overlap[n]
+    for n: i32 in range(0, 18) {
+        let raw: f64 = ptr_read_f64(output, n);
+        let w: f64 = ptr_read_f64(window, n);
+        let prev: f64 = ptr_read_f64(overlap, n);
+        ptr_write_f64(output, n, raw * w + prev);
+    }
+    // Second half: save to overlap for next block
+    for n: i32 in range(0, 18) {
+        let raw: f64 = ptr_read_f64(output, 18 + n);
+        let w: f64 = ptr_read_f64(window, 18 + n);
+        ptr_write_f64(overlap, n, raw * w);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Simplified Huffman table for MP3 spectral data
+// ---------------------------------------------------------------------------
+// Real MP3 has multiple Huffman tables (htab 0-33). We implement a simplified
+// version: 8-bit lookup table returning (value, bits_consumed) packed in i32.
+//   High 16 bits = decoded value (signed)
+//   Low 16 bits  = number of bits consumed
+//
+// Build a simple test Huffman table:
+//   Codes of length 1-8, mapping to spectral values 0..255
+//
+fn build_huffman_table(huff_val: ptr[i32], huff_bits: ptr[i32]) {
+    // Simplified table: for each 8-bit code, store decoded value and bit length.
+    // We simulate a typical MP3-like distribution:
+    //   0xxxxxxx -> value 0, 1 bit  (most common: zero coefficient)
+    //   10xxxxxx -> value 1, 2 bits
+    //   110xxxxx -> value 2, 3 bits
+    //   1110xxxx -> value 3, 4 bits
+    //   11110xxx -> value 4, 5 bits
+    //   111110xx -> value 5, 6 bits
+    //   1111110x -> value 6, 7 bits
+    //   11111110 -> value 7, 8 bits
+    //   11111111 -> value 8, 8 bits
+
+    for i: i32 in range(0, 256) {
+        if band(i, 0x80) == 0 {
+            // 0xxxxxxx: value=0, bits=1
+            ptr_write_i32(huff_val, i, 0);
+            ptr_write_i32(huff_bits, i, 1);
+        } else if band(i, 0xC0) == 0x80 {
+            // 10xxxxxx: value=1, bits=2
+            ptr_write_i32(huff_val, i, 1);
+            ptr_write_i32(huff_bits, i, 2);
+        } else if band(i, 0xE0) == 0xC0 {
+            // 110xxxxx: value=2, bits=3
+            ptr_write_i32(huff_val, i, 2);
+            ptr_write_i32(huff_bits, i, 3);
+        } else if band(i, 0xF0) == 0xE0 {
+            // 1110xxxx: value=3, bits=4
+            ptr_write_i32(huff_val, i, 3);
+            ptr_write_i32(huff_bits, i, 4);
+        } else if band(i, 0xF8) == 0xF0 {
+            // 11110xxx: value=4, bits=5
+            ptr_write_i32(huff_val, i, 4);
+            ptr_write_i32(huff_bits, i, 5);
+        } else if band(i, 0xFC) == 0xF8 {
+            // 111110xx: value=5, bits=6
+            ptr_write_i32(huff_val, i, 5);
+            ptr_write_i32(huff_bits, i, 6);
+        } else if band(i, 0xFE) == 0xFC {
+            // 1111110x: value=6, bits=7
+            ptr_write_i32(huff_val, i, 6);
+            ptr_write_i32(huff_bits, i, 7);
+        } else if i == 0xFE {
+            // 11111110: value=7, bits=8
+            ptr_write_i32(huff_val, i, 7);
+            ptr_write_i32(huff_bits, i, 8);
+        } else {
+            // 11111111: value=8, bits=8
+            ptr_write_i32(huff_val, i, 8);
+            ptr_write_i32(huff_bits, i, 8);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Huffman decode: decode one symbol from bitstream
+// ---------------------------------------------------------------------------
+// bitstream: byte buffer
+// bit_pos: current bit position (modified via return)
+// Returns: decoded value in low 16 bits, new bit_pos in high 16 bits
+//
+@inline(always)
+fn huff_decode_one(bitstream: ptr[i32], bit_pos: i32,
+                   huff_val: ptr[i32], huff_bits: ptr[i32]) -> i32 {
+    // Extract 8 bits starting at bit_pos
+    let byte_idx: i32 = lshr(bit_pos, 3);
+    let bit_off: i32 = band(bit_pos, 7);
+
+    let b0: i32 = ptr_read_u8(bitstream, byte_idx);
+    let b1: i32 = ptr_read_u8(bitstream, byte_idx + 1);
+    let combined: i32 = bor(shl(b0, 8), b1);
+
+    // Shift to get 8-bit lookup key
+    let shift_amt: i32 = 8 - bit_off;
+    let lookup: i32 = band(lshr(combined, shift_amt), 0xFF);
+
+    let val: i32 = ptr_read_i32(huff_val, lookup);
+    let bits_used: i32 = ptr_read_i32(huff_bits, lookup);
+    let new_pos: i32 = bit_pos + bits_used;
+
+    // Pack: value in low 16, new_pos in high 16
+    return bor(band(val, 0xFFFF), shl(new_pos, 16));
+}
+
+// ---------------------------------------------------------------------------
+// Huffman decode: decode N symbols from bitstream
+// ---------------------------------------------------------------------------
+@inline(always)
+fn huff_decode_block(bitstream: ptr[i32], bit_pos: i32, count: i32,
+                     output: ptr[i32],
+                     huff_val: ptr[i32], huff_bits: ptr[i32]) -> i32 {
+    let pos: i32 = bit_pos;
+    for i: i32 in range(0, count) {
+        let result: i32 = huff_decode_one(bitstream, pos, huff_val, huff_bits);
+        let val: i32 = band(result, 0xFFFF);
+        pos = lshr(result, 16);
+        ptr_write_i32(output, i, val);
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------------------
+// Test: verify IMDCT-36 against known reference values
+// ---------------------------------------------------------------------------
+fn test_imdct() -> i32 {
+    print("--- Test: IMDCT-36 ---\n");
+
+    // Allocate tables
+    let cos_tab: ptr[i32] = heap_alloc(648, 8);   // 36*18 f64
+    build_imdct_cos_table(cos_tab);
+
+    // Test input: unit impulse at k=0 (DC)
+    // IMDCT of [1, 0, 0, ..., 0] should give cos(PI/36 * (2n+19))
+    let input: ptr[i32] = heap_alloc_zeroed(18, 8);
+    let output: ptr[i32] = heap_alloc(36, 8);
+
+    ptr_write_f64(input, 0, 1.0);
+    imdct36(input, output, cos_tab);
+
+    // Verify: output[0] should equal cos(PI/36 * 19) = cos(0.52778*PI)
+    let expected_0: f64 = cos(PI() / 36.0 * 19.0);
+    let actual_0: f64 = ptr_read_f64(output, 0);
+    let diff_0: f64 = actual_0 - expected_0;
+    if diff_0 < 0.0 {
+        diff_0 = 0.0 - diff_0;
+    }
+
+    let pass: i32 = 1;
+    if diff_0 > 0.0000001 {
+        print("FAIL: IMDCT output[0] mismatch\n");
+        print("  expected: ");
+        print_f64(expected_0);
+        print("\n  actual:   ");
+        print_f64(actual_0);
+        print("\n");
+        pass = 0;
+    }
+
+    // Verify output[17] = cos(PI/36 * (2*17+19)) = cos(PI/36 * 53)
+    let expected_17: f64 = cos(PI() / 36.0 * 53.0);
+    let actual_17: f64 = ptr_read_f64(output, 17);
+    let diff_17: f64 = actual_17 - expected_17;
+    if diff_17 < 0.0 {
+        diff_17 = 0.0 - diff_17;
+    }
+    if diff_17 > 0.0000001 {
+        print("FAIL: IMDCT output[17] mismatch\n");
+        pass = 0;
+    }
+
+    // Test with all-ones input: sum of all cosines per row
+    for k: i32 in range(0, 18) {
+        ptr_write_f64(input, k, 1.0);
+    }
+    imdct36(input, output, cos_tab);
+
+    // Verify sum property: for n=0, should be sum(k=0..17) cos(PI/36 * 19 * (2k+1))
+    let ref_sum: f64 = 0.0;
+    for k: i32 in range(0, 18) {
+        let k_f: f64 = to_f64(k);
+        ref_sum = ref_sum + cos(PI() / 36.0 * 19.0 * (2.0 * k_f + 1.0));
+    }
+    let actual_sum: f64 = ptr_read_f64(output, 0);
+    let diff_sum: f64 = actual_sum - ref_sum;
+    if diff_sum < 0.0 {
+        diff_sum = 0.0 - diff_sum;
+    }
+    if diff_sum > 0.0001 {
+        print("FAIL: IMDCT all-ones sum mismatch\n");
+        pass = 0;
+    }
+
+    if pass == 1 {
+        print("PASS: IMDCT-36 correctness verified\n");
+    }
+
+    heap_free(input);
+    heap_free(output);
+    heap_free(cos_tab);
+    return pass;
+}
+
+// ---------------------------------------------------------------------------
+// Test: verify Huffman decode
+// ---------------------------------------------------------------------------
+fn test_huffman() -> i32 {
+    print("--- Test: Huffman decode ---\n");
+
+    let huff_val: ptr[i32] = heap_alloc(256, 4);
+    let huff_bits: ptr[i32] = heap_alloc(256, 4);
+    build_huffman_table(huff_val, huff_bits);
+
+    // Build test bitstream: encode values [0, 1, 2, 3, 0, 0, 1]
+    // 0 -> 0 (1 bit)
+    // 1 -> 10 (2 bits)
+    // 2 -> 110 (3 bits)
+    // 3 -> 1110 (4 bits)
+    // 0 -> 0 (1 bit)
+    // 0 -> 0 (1 bit)
+    // 1 -> 10 (2 bits)
+    // Total: 1+2+3+4+1+1+2 = 14 bits = "0 10 110 1110 0 0 10" = 0x2EE8 (pad with 0s)
+    // Binary: 01011011 10001000
+    //         0x5B     0x88
+    let bitstream: ptr[i32] = heap_alloc(4, 1);
+    ptr_write_u8(bitstream, 0, 0x5B);
+    ptr_write_u8(bitstream, 1, 0x88);
+    ptr_write_u8(bitstream, 2, 0x00);
+    ptr_write_u8(bitstream, 3, 0x00);
+
+    let decoded: ptr[i32] = heap_alloc(7, 4);
+    let final_pos: i32 = huff_decode_block(bitstream, 0, 7, decoded, huff_val, huff_bits);
+
+    let pass: i32 = 1;
+    let expected_vals: ptr[i32] = heap_alloc(7, 4);
+    ptr_write_i32(expected_vals, 0, 0);
+    ptr_write_i32(expected_vals, 1, 1);
+    ptr_write_i32(expected_vals, 2, 2);
+    ptr_write_i32(expected_vals, 3, 3);
+    ptr_write_i32(expected_vals, 4, 0);
+    ptr_write_i32(expected_vals, 5, 0);
+    ptr_write_i32(expected_vals, 6, 1);
+
+    for i: i32 in range(0, 7) {
+        let actual: i32 = ptr_read_i32(decoded, i);
+        let expected: i32 = ptr_read_i32(expected_vals, i);
+        if actual != expected {
+            print("FAIL: Huffman decode[");
+            print_i32(i);
+            print("] = ");
+            print_i32(actual);
+            print(", expected ");
+            print_i32(expected);
+            print("\n");
+            pass = 0;
+        }
+    }
+
+    if final_pos != 14 {
+        print("FAIL: Huffman bit position = ");
+        print_i32(final_pos);
+        print(", expected 14\n");
+        pass = 0;
+    }
+
+    if pass == 1 {
+        print("PASS: Huffman decode verified\n");
+    }
+
+    heap_free(huff_val);
+    heap_free(huff_bits);
+    heap_free(bitstream);
+    heap_free(decoded);
+    heap_free(expected_vals);
+    return pass;
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: 1M IMDCT-36 transforms
+// ---------------------------------------------------------------------------
+fn bench_imdct() {
+    print("\n--- Benchmark: 1M IMDCT-36 transforms ---\n");
+
+    let cos_tab: ptr[i32] = heap_alloc(648, 8);
+    build_imdct_cos_table(cos_tab);
+
+    let window: ptr[i32] = heap_alloc(36, 8);
+    build_imdct_window(window);
+
+    let input: ptr[i32] = heap_alloc(18, 8);
+    let output: ptr[i32] = heap_alloc(36, 8);
+    let overlap: ptr[i32] = heap_alloc_zeroed(18, 8);
+
+    // Fill input with test data
+    for k: i32 in range(0, 18) {
+        let k_f: f64 = to_f64(k);
+        ptr_write_f64(input, k, sin(k_f * 0.3) * 0.5);
+    }
+
+    let iterations: i32 = 1000000;
+    let checksum_f: f64 = 0.0;
+
+    let t0: i64 = clock_ns();
+
+    for iter: i32 in range(0, iterations) {
+        imdct36_windowed(input, output, cos_tab, window, overlap);
+        // Rotate input slightly to prevent full DCE
+        let tmp: f64 = ptr_read_f64(input, 0);
+        ptr_write_f64(input, 0, ptr_read_f64(output, 0) * 0.001 + tmp * 0.999);
+        checksum_f = checksum_f + ptr_read_f64(output, 0);
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_f64(checksum_f);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        let transforms_per_sec: i64 = (widen(iterations) * 1000) / elapsed_ms;
+        print("Transforms/sec: ");
+        print_i64(transforms_per_sec);
+        print("\n");
+    }
+
+    heap_free(cos_tab);
+    heap_free(window);
+    heap_free(input);
+    heap_free(output);
+    heap_free(overlap);
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: Huffman decode throughput
+// ---------------------------------------------------------------------------
+fn bench_huffman() {
+    print("\n--- Benchmark: Huffman decode 10M symbols ---\n");
+
+    let huff_val: ptr[i32] = heap_alloc(256, 4);
+    let huff_bits: ptr[i32] = heap_alloc(256, 4);
+    build_huffman_table(huff_val, huff_bits);
+
+    // Create a large bitstream with mixed codes
+    let stream_bytes: i32 = 8192;
+    let bitstream: ptr[i32] = heap_alloc(stream_bytes, 1);
+    for i: i32 in range(0, stream_bytes) {
+        // Mix of short and long codes
+        ptr_write_u8(bitstream, i, band(i *% 137 + 43, 255));
+    }
+
+    let decoded: ptr[i32] = heap_alloc(1024, 4);
+    let iterations: i32 = 10000;
+    let symbols_per_iter: i32 = 1024;
+
+    let t0: i64 = clock_ns();
+    let checksum: i32 = 0;
+
+    for iter: i32 in range(0, iterations) {
+        let final_pos: i32 = huff_decode_block(bitstream, 0, symbols_per_iter,
+                                                decoded, huff_val, huff_bits);
+        checksum = checksum +% ptr_read_i32(decoded, 0) +% final_pos;
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    let total_symbols: i64 = widen(iterations) * widen(symbols_per_iter);
+    print("Total symbols decoded: ");
+    print_i64(total_symbols);
+    print("\n");
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        let msyms_per_sec: i64 = (total_symbols * 1000) / (elapsed_ms * 1000000);
+        print("M symbols/sec: ");
+        print_i64(msyms_per_sec);
+        print("\n");
+    }
+
+    heap_free(huff_val);
+    heap_free(huff_bits);
+    heap_free(bitstream);
+    heap_free(decoded);
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+fn main() -> i32 {
+    print("=== minimp3 Core: IMDCT-36 + Huffman Decode ===\n\n");
+
+    let pass1: i32 = test_imdct();
+    let pass2: i32 = test_huffman();
+
+    if pass1 == 1 and pass2 == 1 {
+        print("\nAll tests passed.\n");
+    } else {
+        print("\nSome tests FAILED.\n");
+        return 1;
+    }
+
+    bench_imdct();
+    bench_huffman();
+
+    print("\n=== minimp3 complete ===\n");
+    return 0;
+}

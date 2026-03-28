@@ -1,0 +1,511 @@
+@module roaring;
+@intent("Roaring bitmap core operations: array/bitset containers, union, intersection, cardinality, with benchmark");
+
+// =============================================================================
+// Roaring Bitmap -- Core Operations (CRoaring Port)
+// =============================================================================
+//
+// Roaring bitmaps use two container types for efficient compressed bitsets:
+//
+// 1. Array container: sorted array of u16 values (for sparse sets)
+//    - Stored as i32 values in range [0, 65535]
+//    - Sorted, no duplicates
+//
+// 2. Bitset container: 1024-word (8KB) bitmap (for dense sets)
+//    - 65536 bits = 1024 x 64-bit words
+//    - Bit at position k is word[k/64] bit (k%64)
+//
+// Operations:
+//    - Union (OR): combine two containers
+//    - Intersection (AND): find common elements
+//    - Cardinality (popcount): count set bits
+//
+// GAP: No u16 type. We store values as i32 (0..65535 range).
+// GAP: No u64 type. We use i64 for 64-bit bitset words.
+// GAP: No struct type. We use ptr[i32] for array containers and ptr[i64] for bitset.
+// GAP: No popcount builtin. We implement Hamming weight via bit tricks.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+@const fn BITSET_WORDS() -> i32 { return 1024; }
+@const fn BITS_PER_WORD() -> i32 { return 64; }
+@const fn MAX_VALUE() -> i32 { return 65536; }
+
+// ---------------------------------------------------------------------------
+// Popcount (Hamming weight) for 64-bit integer
+// Uses the Kernighan/SWAR bit-counting algorithm
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn popcount64(x: i64) -> i32 {
+    // SWAR (SIMD Within A Register) popcount
+    // Uses magic constants for parallel bit summation
+    let m1: i64 = 0x5555555555555555;   // 0101...
+    let m2: i64 = 0x3333333333333333;   // 0011...
+    let m4: i64 = 0x0F0F0F0F0F0F0F0F;  // 00001111...
+    let h01: i64 = 0x0101010101010101;   // sum bytes
+
+    let v: i64 = x;
+    v = v -% band(lshr(v, 1), m1);
+    v = band(v, m2) +% band(lshr(v, 2), m2);
+    v = band(v +% lshr(v, 4), m4);
+    // Multiply by h01 and shift right 56 to sum all bytes
+    let result: i64 = lshr(v *% h01, 56);
+    return narrow(result);
+}
+
+// ===========================================================================
+// BITSET CONTAINER OPERATIONS
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Bitset: create zeroed 1024-word container
+// ---------------------------------------------------------------------------
+fn bitset_create() -> ptr[i64] {
+    return heap_alloc_zeroed(BITSET_WORDS(), 8);
+}
+
+// ---------------------------------------------------------------------------
+// Bitset: set bit at position k
+// ---------------------------------------------------------------------------
+@inline(always)
+fn bitset_set(bs: ptr[i64], k: i32) {
+    let word_idx: i32 = lshr(k, 6);   // k / 64
+    let bit_idx: i32 = band(k, 63);   // k % 64
+    let mask: i64 = shl(widen(1), widen(bit_idx));
+    let old: i64 = ptr_read_i64(bs, word_idx);
+    ptr_write_i64(bs, word_idx, bor(old, mask));
+}
+
+// ---------------------------------------------------------------------------
+// Bitset: test bit at position k (returns 0 or 1)
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn bitset_test(bs: ptr[i64], k: i32) -> i32 {
+    let word_idx: i32 = lshr(k, 6);
+    let bit_idx: i32 = band(k, 63);
+    let word: i64 = ptr_read_i64(bs, word_idx);
+    return narrow(band(lshr(word, widen(bit_idx)), widen(1)));
+}
+
+// ---------------------------------------------------------------------------
+// Bitset: cardinality (popcount all words)
+// ---------------------------------------------------------------------------
+@pure
+fn bitset_cardinality(bs: ptr[i64]) -> i32 {
+    let count: i32 = 0;
+    for i: i32 in range(0, BITSET_WORDS()) {
+        count = count + popcount64(ptr_read_i64(bs, i));
+    }
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Bitset OR (union): dst = a | b
+// ---------------------------------------------------------------------------
+fn bitset_union(a: ptr[i64], b: ptr[i64], dst: ptr[i64]) {
+    for i: i32 in range(0, BITSET_WORDS()) {
+        ptr_write_i64(dst, i, bor(ptr_read_i64(a, i), ptr_read_i64(b, i)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bitset AND (intersection): dst = a & b
+// ---------------------------------------------------------------------------
+fn bitset_intersection(a: ptr[i64], b: ptr[i64], dst: ptr[i64]) {
+    for i: i32 in range(0, BITSET_WORDS()) {
+        ptr_write_i64(dst, i, band(ptr_read_i64(a, i), ptr_read_i64(b, i)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bitset union cardinality (without materializing)
+// ---------------------------------------------------------------------------
+@pure
+fn bitset_union_count(a: ptr[i64], b: ptr[i64]) -> i32 {
+    let count: i32 = 0;
+    for i: i32 in range(0, BITSET_WORDS()) {
+        count = count + popcount64(bor(ptr_read_i64(a, i), ptr_read_i64(b, i)));
+    }
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Bitset intersection cardinality (without materializing)
+// ---------------------------------------------------------------------------
+@pure
+fn bitset_intersection_count(a: ptr[i64], b: ptr[i64]) -> i32 {
+    let count: i32 = 0;
+    for i: i32 in range(0, BITSET_WORDS()) {
+        count = count + popcount64(band(ptr_read_i64(a, i), ptr_read_i64(b, i)));
+    }
+    return count;
+}
+
+// ===========================================================================
+// ARRAY CONTAINER OPERATIONS
+// ===========================================================================
+
+// Container layout: first i32 = length, then sorted i32 values.
+// Total allocation: (capacity + 1) * 4 bytes.
+
+// ---------------------------------------------------------------------------
+// Array container: create with given capacity
+// ---------------------------------------------------------------------------
+fn array_create(capacity: i32) -> ptr[i32] {
+    let buf: ptr[i32] = heap_alloc(capacity + 1, 4);
+    ptr_write_i32(buf, 0, 0);  // length = 0
+    return buf;
+}
+
+// ---------------------------------------------------------------------------
+// Array container: get length
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn array_len(arr: ptr[i32]) -> i32 {
+    return ptr_read_i32(arr, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Array container: append value (caller ensures sorted order)
+// ---------------------------------------------------------------------------
+@inline(always)
+fn array_append(arr: ptr[i32], val: i32) {
+    let len: i32 = ptr_read_i32(arr, 0);
+    ptr_write_i32(arr, len + 1, val);
+    ptr_write_i32(arr, 0, len + 1);
+}
+
+// ---------------------------------------------------------------------------
+// Array container: get value at index
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn array_get(arr: ptr[i32], idx: i32) -> i32 {
+    return ptr_read_i32(arr, idx + 1);
+}
+
+// ---------------------------------------------------------------------------
+// Array OR (union): merge two sorted arrays, result in dst
+// Uses merge-join (linear scan of both arrays)
+// ---------------------------------------------------------------------------
+fn array_union(a: ptr[i32], b: ptr[i32], dst: ptr[i32]) {
+    let alen: i32 = array_len(a);
+    let blen: i32 = array_len(b);
+    let ai: i32 = 0;
+    let bi: i32 = 0;
+
+    while ai < alen {
+        if bi >= blen {
+            // Drain remaining from a
+            while ai < alen {
+                array_append(dst, array_get(a, ai));
+                ai = ai + 1;
+            }
+        } else {
+            let av: i32 = array_get(a, ai);
+            let bv: i32 = array_get(b, bi);
+            if av < bv {
+                array_append(dst, av);
+                ai = ai + 1;
+            } else {
+                if av > bv {
+                    array_append(dst, bv);
+                    bi = bi + 1;
+                } else {
+                    // Equal: emit once, advance both
+                    array_append(dst, av);
+                    ai = ai + 1;
+                    bi = bi + 1;
+                }
+            }
+        }
+    }
+    // Drain remaining from b
+    while bi < blen {
+        array_append(dst, array_get(b, bi));
+        bi = bi + 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Array AND (intersection): find common elements
+// ---------------------------------------------------------------------------
+fn array_intersection(a: ptr[i32], b: ptr[i32], dst: ptr[i32]) {
+    let alen: i32 = array_len(a);
+    let blen: i32 = array_len(b);
+    let ai: i32 = 0;
+    let bi: i32 = 0;
+
+    while ai < alen {
+        if bi >= blen {
+            return;
+        }
+        let av: i32 = array_get(a, ai);
+        let bv: i32 = array_get(b, bi);
+        if av < bv {
+            ai = ai + 1;
+        } else {
+            if av > bv {
+                bi = bi + 1;
+            } else {
+                array_append(dst, av);
+                ai = ai + 1;
+                bi = bi + 1;
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// VERIFICATION AND BENCHMARK
+// ===========================================================================
+
+fn main() -> i32 {
+    print("=== Roaring Bitmap (CRoaring Core) ===\n");
+
+    // --- Verification: Bitset container ---
+    print("-- Bitset container tests --\n");
+
+    let bs1: ptr[i64] = bitset_create();
+    let bs2: ptr[i64] = bitset_create();
+
+    // Set some bits in bs1: {0, 1, 2, 100, 1000, 10000, 50000}
+    bitset_set(bs1, 0);
+    bitset_set(bs1, 1);
+    bitset_set(bs1, 2);
+    bitset_set(bs1, 100);
+    bitset_set(bs1, 1000);
+    bitset_set(bs1, 10000);
+    bitset_set(bs1, 50000);
+
+    let card1: i32 = bitset_cardinality(bs1);
+    print("bs1 cardinality: ");
+    print_i32(card1);
+    print("\n");
+    if card1 == 7 {
+        print("PASS: bs1 cardinality\n");
+    } else {
+        print("FAIL: expected 7\n");
+    }
+
+    // Test individual bits
+    if bitset_test(bs1, 100) == 1 {
+        print("PASS: bit 100 is set\n");
+    } else {
+        print("FAIL: bit 100 should be set\n");
+    }
+    if bitset_test(bs1, 99) == 0 {
+        print("PASS: bit 99 is not set\n");
+    } else {
+        print("FAIL: bit 99 should not be set\n");
+    }
+
+    // Set bits in bs2: {1, 2, 3, 100, 2000, 10000, 60000}
+    bitset_set(bs2, 1);
+    bitset_set(bs2, 2);
+    bitset_set(bs2, 3);
+    bitset_set(bs2, 100);
+    bitset_set(bs2, 2000);
+    bitset_set(bs2, 10000);
+    bitset_set(bs2, 60000);
+
+    // Union
+    let bs_union: ptr[i64] = bitset_create();
+    bitset_union(bs1, bs2, bs_union);
+    let union_card: i32 = bitset_cardinality(bs_union);
+    print("Union cardinality: ");
+    print_i32(union_card);
+    print("\n");
+    // {0,1,2,3,100,1000,2000,10000,50000,60000} = 10
+    if union_card == 10 {
+        print("PASS: union cardinality\n");
+    } else {
+        print("FAIL: expected 10\n");
+    }
+
+    // Intersection
+    let bs_inter: ptr[i64] = bitset_create();
+    bitset_intersection(bs1, bs2, bs_inter);
+    let inter_card: i32 = bitset_cardinality(bs_inter);
+    print("Intersection cardinality: ");
+    print_i32(inter_card);
+    print("\n");
+    // {1, 2, 100, 10000} = 4
+    if inter_card == 4 {
+        print("PASS: intersection cardinality\n");
+    } else {
+        print("FAIL: expected 4\n");
+    }
+
+    // Lazy cardinality counts (no materialization)
+    let union_count: i32 = bitset_union_count(bs1, bs2);
+    let inter_count: i32 = bitset_intersection_count(bs1, bs2);
+    if union_count == 10 {
+        print("PASS: lazy union count\n");
+    } else {
+        print("FAIL: lazy union count\n");
+    }
+    if inter_count == 4 {
+        print("PASS: lazy intersection count\n");
+    } else {
+        print("FAIL: lazy intersection count\n");
+    }
+
+    heap_free(bs1);
+    heap_free(bs2);
+    heap_free(bs_union);
+    heap_free(bs_inter);
+
+    // --- Verification: Array container ---
+    print("-- Array container tests --\n");
+
+    let arr1: ptr[i32] = array_create(10);
+    let arr2: ptr[i32] = array_create(10);
+
+    // arr1 = {10, 20, 30, 40, 50}
+    array_append(arr1, 10);
+    array_append(arr1, 20);
+    array_append(arr1, 30);
+    array_append(arr1, 40);
+    array_append(arr1, 50);
+
+    // arr2 = {20, 30, 60, 70}
+    array_append(arr2, 20);
+    array_append(arr2, 30);
+    array_append(arr2, 60);
+    array_append(arr2, 70);
+
+    // Union
+    let arr_u: ptr[i32] = array_create(20);
+    array_union(arr1, arr2, arr_u);
+    let u_len: i32 = array_len(arr_u);
+    print("Array union length: ");
+    print_i32(u_len);
+    print("\n");
+    // {10, 20, 30, 40, 50, 60, 70} = 7
+    if u_len == 7 {
+        print("PASS: array union\n");
+    } else {
+        print("FAIL: expected 7\n");
+    }
+
+    // Intersection
+    let arr_i: ptr[i32] = array_create(10);
+    array_intersection(arr1, arr2, arr_i);
+    let i_len: i32 = array_len(arr_i);
+    print("Array intersection length: ");
+    print_i32(i_len);
+    print("\n");
+    // {20, 30} = 2
+    if i_len == 2 {
+        print("PASS: array intersection\n");
+    } else {
+        print("FAIL: expected 2\n");
+    }
+
+    heap_free(arr1);
+    heap_free(arr2);
+    heap_free(arr_u);
+    heap_free(arr_i);
+
+    // --- Benchmark: bitset operations on 10K-element bitmaps ---
+    print("-- Benchmark: bitset operations --\n");
+
+    let bench_bs1: ptr[i64] = bitset_create();
+    let bench_bs2: ptr[i64] = bitset_create();
+    let bench_dst: ptr[i64] = bitset_create();
+
+    // Populate with 10K elements each (every ~6th bit in range 0..65536)
+    for i: i32 in range(0, 10000) {
+        bitset_set(bench_bs1, band(i *% 7 +% 3, 65535));
+        bitset_set(bench_bs2, band(i *% 11 +% 5, 65535));
+    }
+
+    let card_a: i32 = bitset_cardinality(bench_bs1);
+    let card_b: i32 = bitset_cardinality(bench_bs2);
+    print("Bitmap A cardinality: ");
+    print_i32(card_a);
+    print("\n");
+    print("Bitmap B cardinality: ");
+    print_i32(card_b);
+    print("\n");
+
+    let bench_iters: i32 = 100000;
+    let checksum: i32 = 0;
+
+    // Benchmark: union
+    let t0: i64 = clock_ns();
+    for iter: i32 in range(0, bench_iters) {
+        bitset_union(bench_bs1, bench_bs2, bench_dst);
+        checksum = checksum +% bitset_test(bench_dst, 0);
+    }
+    let t1: i64 = clock_ns();
+    let union_ms: i64 = (t1 - t0) / 1000000;
+    print("Union: ");
+    print_i64(union_ms);
+    print(" ms for ");
+    print_i32(bench_iters);
+    print(" iterations\n");
+
+    // Benchmark: intersection
+    let t2: i64 = clock_ns();
+    for iter: i32 in range(0, bench_iters) {
+        bitset_intersection(bench_bs1, bench_bs2, bench_dst);
+        checksum = checksum +% bitset_test(bench_dst, 0);
+    }
+    let t3: i64 = clock_ns();
+    let inter_ms: i64 = (t3 - t2) / 1000000;
+    print("Intersection: ");
+    print_i64(inter_ms);
+    print(" ms for ");
+    print_i32(bench_iters);
+    print(" iterations\n");
+
+    // Benchmark: cardinality
+    let t4: i64 = clock_ns();
+    for iter: i32 in range(0, bench_iters) {
+        checksum = checksum +% bitset_cardinality(bench_bs1);
+    }
+    let t5: i64 = clock_ns();
+    let card_ms: i64 = (t5 - t4) / 1000000;
+    print("Cardinality: ");
+    print_i64(card_ms);
+    print(" ms for ");
+    print_i32(bench_iters);
+    print(" iterations\n");
+
+    // Benchmark: union cardinality (lazy)
+    let t6: i64 = clock_ns();
+    for iter: i32 in range(0, bench_iters) {
+        checksum = checksum +% bitset_union_count(bench_bs1, bench_bs2);
+    }
+    let t7: i64 = clock_ns();
+    let ucount_ms: i64 = (t7 - t6) / 1000000;
+    print("Union count (lazy): ");
+    print_i64(ucount_ms);
+    print(" ms for ");
+    print_i32(bench_iters);
+    print(" iterations\n");
+
+    // Throughput: each operation touches 1024 * 8 = 8192 bytes per container
+    if union_ms > 0 {
+        let ops_per_sec: i64 = (widen(bench_iters) * 1000) / union_ms;
+        let bytes_per_sec: i64 = ops_per_sec * 8192 * 2;  // 2 input containers
+        let mbps: i64 = bytes_per_sec / 1048576;
+        print("Union throughput: ");
+        print_i64(mbps);
+        print(" MB/s\n");
+    }
+
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    heap_free(bench_bs1);
+    heap_free(bench_bs2);
+    heap_free(bench_dst);
+
+    print("=== Roaring complete ===\n");
+    return 0;
+}
