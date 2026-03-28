@@ -144,7 +144,7 @@ fn write_be32(buf: ptr[i64], offset: i32, val: i32) {
 @precondition(offset >= 0)
 @postcondition(true)
 @pure @inline(always)
-fn read_be32(buf: ptr[i64], offset: i32) -> i32 {
+fn read_be32(buf: readonly_ptr[i64], offset: i32) -> i32 {
     let b0: i32 = ptr_read_u8(buf, offset);
     let b1: i32 = ptr_read_u8(buf, offset + 1);
     let b2: i32 = ptr_read_u8(buf, offset + 2);
@@ -161,7 +161,7 @@ fn read_be32(buf: ptr[i64], offset: i32) -> i32 {
 @intent("encode raw RGBA pixels into QOI compressed format")
 @precondition(w > 0 and h > 0)
 @postcondition(true)
-fn qoi_encode(pixels: ptr[i64], w: i32, h: i32, out: ptr[i64]) -> i32 {
+fn qoi_encode(pixels: readonly_ptr[i64], w: i32, h: i32, out: ptr[i64]) -> i32 {
     let total_pixels: i32 = w * h;
 
     // Write QOI header (14 bytes)
@@ -289,7 +289,7 @@ fn qoi_encode(pixels: ptr[i64], w: i32, h: i32, out: ptr[i64]) -> i32 {
 @intent("decode QOI compressed data into raw RGBA pixels")
 @precondition(data_len > 0)
 @postcondition(true)
-fn qoi_decode(data: ptr[i64], data_len: i32, out_pixels: ptr[i64]) -> i32 {
+fn qoi_decode(data: readonly_ptr[i64], data_len: i32, out_pixels: ptr[i64]) -> i32 {
     // Read and validate header
     let magic: i32 = read_be32(data, 0);
     if magic != QOI_MAGIC() {
@@ -405,7 +405,7 @@ fn generate_test_image(pixels: ptr[i64], w: i32, h: i32) {
 @intent("compare original and decoded pixel buffers, return error count")
 @precondition(total_pixels > 0)
 @postcondition(true)
-fn verify_roundtrip(original: ptr[i64], decoded: ptr[i64], total_pixels: i32) -> i32 {
+fn verify_roundtrip(original: readonly_ptr[i64], decoded: readonly_ptr[i64], total_pixels: i32) -> i32 {
     let errors: i32 = 0;
     for i: i32 in range(0, total_pixels * 4) {
         let orig_byte: i32 = ptr_read_u8(original, i);

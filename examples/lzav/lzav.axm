@@ -192,7 +192,7 @@ fn match_length(src: ptr[i32], pos1: i32, pos2: i32, max_len: i32) -> i32 {
 @precondition(src_len >= 0 and dst_max > 0)
 @postcondition(true)
 @inline(always)
-fn lzav_compress(src: ptr[i32], src_len: i32,
+fn lzav_compress(src: readonly_ptr[i32], src_len: i32,
                  dst: ptr[i32], dst_max: i32) -> i32 {
     if src_len < 1 {
         return 0;
@@ -373,7 +373,7 @@ fn lzav_compress(src: ptr[i32], src_len: i32,
 @precondition(src_len > 0 and dst_max > 0)
 @postcondition(true)
 @inline(always)
-fn lzav_decompress(src: ptr[i32], src_len: i32,
+fn lzav_decompress(src: readonly_ptr[i32], src_len: i32,
                    dst: ptr[i32], dst_max: i32) -> i32 {
     let src_pos: i32 = 0;
     let dst_pos: i32 = 0;

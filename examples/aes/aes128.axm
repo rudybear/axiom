@@ -152,7 +152,7 @@ fn gmul(a: i32, b: i32) -> i32 {
 @intent("expand 16-byte AES key into 176-byte round key schedule")
 @precondition(true)
 @postcondition(true)
-fn key_expansion(key: ptr[i32], round_key: ptr[i32], sbox: ptr[i32], rcon: ptr[i32]) {
+fn key_expansion(key: readonly_ptr[i32], round_key: ptr[i32], sbox: readonly_ptr[i32], rcon: readonly_ptr[i32]) {
     // First round key is the key itself (16 bytes = NK*4)
     memcpy(round_key, key, 16);
 
@@ -199,7 +199,7 @@ fn key_expansion(key: ptr[i32], round_key: ptr[i32], sbox: ptr[i32], rcon: ptr[i
 @precondition(round >= 0 and round <= 10)
 @postcondition(true)
 @inline(always)
-fn add_round_key(round: i32, state: ptr[i32], round_key: ptr[i32]) {
+fn add_round_key(round: i32, state: ptr[i32], round_key: readonly_ptr[i32]) {
     // AES state is column-major: state[row][col]
     // round_key layout: 4 bytes per word, 4 words per round key
     for col: i32 in range(0, 4) {
@@ -220,7 +220,7 @@ fn add_round_key(round: i32, state: ptr[i32], round_key: ptr[i32]) {
 @precondition(true)
 @postcondition(true)
 @inline(always)
-fn sub_bytes(state: ptr[i32], sbox: ptr[i32]) {
+fn sub_bytes(state: ptr[i32], sbox: readonly_ptr[i32]) {
     for i: i32 in range(0, 16) {
         ptr_write_u8(state, i, ptr_read_u8(sbox, ptr_read_u8(state, i)));
     }
@@ -233,7 +233,7 @@ fn sub_bytes(state: ptr[i32], sbox: ptr[i32]) {
 @precondition(true)
 @postcondition(true)
 @inline(always)
-fn inv_sub_bytes(state: ptr[i32], rsbox: ptr[i32]) {
+fn inv_sub_bytes(state: ptr[i32], rsbox: readonly_ptr[i32]) {
     for i: i32 in range(0, 16) {
         ptr_write_u8(state, i, ptr_read_u8(rsbox, ptr_read_u8(state, i)));
     }
@@ -366,7 +366,7 @@ fn inv_mix_columns(state: ptr[i32]) {
 @precondition(true)
 @postcondition(true)
 @inline(always)
-fn aes_encrypt_block(state: ptr[i32], round_key: ptr[i32], sbox: ptr[i32]) {
+fn aes_encrypt_block(state: ptr[i32], round_key: readonly_ptr[i32], sbox: readonly_ptr[i32]) {
     // Initial round key addition
     add_round_key(0, state, round_key);
 
@@ -391,7 +391,7 @@ fn aes_encrypt_block(state: ptr[i32], round_key: ptr[i32], sbox: ptr[i32]) {
 @precondition(true)
 @postcondition(true)
 @inline(always)
-fn aes_decrypt_block(state: ptr[i32], round_key: ptr[i32], rsbox: ptr[i32]) {
+fn aes_decrypt_block(state: ptr[i32], round_key: readonly_ptr[i32], rsbox: readonly_ptr[i32]) {
     // Initial round key addition (last round key)
     add_round_key(NR(), state, round_key);
 
@@ -419,7 +419,7 @@ fn aes_decrypt_block(state: ptr[i32], round_key: ptr[i32], rsbox: ptr[i32]) {
 @precondition(true)
 @postcondition(true)
 @inline(always)
-fn load_state(state: ptr[i32], input: ptr[i32]) {
+fn load_state(state: ptr[i32], input: readonly_ptr[i32]) {
     for col: i32 in range(0, 4) {
         for row: i32 in range(0, 4) {
             ptr_write_u8(state, row * 4 + col, ptr_read_u8(input, col * 4 + row));

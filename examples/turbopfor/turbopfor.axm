@@ -69,7 +69,7 @@ fn bit_width(val: i32) -> i32 {
 @precondition(n > 0)
 @postcondition(true)
 @inline(always)
-fn bitpack_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
+fn bitpack_encode(input: readonly_ptr[i32], n: i32, output: ptr[i32]) -> i32 {
     let max_val: i32 = find_max_value(input, n);
     let bits: i32 = bit_width(max_val);
 
@@ -116,7 +116,7 @@ fn bitpack_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
 @precondition(n > 0 and bits > 0)
 @postcondition(true)
 @inline(always)
-fn bitpack_decode(input: ptr[i32], start: i32, n: i32, bits: i32, output: ptr[i32]) {
+fn bitpack_decode(input: readonly_ptr[i32], start: i32, n: i32, bits: i32, output: ptr[i32]) {
     let in_pos: i32 = start;
     let bit_buf: i32 = 0;
     let bit_count: i32 = 0;
@@ -150,7 +150,7 @@ fn bitpack_decode(input: ptr[i32], start: i32, n: i32, bits: i32, output: ptr[i3
 @precondition(n >= 1)
 @postcondition(true)
 @inline(always)
-fn delta_encode(input: ptr[i32], n: i32, output: ptr[i32]) {
+fn delta_encode(input: readonly_ptr[i32], n: i32, output: ptr[i32]) {
     if n < 1 {
         return;
     }
@@ -169,7 +169,7 @@ fn delta_encode(input: ptr[i32], n: i32, output: ptr[i32]) {
 @precondition(n >= 1)
 @postcondition(true)
 @inline(always)
-fn delta_decode(input: ptr[i32], n: i32, output: ptr[i32]) {
+fn delta_decode(input: readonly_ptr[i32], n: i32, output: ptr[i32]) {
     if n < 1 {
         return;
     }
@@ -191,7 +191,7 @@ fn delta_decode(input: ptr[i32], n: i32, output: ptr[i32]) {
 @precondition(n > 0)
 @postcondition(true)
 @inline(always)
-fn vbyte_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
+fn vbyte_encode(input: readonly_ptr[i32], n: i32, output: ptr[i32]) -> i32 {
     let out_pos: i32 = 0;
     for i: i32 in range(0, n) {
         let val: i32 = ptr_read_i32(input, i);
@@ -229,7 +229,7 @@ fn vbyte_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
 @precondition(n > 0)
 @postcondition(true)
 @inline(always)
-fn vbyte_decode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
+fn vbyte_decode(input: readonly_ptr[i32], n: i32, output: ptr[i32]) -> i32 {
     let in_pos: i32 = 0;
     for i: i32 in range(0, n) {
         let val: i32 = 0;
@@ -257,7 +257,7 @@ fn vbyte_decode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
 @precondition(n > 0)
 @postcondition(true)
 @inline(always)
-fn delta_bitpack_encode(input: ptr[i32], n: i32,
+fn delta_bitpack_encode(input: readonly_ptr[i32], n: i32,
                         delta_buf: ptr[i32],
                         output: ptr[i32]) -> i32 {
     delta_encode(input, n, delta_buf);
@@ -272,7 +272,7 @@ fn delta_bitpack_encode(input: ptr[i32], n: i32,
 @precondition(n > 0)
 @postcondition(true)
 @inline(always)
-fn delta_bitpack_decode(input: ptr[i32], n: i32,
+fn delta_bitpack_decode(input: readonly_ptr[i32], n: i32,
                         delta_buf: ptr[i32],
                         output: ptr[i32]) {
     // Read bit width from header
