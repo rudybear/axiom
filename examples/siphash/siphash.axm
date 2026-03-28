@@ -10,21 +10,14 @@
 //
 // Translation notes:
 // - All 64-bit additions use +% (wrapping arithmetic)
-// - rotl/rotr builtins are i32-only, so we implement rotl64 manually
+// - rotl64/rotr64 builtins use @llvm.fshl.i64/@llvm.fshr.i64 intrinsics
 // - XOR via bxor(), shifts via shl()/lshr()
 // - Little-endian byte reads via ptr_read_u8 + shift + OR
 //
-// GAP: rotl() builtin is i32-only; need manual i64 rotate
 // GAP: No u64 type; using i64 (bit patterns are the same for XOR/shift/rotate)
 // =============================================================================
 
-// ---------------------------------------------------------------------------
-// 64-bit rotate left: (x << b) | (x >>> (64 - b))
-// ---------------------------------------------------------------------------
-@pure @inline(always)
-fn rotl64(x: i64, b: i64) -> i64 {
-    return bor(shl(x, b), lshr(x, 64 -% b));
-}
+// rotl64(x, b) is now a builtin using @llvm.fshl.i64 (no manual implementation needed)
 
 // ---------------------------------------------------------------------------
 // Read 8 bytes from ptr as little-endian u64 (stored in i64)

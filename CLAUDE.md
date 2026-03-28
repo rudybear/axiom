@@ -151,7 +151,7 @@ let broadcast: vec3 = v.xxx;        // Broadcast single component
 @optimization_log { ... }      // Optimization history
 ```
 
-### All Builtin Functions (~160 total)
+### All Builtin Functions (~162 total)
 
 #### I/O (4)
 ```
@@ -208,10 +208,11 @@ widen(narrow->wide) narrow(wide->narrow) truncate(float->int)
 f32_to_f64(x) f64_to_f32(x)
 ```
 
-#### Bitwise (9)
+#### Bitwise (11)
 ```
 band(a,b) bor(a,b) bxor(a,b) bnot(a)
 shl(a,n) shr(a,n) lshr(a,n) rotl(a,n) rotr(a,n)
+rotl64(a,n) rotr64(a,n)
 ```
 
 #### Memory -- Heap (10)
@@ -344,6 +345,8 @@ extern fn clock() -> i64;
 | SIMD width metadata | Preferred vector width hints | `@vectorizable` + target detection |
 | DWARF debug info | Source-level debugging with gdb/lldb | `@export` functions, debug builds |
 | `alwaysinline` | Force-inline hot functions, eliminate call overhead | `@inline(always)` annotation |
+| Global const propagation | Direct GEP into .rodata, no pointer load | `array_const_*` + `const_returning_fns` |
+| `@llvm.fshl.i64` / `@llvm.fshr.i64` | Hardware rotate instructions (single cycle) | `rotl64()` / `rotr64()` builtins |
 | SIMD vector instructions | `fadd`/`fmul`/`fsub`/`fdiv` on `<N x double>`, `shufflevector`, `extractelement` | `vec2`/`vec3`/`vec4` types |
 
 ---

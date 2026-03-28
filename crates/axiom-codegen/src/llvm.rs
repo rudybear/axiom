@@ -234,6 +234,22 @@ struct CodegenContext {
     const_array_count: usize,
     /// Collected global constant array declarations (emitted before function bodies).
     const_arrays: Vec<String>,
+    /// Variables that hold pointers to global constants (e.g., from array_const_i32).
+    /// Key: variable name, Value: global constant name (e.g., "@.const.arr.0").
+    /// When a variable is in this map, `emit_ident` returns the global directly
+    /// instead of loading from an alloca, eliminating an unnecessary pointer load
+    /// that prevents LLVM from optimizing constant table lookups.
+    const_ptr_vars: HashMap<String, String>,
+    /// Functions whose body is a single `return array_const_*(...)` and thus always
+    /// return a known global constant pointer. When we see a call to one of these
+    /// functions, we can substitute the global constant directly, avoiding the
+    /// function call overhead and enabling LLVM to see the constant address.
+    /// Key: function name, Value: global constant name (e.g., "@.const.arr.0").
+    const_returning_fns: HashMap<String, String>,
+    /// Whether the `@llvm.fshl.i64` intrinsic is needed (64-bit rotate left).
+    needs_fshl_i64: bool,
+    /// Whether the `@llvm.fshr.i64` intrinsic is needed (64-bit rotate right).
+    needs_fshr_i64: bool,
 }
 
 /// Ownership kind for pointer parameters, used for access validation.
@@ -308,6 +324,10 @@ impl CodegenContext {
             needs_trace: false,
             const_array_count: 0,
             const_arrays: Vec::new(),
+            const_ptr_vars: HashMap::new(),
+            const_returning_fns: HashMap::new(),
+            needs_fshl_i64: false,
+            needs_fshr_i64: false,
         }
     }
 
@@ -390,6 +410,97 @@ pub fn codegen_with_options(
 pub fn codegen(module: &HirModule) -> Result<String, Vec<CodegenError>> {
     let mut ctx = CodegenContext::new();
     codegen_inner(&mut ctx, module)
+}
+
+/// Pre-scan functions to identify those that return a global constant pointer.
+///
+/// A function qualifies if its body is a single `return array_const_*(...)` statement.
+/// For these functions, we pre-allocate the global constant and record the mapping
+/// so that call sites can substitute the global address directly, avoiding:
+/// 1. The function call overhead
+/// 2. The alloca+store+load pattern that prevents LLVM from seeing the constant address
+///
+/// This is critical for AES S-box lookups where the extra indirection causes a 3.7x slowdown.
+fn pre_scan_const_returning_fns(ctx: &mut CodegenContext, functions: &[HirFunction]) {
+    for func in functions {
+        // Only consider parameterless functions that return a pointer type.
+        if !func.params.is_empty() {
+            continue;
+        }
+        if !matches!(func.return_type, HirType::Ptr { .. }) {
+            continue;
+        }
+
+        // Check if the body is a single statement: `return array_const_*(...)`.
+        if func.body.stmts.len() != 1 {
+            continue;
+        }
+        let stmt = &func.body.stmts[0];
+        if let HirStmtKind::Return { value: Some(ref ret_expr) } = stmt.kind {
+            if let HirExprKind::Call { func: ref callee, ref args } = ret_expr.kind {
+                if let HirExprKind::Ident { ref name } = callee.kind {
+                    let elem_type = match name.as_str() {
+                        "array_const_i32" => "i32",
+                        "array_const_u8" => "i8",
+                        "array_const_f64" => "double",
+                        _ => continue,
+                    };
+
+                    // Pre-emit the global constant array.
+                    let mut values = Vec::with_capacity(args.len());
+                    let mut all_literals = true;
+                    for arg in args {
+                        match &arg.kind {
+                            HirExprKind::IntLiteral { value } => {
+                                values.push(format!("{elem_type} {value}"));
+                            }
+                            HirExprKind::FloatLiteral { value } => {
+                                values.push(format!("{elem_type} {value:e}"));
+                            }
+                            HirExprKind::UnaryOp {
+                                op: UnaryOp::Neg,
+                                operand,
+                            } => match &operand.kind {
+                                HirExprKind::IntLiteral { value } => {
+                                    values.push(format!("{elem_type} -{value}"));
+                                }
+                                HirExprKind::FloatLiteral { value } => {
+                                    values.push(format!("{elem_type} -{value:e}"));
+                                }
+                                _ => {
+                                    all_literals = false;
+                                    break;
+                                }
+                            },
+                            _ => {
+                                all_literals = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if !all_literals || values.is_empty() {
+                        continue;
+                    }
+
+                    let n = values.len();
+                    let arr_id = ctx.const_array_count;
+                    ctx.const_array_count += 1;
+
+                    let global_name = format!("@.const.arr.{arr_id}");
+                    let array_type = format!("[{n} x {elem_type}]");
+                    let initializer = values.join(", ");
+
+                    ctx.const_arrays.push(format!(
+                        "{global_name} = private unnamed_addr constant {array_type} [{initializer}]"
+                    ));
+
+                    ctx.const_returning_fns
+                        .insert(func.name.clone(), global_name);
+                }
+            }
+        }
+    }
 }
 
 /// Inner codegen implementation shared by `codegen` and `codegen_with_options`.
@@ -480,6 +591,14 @@ fn codegen_inner(
                 .insert(func.name.clone(), func.clone());
         }
     }
+
+    // Pre-scan pass: identify functions whose body is a single
+    // `return array_const_*(...)` statement. These functions always return a
+    // known global constant pointer, so calls to them can be replaced with the
+    // global address directly. This is critical for AES S-box performance:
+    // without it, the pointer goes through alloca+store+load, which prevents
+    // LLVM from seeing that it points to a constant table in .rodata.
+    pre_scan_const_returning_fns(ctx, &module.functions);
 
     // First pass: emit all functions to a buffer (so we know what globals are needed).
     let mut func_output = String::with_capacity(4096);
@@ -618,6 +737,18 @@ fn codegen_inner(
         let _ = writeln!(
             ctx.output,
             "declare i32 @llvm.fshr.i32(i32, i32, i32)"
+        );
+    }
+    if ctx.needs_fshl_i64 {
+        let _ = writeln!(
+            ctx.output,
+            "declare i64 @llvm.fshl.i64(i64, i64, i64)"
+        );
+    }
+    if ctx.needs_fshr_i64 {
+        let _ = writeln!(
+            ctx.output,
+            "declare i64 @llvm.fshr.i64(i64, i64, i64)"
         );
     }
     // Emit allocator function declarations with LLVM allocator attributes.
@@ -1824,6 +1955,25 @@ fn emit_let(
 
     if let Some(value) = value {
         let val = emit_expr(ctx, value, Some(&llvm_type));
+
+        // Optimization: if the value is a global constant pointer (from array_const_*),
+        // skip the alloca+store entirely and track the variable as a direct reference
+        // to the global. This eliminates a pointer load at every use site, allowing
+        // LLVM to see that the pointer is a known constant address and optimize
+        // table lookups (e.g., AES S-box) as direct GEPs into .rodata.
+        if val.reg.starts_with("@.const.arr.") {
+            ctx.const_ptr_vars.insert(name.to_string(), val.reg.clone());
+            ctx.variables.insert(
+                name.to_string(),
+                VarInfo {
+                    alloca_name: val.reg,
+                    llvm_type,
+                    array_info: None,
+                },
+            );
+            return;
+        }
+
         ctx.emit(&format!(
             "store {llvm_type} {}, ptr {alloca_name}{align_suffix}",
             val.reg
@@ -1854,6 +2004,39 @@ fn emit_let(
 /// Emit an assignment: store to existing alloca or array index.
 fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
     if let HirExprKind::Ident { name } = &target.kind {
+        // If the variable was a const_ptr (from array_const_*), reassignment
+        // invalidates the optimization. Emit an alloca now and demote it.
+        if ctx.const_ptr_vars.contains_key(name.as_str()) {
+            ctx.const_ptr_vars.remove(name.as_str());
+            let var_info = ctx.variables.get(name).cloned();
+            if let Some(vi) = var_info {
+                let uid = ctx.next_reg;
+                ctx.next_reg += 1;
+                let alloca_name = format!("%{name}.{uid}");
+                ctx.emit(&format!("{alloca_name} = alloca {}", vi.llvm_type));
+                // Store the old global value into the new alloca.
+                ctx.emit(&format!(
+                    "store {} {}, ptr {alloca_name}",
+                    vi.llvm_type, vi.alloca_name
+                ));
+                ctx.variables.insert(
+                    name.to_string(),
+                    VarInfo {
+                        alloca_name: alloca_name.clone(),
+                        llvm_type: vi.llvm_type.clone(),
+                        array_info: None,
+                    },
+                );
+                // Now fall through to the normal assignment path.
+                let val = emit_expr(ctx, value, Some(&vi.llvm_type));
+                ctx.emit(&format!(
+                    "store {} {}, ptr {alloca_name}",
+                    vi.llvm_type, val.reg
+                ));
+                return;
+            }
+        }
+
         let var_info = match ctx.variables.get(name) {
             Some(v) => v.clone(),
             None => {
@@ -2724,6 +2907,17 @@ fn emit_expr(ctx: &mut CodegenContext, expr: &HirExpr, expected_type: Option<&st
 
 /// Emit a variable reference (load from alloca).
 fn emit_ident(ctx: &mut CodegenContext, name: &str) -> LlvmValue {
+    // Fast path: if this variable holds a global constant pointer (from array_const_*),
+    // return the global name directly without any load. This allows LLVM to see
+    // that the pointer is a compile-time constant address and optimize GEP+load
+    // into direct constant table lookups (critical for AES S-box performance).
+    if let Some(global_name) = ctx.const_ptr_vars.get(name) {
+        return LlvmValue {
+            reg: global_name.clone(),
+            ty: "ptr".to_string(),
+        };
+    }
+
     let var_info = match ctx.variables.get(name) {
         Some(v) => v.clone(),
         None => {
@@ -3799,6 +3993,8 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "bnot" => return emit_builtin_bnot(ctx, args),
             "rotl" => return emit_builtin_rotl(ctx, args),
             "rotr" => return emit_builtin_rotr(ctx, args),
+            "rotl64" => return emit_builtin_rotl64(ctx, args),
+            "rotr64" => return emit_builtin_rotr64(ctx, args),
             "heap_alloc" => return emit_builtin_heap_alloc(ctx, args),
             "heap_alloc_zeroed" => return emit_builtin_heap_alloc_zeroed(ctx, args),
             "heap_free" => return emit_builtin_heap_free(ctx, args),
@@ -3955,6 +4151,17 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "array_const_u8" => return emit_builtin_array_const(ctx, args, "i8"),
             "array_const_f64" => return emit_builtin_array_const(ctx, args, "double"),
             _ => {}
+        }
+
+        // Optimization: if the function always returns a global constant pointer
+        // (e.g., get_sbox() -> @.const.arr.0), substitute the global directly.
+        // This avoids a function call and, critically, allows the caller to see
+        // the pointer is a known constant address (enabling direct GEP into .rodata).
+        if let Some(global_name) = ctx.const_returning_fns.get(name.as_str()).cloned() {
+            return LlvmValue {
+                reg: global_name,
+                ty: "ptr".to_string(),
+            };
         }
 
         // Regular function call.
@@ -4891,6 +5098,62 @@ fn emit_builtin_rotr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
     LlvmValue {
         reg: result_reg,
         ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `rotl64(a, n)` -- 64-bit rotate left using `@llvm.fshl.i64`.
+fn emit_builtin_rotl64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_fshl_i64 = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "rotl64() requires exactly 2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i64".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], Some("i64"));
+    let n = emit_expr(ctx, &args[1], Some("i64"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i64 @llvm.fshl.i64(i64 {}, i64 {}, i64 {})",
+        a.reg, a.reg, n.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i64".to_string(),
+    }
+}
+
+/// Emit built-in `rotr64(a, n)` -- 64-bit rotate right using `@llvm.fshr.i64`.
+fn emit_builtin_rotr64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_fshr_i64 = true;
+
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "rotr64() requires exactly 2 arguments".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i64".to_string(),
+        };
+    }
+
+    let a = emit_expr(ctx, &args[0], Some("i64"));
+    let n = emit_expr(ctx, &args[1], Some("i64"));
+    let result_reg = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result_reg} = call i64 @llvm.fshr.i64(i64 {}, i64 {}, i64 {})",
+        a.reg, a.reg, n.reg
+    ));
+    LlvmValue {
+        reg: result_reg,
+        ty: "i64".to_string(),
     }
 }
 
@@ -10113,6 +10376,16 @@ fn emit_builtin_array_const(
                 };
             }
         }
+    }
+
+    // Check if the current function was pre-scanned and already has a global constant
+    // allocated. If so, reuse it instead of emitting a duplicate.
+    let func_name = &ctx.current_func_name_for_trace;
+    if let Some(pre_scanned_global) = ctx.const_returning_fns.get(func_name).cloned() {
+        return LlvmValue {
+            reg: pre_scanned_global,
+            ty: "ptr".to_string(),
+        };
     }
 
     let n = values.len();
