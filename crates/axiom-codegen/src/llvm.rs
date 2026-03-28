@@ -1118,6 +1118,11 @@ fn codegen_inner(
             "declare i32 @axiom_job_dispatch_after(ptr, ptr, i32, i32)"
         );
         let _ = writeln!(ctx.output, "declare void @axiom_job_wait_handle(i32)");
+        // parallel_for runtime helper
+        let _ = writeln!(
+            ctx.output,
+            "declare void @axiom_parallel_for(ptr, i32, i32, ptr)"
+        );
     }
 
     // Renderer/GPU/Input/Audio declarations removed — now handled via extern "C" fn + @link.
@@ -1254,6 +1259,7 @@ pub fn needs_runtime(ir: &str) -> bool {
         || ir.contains("@axiom_job_dispatch_handle")
         || ir.contains("@axiom_job_dispatch_after")
         || ir.contains("@axiom_job_wait_handle")
+        || ir.contains("@axiom_parallel_for")
         // Renderer/GPU/Input/Audio checks removed — now via extern "C" fn + @link
         // Vec builtins
         || ir.contains("@axiom_vec_new")
@@ -1528,11 +1534,16 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
         }
     }
 
+    // Resolve the return type.  On failure push the error but continue with a
+    // dummy type so that codegen keeps running and can collect additional errors
+    // from the function body (e.g. unknown types in let-bindings, undefined
+    // variables, …).  The dummy IR produced here is never used because
+    // codegen_inner returns Err when ctx.errors is non-empty.
     let ret_type = match hir_type_to_llvm(&func.return_type) {
         Ok(t) => t,
         Err(e) => {
             ctx.errors.push(e);
-            return;
+            "i32".to_string()
         }
     };
 
@@ -2877,11 +2888,13 @@ fn emit_for(
     body: &HirBlock,
     annotations: &[HirAnnotation],
 ) {
+    // Resolve loop variable type.  On failure use a dummy type so the loop body
+    // is still processed and any further errors inside it are collected.
     let loop_type = match hir_type_to_llvm(var_type) {
         Ok(t) => t,
         Err(e) => {
             ctx.errors.push(e);
-            return;
+            "i32".to_string()
         }
     };
 
@@ -4503,6 +4516,7 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "job_dispatch_handle" => return emit_builtin_job_dispatch_handle(ctx, args),
             "job_dispatch_after" => return emit_builtin_job_dispatch_after(ctx, args),
             "job_wait_handle" => return emit_builtin_job_wait_handle(ctx, args),
+            "parallel_range" => return emit_builtin_parallel_range(ctx, args),
             // GPU/Renderer/Audio/Input builtins removed — use extern "C" fn + @link instead.
             // Option (sum type) builtins -- tagged union packed into i64
             "option_none" => return emit_builtin_option_none(ctx, args),
@@ -6899,6 +6913,61 @@ fn emit_builtin_num_cores(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVal
     LlvmValue {
         reg: result_reg,
         ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `parallel_range(func, start, end, arg)`.
+///
+/// Dispatches a ranged parallel function across all worker threads using the
+/// job system.  `func` must have signature `fn(arg: ptr[T], start: i32, end: i32)`.
+/// The call blocks until all chunks have completed (fence acquire on return).
+///
+/// Example:
+/// ```axiom
+/// fn fill_chunk(data: ptr[f64], start: i32, end: i32) {
+///     for i: i32 in range(start, end) {
+///         ptr_write_f64(data, i, to_f64(i) * 2.0);
+///     }
+/// }
+/// jobs_init(0);
+/// parallel_range(fill_chunk, 0, 1000, data);
+/// jobs_shutdown();
+/// ```
+fn emit_builtin_parallel_range(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_runtime = true;
+    ctx.needs_threading = true;
+
+    if args.len() != 4 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "parallel_range() requires exactly 4 arguments (func, start, end, arg)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        };
+    }
+
+    let func_val = emit_expr(ctx, &args[0], Some("ptr"));
+    let start_val = emit_expr(ctx, &args[1], Some("i32"));
+    let end_val = emit_expr(ctx, &args[2], Some("i32"));
+    let arg_val = emit_expr(ctx, &args[3], Some("ptr"));
+
+    // Release fence: ensure caller's writes are visible to worker threads.
+    ctx.emit("fence release");
+    ctx.emit(&format!(
+        "call void @axiom_parallel_for(ptr {func}, i32 {start}, i32 {end}, ptr {arg})",
+        func = func_val.reg,
+        start = start_val.reg,
+        end = end_val.reg,
+        arg = arg_val.reg,
+    ));
+    // Acquire fence: ensure worker threads' writes are visible to caller.
+    ctx.emit("fence acquire");
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "void".to_string(),
     }
 }
 

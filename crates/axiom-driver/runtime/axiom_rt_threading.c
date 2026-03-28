@@ -4,7 +4,8 @@
  * Provides: axiom_thread_create, axiom_thread_join, axiom_atomic_*,
  *           axiom_mutex_*, axiom_jobs_init, axiom_job_dispatch, axiom_job_wait,
  *           axiom_jobs_shutdown, axiom_num_cores, axiom_job_dispatch_handle,
- *           axiom_job_dispatch_after, axiom_job_wait_handle
+ *           axiom_job_dispatch_after, axiom_job_wait_handle,
+ *           axiom_parallel_for
  *
  * Included by axiom_rt.c -- do not compile separately.
  */
@@ -246,6 +247,59 @@ int axiom_num_cores(void) {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
     return (int)si.dwNumberOfProcessors;
+}
+
+/* ── parallel_for: dispatch a ranged function across all worker threads ── */
+
+/*
+ * axiom_parallel_for(fn, start, end, arg)
+ *
+ * Splits the integer range [start, end) into one chunk per worker thread and
+ * dispatches each chunk to the job pool.  The function `fn` is called as
+ *
+ *     fn(arg, chunk_start, chunk_end)
+ *
+ * where chunk_start and chunk_end are absolute indices in [start, end).
+ * The call blocks until all chunks have finished.
+ *
+ * Requires: axiom_jobs_init() must have been called before axiom_parallel_for.
+ */
+
+/* Wrapper struct so we can pass an absolute offset to the workers. */
+#define AXIOM_PFOR_MAX_SLOTS 64
+typedef struct {
+    AxiomJobFunc fn;
+    void        *arg;
+    int          offset; /* added to the raw chunk indices */
+} AxiomPForSlot;
+static AxiomPForSlot axiom_pfor_slots[AXIOM_PFOR_MAX_SLOTS];
+static volatile LONG axiom_pfor_next_slot = 0;
+
+static void axiom_pfor_wrapper(void *slot_ptr, int raw_start, int raw_end) {
+    AxiomPForSlot *s = (AxiomPForSlot *)slot_ptr;
+    s->fn(s->arg, raw_start + s->offset, raw_end + s->offset);
+}
+
+void axiom_parallel_for(AxiomJobFunc fn, int start, int end, void *arg) {
+    int total = end - start;
+    LONG slot;
+    if (total <= 0) return;
+    /* Fallback to sequential when the pool has not been initialised. */
+    if (axiom_num_workers <= 0) {
+        fn(arg, start, end);
+        return;
+    }
+    slot = InterlockedIncrement(&axiom_pfor_next_slot) - 1;
+    slot = slot % AXIOM_PFOR_MAX_SLOTS;
+    axiom_pfor_slots[slot].fn     = fn;
+    axiom_pfor_slots[slot].arg    = arg;
+    axiom_pfor_slots[slot].offset = start;
+    /* Release fence: ensure writes above are visible to workers. */
+    MemoryBarrier();
+    axiom_job_dispatch(axiom_pfor_wrapper, &axiom_pfor_slots[slot], total);
+    axiom_job_wait();
+    /* Acquire fence: ensure worker writes are visible to caller. */
+    MemoryBarrier();
 }
 
 /* ── Job handles & dependency graph ────────────────────────────────── */
@@ -568,6 +622,41 @@ void axiom_jobs_shutdown(void) {
 int axiom_num_cores(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int)n : 1;
+}
+
+/* ── parallel_for (POSIX) ────────────────────────────────────────── */
+
+#define AXIOM_PFOR_MAX_SLOTS 64
+typedef struct {
+    AxiomJobFunc fn;
+    void        *arg;
+    int          offset;
+} AxiomPForSlot;
+static AxiomPForSlot axiom_pfor_slots[AXIOM_PFOR_MAX_SLOTS];
+static volatile int  axiom_pfor_next_slot = 0;
+
+static void axiom_pfor_wrapper(void *slot_ptr, int raw_start, int raw_end) {
+    AxiomPForSlot *s = (AxiomPForSlot *)slot_ptr;
+    s->fn(s->arg, raw_start + s->offset, raw_end + s->offset);
+}
+
+void axiom_parallel_for(AxiomJobFunc fn, int start, int end, void *arg) {
+    int total = end - start;
+    int slot;
+    if (total <= 0) return;
+    if (axiom_num_workers <= 0) {
+        fn(arg, start, end);
+        return;
+    }
+    slot = __atomic_fetch_add(&axiom_pfor_next_slot, 1, __ATOMIC_SEQ_CST);
+    slot = slot % AXIOM_PFOR_MAX_SLOTS;
+    axiom_pfor_slots[slot].fn     = fn;
+    axiom_pfor_slots[slot].arg    = arg;
+    axiom_pfor_slots[slot].offset = start;
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    axiom_job_dispatch(axiom_pfor_wrapper, &axiom_pfor_slots[slot], total);
+    axiom_job_wait();
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
 }
 
 /* ── Job handles & dependency graph (POSIX) ────────────────────────── */

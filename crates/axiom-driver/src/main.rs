@@ -317,154 +317,198 @@ fn resolve_imports(module: &mut axiom_parser::ast::Module, source_path: &str) {
     resolve_imports_inner(module, source_path, &mut resolving);
 }
 
+/// Resolve the file path for an import given its path segments and the source directory.
+///
+/// Returns the resolved canonical path, or `None` if the file cannot be found.
+fn resolve_import_path(
+    path_segments: &[String],
+    source_dir: &Path,
+) -> Option<std::path::PathBuf> {
+    let name = path_segments.join("/");
+    let file_name = format!("{name}.axm");
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    // 1. lib/<name>.axm relative to compiler binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("lib").join(&file_name));
+        }
+    }
+    // 2. lib/<name>.axm relative to workspace root (cwd)
+    candidates.push(std::path::PathBuf::from("lib").join(&file_name));
+    // 3. lib/<name>.axm relative to the source file
+    candidates.push(source_dir.join("lib").join(&file_name));
+    // 4. <name>.axm relative to the source file
+    candidates.push(source_dir.join(&file_name));
+
+    if let Some(p) = candidates.iter().find(|p| p.exists()) {
+        return Some(p.clone());
+    }
+
+    eprintln!(
+        "warning: could not resolve import '{}' (tried: {})",
+        name,
+        candidates
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    None
+}
+
+/// Resolve a single import file and merge its publicly-visible items into `target`.
+///
+/// Used for both direct imports and transitive `pub import` re-exports.
+/// `resolving` provides cycle detection.
+fn merge_import_into(
+    path_segments: &[String],
+    source_dir: &Path,
+    resolving: &mut HashSet<std::path::PathBuf>,
+    target: &mut axiom_parser::ast::Module,
+) {
+    use axiom_parser::ast::Item;
+    let name = path_segments.join("/");
+
+    let resolved_path = match resolve_import_path(path_segments, source_dir) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let canonical = std::fs::canonicalize(&resolved_path)
+        .unwrap_or_else(|_| resolved_path.clone());
+    if resolving.contains(&canonical) {
+        eprintln!(
+            "warning: circular import detected: '{}' is already being resolved",
+            name
+        );
+        return;
+    }
+
+    let import_source = match std::fs::read_to_string(&resolved_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "warning: failed to read import '{}' from {}: {}",
+                name,
+                resolved_path.display(),
+                e
+            );
+            return;
+        }
+    };
+
+    let import_result = axiom_parser::parse(&import_source);
+    if import_result.has_errors() {
+        eprintln!(
+            "warning: parse errors in import '{}' ({})",
+            name,
+            resolved_path.display()
+        );
+        for err in &import_result.errors {
+            eprintln!("  {err}");
+        }
+        return;
+    }
+
+    // Recursively resolve imports in the imported module.
+    let mut imported_module = import_result.module;
+    resolving.insert(canonical.clone());
+    resolve_imports_inner(
+        &mut imported_module,
+        &resolved_path.display().to_string(),
+        resolving,
+    );
+    resolving.remove(&canonical);
+
+    // Check if the imported module uses `pub` visibility at all.
+    // If any item is marked `pub`, only `pub` items are visible.
+    // If no items are marked `pub`, all items are visible (legacy behavior).
+    let has_any_pub = imported_module.items.iter().any(|item| {
+        match &item.node {
+            Item::Function(f) => f.is_public,
+            Item::ExternFunction(ef) => ef.is_public,
+            _ => false,
+        }
+    });
+
+    // Collect `pub import` paths from this module before consuming items,
+    // so we can resolve them transitively below.
+    let pub_reexports: Vec<Vec<String>> = imported_module
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Import(ref decl) = item.node {
+                if decl.is_public {
+                    return Some(decl.path.clone());
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Merge directly-visible items from the imported module.
+    for item in imported_module.items {
+        match &item.node {
+            Item::ExternFunction(ef) => {
+                if !has_any_pub || ef.is_public {
+                    target.items.push(item);
+                }
+            }
+            Item::Struct(_) => {
+                // Structs are always visible when imported.
+                target.items.push(item);
+            }
+            Item::Function(f) => {
+                if !has_any_pub || f.is_public {
+                    target.items.push(item);
+                }
+            }
+            _ => {
+                // Skip import declarations and type aliases — they are handled
+                // separately (pub re-exports below, private imports not re-exported).
+            }
+        }
+    }
+
+    // Transitively resolve `pub import` re-exports: if the imported module
+    // declares `pub import foo;`, those declarations are visible to any
+    // importer, regardless of whether the current import is `pub` or not.
+    let reexport_source_dir = resolved_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    for reexport_path in pub_reexports {
+        merge_import_into(&reexport_path, &reexport_source_dir, resolving, target);
+    }
+}
+
 /// Inner recursive import resolver with circular import detection.
 fn resolve_imports_inner(
     module: &mut axiom_parser::ast::Module,
     source_path: &str,
     resolving: &mut HashSet<std::path::PathBuf>,
 ) {
-    use axiom_parser::ast::Item;
     let source_dir = Path::new(source_path).parent().unwrap_or(Path::new("."));
 
-    // Collect the import paths and their `pub` status first to avoid borrow issues.
-    let import_info: Vec<(Vec<String>, bool)> = module
-        .items
-        .iter()
-        .filter_map(|item| {
-            if let Item::Import(ref decl) = item.node {
-                Some((decl.path.clone(), decl.is_public))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for (path_segments, is_pub_import) in import_info {
-        let name = path_segments.join("/");
-        let file_name = format!("{name}.axm");
-
-        // Try multiple resolution paths.
-        let candidates: Vec<std::path::PathBuf> = {
-            let mut c = Vec::new();
-            // 1. lib/<name>.axm relative to compiler binary
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(exe_dir) = exe.parent() {
-                    c.push(exe_dir.join("lib").join(&file_name));
+    // Collect the import paths first to avoid borrow issues.
+    let import_info: Vec<Vec<String>> = {
+        use axiom_parser::ast::Item;
+        module
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let Item::Import(ref decl) = item.node {
+                    Some(decl.path.clone())
+                } else {
+                    None
                 }
-            }
-            // 2. lib/<name>.axm relative to workspace root (cwd)
-            c.push(std::path::PathBuf::from("lib").join(&file_name));
-            // 3. lib/<name>.axm relative to the source file
-            c.push(source_dir.join("lib").join(&file_name));
-            // 4. <name>.axm relative to the source file
-            c.push(source_dir.join(&file_name));
-            c
-        };
+            })
+            .collect()
+    };
 
-        let resolved = candidates.iter().find(|p| p.exists());
-        let resolved_path = match resolved {
-            Some(p) => p.clone(),
-            None => {
-                eprintln!(
-                    "warning: could not resolve import '{}' (tried: {})",
-                    name,
-                    candidates
-                        .iter()
-                        .map(|p| p.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                continue;
-            }
-        };
-
-        // Circular import detection: if this file is already being resolved
-        // in the current chain, emit a warning and skip.
-        let canonical = std::fs::canonicalize(&resolved_path)
-            .unwrap_or_else(|_| resolved_path.clone());
-        if resolving.contains(&canonical) {
-            eprintln!(
-                "warning: circular import detected: '{}' is already being resolved",
-                name
-            );
-            continue;
-        }
-
-        let import_source = match std::fs::read_to_string(&resolved_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "warning: failed to read import '{}' from {}: {}",
-                    name,
-                    resolved_path.display(),
-                    e
-                );
-                continue;
-            }
-        };
-
-        let import_result = axiom_parser::parse(&import_source);
-        if import_result.has_errors() {
-            eprintln!(
-                "warning: parse errors in import '{}' ({})",
-                name,
-                resolved_path.display()
-            );
-            for err in &import_result.errors {
-                eprintln!("  {err}");
-            }
-            continue;
-        }
-
-        // Recursively resolve imports in the imported module (for re-exports
-        // and transitive dependencies).
-        let mut imported_module = import_result.module;
-        resolving.insert(canonical.clone());
-        resolve_imports_inner(
-            &mut imported_module,
-            &resolved_path.display().to_string(),
-            resolving,
-        );
-        resolving.remove(&canonical);
-
-        // Check if the imported module uses `pub` visibility at all.
-        // If any item is marked `pub`, only `pub` items are visible.
-        // If no items are marked `pub`, all items are visible (legacy behavior).
-        let has_any_pub = imported_module.items.iter().any(|item| {
-            match &item.node {
-                Item::Function(f) => f.is_public,
-                Item::ExternFunction(ef) => ef.is_public,
-                _ => false,
-            }
-        });
-
-        // Merge imported items into the main module.
-        for item in imported_module.items {
-            match &item.node {
-                Item::ExternFunction(ef) => {
-                    if !has_any_pub || ef.is_public {
-                        module.items.push(item);
-                    }
-                }
-                Item::Struct(_) => {
-                    // Structs are always visible when imported.
-                    module.items.push(item);
-                }
-                Item::Function(f) => {
-                    if !has_any_pub || f.is_public {
-                        module.items.push(item);
-                    }
-                }
-                Item::Import(decl) if decl.is_public && is_pub_import => {
-                    // Re-exported imports: if this import was `pub import X;`
-                    // and X itself has `pub import Y;`, propagate Y.
-                    module.items.push(item);
-                }
-                _ => {
-                    // Skip non-pub imports and type aliases.
-                }
-            }
-        }
+    for path_segments in import_info {
+        merge_import_into(&path_segments, source_dir, resolving, module);
     }
 }
 

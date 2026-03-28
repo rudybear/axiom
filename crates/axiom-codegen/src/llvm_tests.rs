@@ -7576,3 +7576,123 @@ fn main() -> i32 {
         "should use extractvalue for tuple field access: {ir}"
     );
 }
+
+// ── parallel_range builtin tests ─────────────────────────────────────────────
+
+/// parallel_range(func_ptr, start, end, data) should emit:
+/// - fence release before the call
+/// - call void @axiom_parallel_for(ptr ..., i32 ..., i32 ..., ptr ...)
+/// - fence acquire after the call
+/// - declare void @axiom_parallel_for(ptr, i32, i32, ptr) in the preamble
+#[test]
+fn test_parallel_range_emits_axiom_parallel_for() {
+    let main_func = func(
+        "main",
+        vec![],
+        HirType::Primitive(PrimitiveType::I32),
+        block(vec![
+            // let data: ptr[i32] = heap_alloc(100, 4);
+            stmt(HirStmtKind::Let {
+                name: "data".to_string(),
+                name_span: span(),
+                ty: HirType::Ptr {
+                    element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                },
+                value: Some(call("heap_alloc", vec![int_lit(100), int_lit(4)])),
+                mutable: false,
+            }),
+            // let func_ptr: ptr[i32] = heap_alloc(1, 4);  (stand-in for a fn pointer)
+            stmt(HirStmtKind::Let {
+                name: "func_ptr".to_string(),
+                name_span: span(),
+                ty: HirType::Ptr {
+                    element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+                },
+                value: Some(call("heap_alloc", vec![int_lit(1), int_lit(4)])),
+                mutable: false,
+            }),
+            // parallel_range(func_ptr, 0, 100, data);
+            stmt(HirStmtKind::Expr {
+                expr: call(
+                    "parallel_range",
+                    vec![
+                        ident("func_ptr"),
+                        int_lit(0),
+                        int_lit(100),
+                        ident("data"),
+                    ],
+                ),
+            }),
+            stmt(HirStmtKind::Return {
+                value: Some(int_lit(0)),
+            }),
+        ]),
+    );
+
+    let m = module(Some("test"), vec![main_func]);
+    let ir = codegen(&m).expect("codegen should succeed");
+
+    // Must emit the extern declaration.
+    assert!(
+        ir.contains("declare void @axiom_parallel_for(ptr, i32, i32, ptr)"),
+        "should declare axiom_parallel_for: {ir}"
+    );
+
+    // Must emit the call.
+    assert!(
+        ir.contains("call void @axiom_parallel_for("),
+        "should emit call void @axiom_parallel_for: {ir}"
+    );
+
+    // fence release must come BEFORE the call.
+    let fence_rel_pos = ir.find("fence release");
+    let call_pos = ir.find("call void @axiom_parallel_for(");
+    assert!(fence_rel_pos.is_some(), "should emit fence release: {ir}");
+    assert!(call_pos.is_some(), "should emit parallel_for call: {ir}");
+    assert!(
+        fence_rel_pos.unwrap() < call_pos.unwrap(),
+        "fence release must precede axiom_parallel_for call: {ir}"
+    );
+
+    // fence acquire must come AFTER the call.
+    let fence_acq_pos = ir.rfind("fence acquire");
+    assert!(fence_acq_pos.is_some(), "should emit fence acquire: {ir}");
+    assert!(
+        call_pos.unwrap() < fence_acq_pos.unwrap(),
+        "fence acquire must follow axiom_parallel_for call: {ir}"
+    );
+}
+
+/// parallel_range with wrong number of args should push a codegen error.
+#[test]
+fn test_parallel_range_wrong_arg_count() {
+    let main_func = func(
+        "main",
+        vec![],
+        HirType::Primitive(PrimitiveType::I32),
+        block(vec![
+            stmt(HirStmtKind::Expr {
+                expr: call("parallel_range", vec![int_lit(0), int_lit(10)]),
+            }),
+            stmt(HirStmtKind::Return {
+                value: Some(int_lit(0)),
+            }),
+        ]),
+    );
+
+    let m = module(Some("test"), vec![main_func]);
+    // codegen may succeed (errors are collected) but should report an error.
+    match codegen(&m) {
+        Err(_) => { /* acceptable — codegen hard-failed */ }
+        Ok(ir) => {
+            // If it didn't hard-fail the IR should NOT contain a valid parallel_for call
+            // (it may contain a zero-argument fallback or nothing).
+            // The important thing is we don't silently generate wrong code.
+            // We just verify no call with the right shape was produced.
+            assert!(
+                !ir.contains("call void @axiom_parallel_for(ptr"),
+                "should not emit valid parallel_for call with wrong arg count: {ir}"
+            );
+        }
+    }
+}
