@@ -6,7 +6,7 @@ A programming language designed as the canonical transfer format between AI agen
 
 > **This is NOT a language for humans to program in. This is a language for AI agents to communicate optimized computation through.**
 
-> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 21 real-world C project ports (~60K+ combined GitHub stars) all at parity or faster. ~40,100 LOC. 545 tests. 115/115 benchmarks pass (1.01x avg vs C). ALL 47 milestones COMPLETE.
+> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 21 real-world C project ports (~60K+ combined GitHub stars) all at parity or faster. ~42,000 LOC. 565 tests. 115/115 benchmarks pass (1.01x avg vs C). ALL 47 milestones COMPLETE.
 
 ## Why AXIOM Exists
 
@@ -207,10 +207,10 @@ AXIOM Source (.axm)
    PARSER (52 tests)        Typed AST with annotations
        |
        v
-   HIR LOWERING (25 tests)  Validated annotations, type checking,
+   HIR LOWERING (32 tests)  Validated annotations, type checking,
        |                     @strict enforcement, pre/postcondition lowering
        v
-   LLVM IR GEN (165 tests)  Optimized IR text with:
+   LLVM IR GEN (169 tests)  Optimized IR text with:
        |                     - noalias, nsw, fast-math
        |                     - fastcc, branch hints
        |                     - allocator attributes
@@ -544,11 +544,11 @@ axiom/
 ├── crates/
 │   ├── axiom-lexer/            # Tokenizer (63 tests)
 │   ├── axiom-parser/           # Recursive descent + Pratt (52 tests)
-│   ├── axiom-hir/              # High-level IR + validation (25 tests)
-│   ├── axiom-codegen/          # LLVM IR generation (165 tests)
+│   ├── axiom-hir/              # High-level IR + validation (32 tests)
+│   ├── axiom-codegen/          # LLVM IR generation (169 tests)
 │   ├── axiom-optimize/         # Optimization protocol + agent API (132 tests)
 │   ├── axiom-mir/              # Mid-level IR (stub)
-│   └── axiom-driver/           # CLI + MCP server + compilation (96 tests + 12 E2E/doc-tests)
+│   └── axiom-driver/           # CLI + MCP server + compilation (97 tests + 12 E2E/doc-tests)
 │       └── runtime/
 │           └── axiom_rt.c      # C runtime (I/O, coroutines, threads, jobs)
 ├── spec/                       # Formal language specification
@@ -624,11 +624,11 @@ axiom/
 ## Stats
 
 - **~40,100 lines of Rust** across 7 crates
-- **545 tests** (all passing)
+- **565 tests** (all passing)
 - **115/115 benchmarks pass** (1.01x avg ratio vs C)
 - **21 real-world C project ports** (~60K+ combined GitHub stars) -- all at parity or faster (3 wins)
 - **~171 builtin functions** (I/O, math, vector math, matrix ops, memory, memcpy/memset/memmove, concurrency, collections, debug, slices, global constant/mutable arrays)
-- **16 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test, replay
+- **18 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test, replay
 - **38 example programs** (including 21 C project ports), **24 sample programs**
 - **5 formal specification documents**
 - **7 research documents** (optimization, memory, game engine, multithreading, Lux integration, language plan, optimization knowledge base)

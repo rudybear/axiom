@@ -67,10 +67,10 @@ AXIOM Lexer (63 tests)        <- Tokenizer with error recovery
 AXIOM Parser (52 tests)        <- Recursive descent + Pratt expressions
        |
        v
-AXIOM HIR (25 tests)          <- Annotation validation, type checking,
+AXIOM HIR (32 tests)          <- Annotation validation, type checking,
        |                          @strict enforcement, pre/postcondition lowering
        v
-LLVM IR Text Gen (165 tests)  <- Optimized IR with noalias, nsw, fast-math,
+LLVM IR Text Gen (169 tests)  <- Optimized IR with noalias, nsw, fast-math,
        |                          SIMD vec2/vec3/vec4 types,
        |                          fastcc, branch hints, allocator attributes,
        |                          fence release/acquire, readonly/writeonly,
@@ -87,7 +87,7 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`)
-- **Testing**: 545 tests passing (unit + integration + doc-tests + E2E)
+- **Testing**: 565 tests passing (unit + integration + doc-tests + E2E)
 - **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos) + 21 real-world C project ports
 
 ## Current Feature Set
@@ -418,11 +418,11 @@ axiom/
 ├── crates/
 │   ├── axiom-lexer/                # Tokenizer (63 tests)
 │   ├── axiom-parser/               # Parser -> AST (52 tests)
-│   ├── axiom-hir/                  # HIR + lowering (25 tests)
+│   ├── axiom-hir/                  # HIR + lowering (32 tests)
 │   ├── axiom-mir/                  # Mid-level IR (stub)
-│   ├── axiom-codegen/              # LLVM IR generation (165 tests)
+│   ├── axiom-codegen/              # LLVM IR generation (169 tests)
 │   ├── axiom-optimize/             # Optimization protocol + agent API (132 tests)
-│   └── axiom-driver/               # CLI + MCP server + compilation (96 tests + 12 E2E/doc-tests)
+│   └── axiom-driver/               # CLI + MCP server + compilation (97 tests + 12 E2E/doc-tests)
 │       └── runtime/
 │           └── axiom_rt.c          # C runtime (I/O, coroutines, threads, jobs)
 ├── spec/                           # Formal language specification

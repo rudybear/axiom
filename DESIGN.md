@@ -4,7 +4,7 @@ This is the living design document for AXIOM. It summarizes the current
 implementation state, references the formal specification files, and tracks
 design decisions and open questions.
 
-**Project stats:** ~40,100 LOC, 545 tests, 115/115 benchmarks pass (1.01x avg vs C), 38 examples (including 21 C project ports), 24 samples. ALL 47 milestones COMPLETE across 8 tracks, plus Phase L verified development pipeline.
+**Project stats:** ~42,000 LOC, 565 tests, 115/115 benchmarks pass (1.01x avg vs C), 39 examples (including 21 C project ports), 24 samples. ALL 47 milestones COMPLETE across 8 tracks, plus Phase L verified development pipeline.
 
 **FINAL benchmark result:** 115/115 benchmarks pass, 1.01x average ratio vs C (parity). 21 real-world C project ports (~60K+ combined GitHub stars) all at parity or faster. Raytracer: AXIOM scalar 42ms (+7% faster than C -O2 47ms), AXIOM AOS vec3 44ms (+2% faster). Optimization Knowledge Base: 14 rules + 6 anti-patterns, grows with each LLM session.
 
@@ -60,7 +60,7 @@ The `spec/` directory contains the formal language specification:
 - Error recovery: skips to synchronization points (`;`, `}`, statement/item
   keywords) and collects all errors. Max nesting depth of 256.
 
-### HIR (`axiom-hir`) -- Complete (25 tests)
+### HIR (`axiom-hir`) -- Complete (32 tests)
 
 - Every HIR node carries a unique `NodeId` and `Span`.
 - Two-pass lowering: first pass collects struct and type alias names; second
@@ -83,7 +83,7 @@ The `spec/` directory contains the formal language specification:
   InlineHint, LayoutKind, AnnotationValue, StrategyBlock, StrategyValue,
   TransferBlock, OptLogEntry, ParallelForConfig).
 
-### Codegen (`axiom-codegen`) -- Complete (165 tests)
+### Codegen (`axiom-codegen`) -- Complete (169 tests)
 
 - HIR-to-LLVM-IR text generation for the full language subset: functions with
   all primitive types, arithmetic (with `nsw`), if/else/else-if, for loops (with
@@ -143,7 +143,7 @@ The `spec/` directory contains the formal language specification:
   LLVM IR, assembly, benchmark data, `@constraint` annotations, and optimization
   history. Supports Claude API (via curl), Claude CLI, and dry-run modes.
 
-### Driver (`axiom-driver`) -- Complete (96 tests)
+### Driver (`axiom-driver`) -- Complete (97 tests)
 
 - CLI frontend with 16 subcommands:
   - `axiom compile` -- full compilation (.axm -> native binary), with `--emit` for
@@ -195,10 +195,10 @@ AXIOM Lexer (63 tests)       -- Tokenizer with error recovery
 AXIOM Parser (52 tests)      -- Recursive descent + Pratt expressions
        |
        v
-AXIOM HIR (25 tests)         -- Annotation validation, type checking, NodeIds
+AXIOM HIR (32 tests)         -- Annotation validation, type checking, NodeIds
        |
        v
-LLVM IR Text (165 tests)     -- Optimized IR with noalias, nsw, fast-math,
+LLVM IR Text (169 tests)     -- Optimized IR with noalias, nsw, fast-math,
        |                        fastcc, fences, readonly/writeonly, DWARF debug,
        |                        @precondition/@postcondition runtime checks (--debug)
        v

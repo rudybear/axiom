@@ -2,7 +2,7 @@
 
 **This file is read by the LLM optimizer before every optimization pass and updated after discoveries. It is the accumulated wisdom of all optimization sessions.**
 
-Last updated: 2026-03-25
+Last updated: 2026-03-28
 
 ---
 
