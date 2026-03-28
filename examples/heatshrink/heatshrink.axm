@@ -1,0 +1,443 @@
+@module heatshrink;
+@intent("Heatshrink LZSS compression/decompression for embedded systems, ported from C");
+
+// =============================================================================
+// Heatshrink -- LZSS compression for embedded systems
+// =============================================================================
+//
+// A simplified port of the heatshrink compression algorithm.
+// Uses a sliding window to find repeated byte sequences and encodes them
+// as backreferences (offset, length) instead of literal bytes.
+//
+// Parameters:
+//   WINDOW_BITS = 8  -> window size = 256 bytes
+//   LOOKAHEAD_BITS = 4 -> max match length = 16 bytes
+//
+// Output format:
+//   1-bit tag: 0 = literal byte follows, 1 = backref follows
+//   Literal: WINDOW_BITS bits of raw byte value
+//   Backref: WINDOW_BITS bits of offset + LOOKAHEAD_BITS bits of length
+//
+// GAP: No bit-level I/O primitives. We implement a bit buffer manually.
+// GAP: No enums/unions. States are integer constants.
+// GAP: No struct. All state is passed via ptr[i32] with named offsets.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Configuration constants
+// ---------------------------------------------------------------------------
+@const fn WINDOW_BITS() -> i32 { return 8; }
+@const fn LOOKAHEAD_BITS() -> i32 { return 4; }
+@const fn WINDOW_SIZE() -> i32 { return 256; }
+@const fn LOOKAHEAD_SIZE() -> i32 { return 16; }
+@const fn MIN_MATCH_LEN() -> i32 { return 2; }
+
+// ---------------------------------------------------------------------------
+// Bit writer: accumulate bits into a byte buffer
+// ---------------------------------------------------------------------------
+// Layout: ptr[i32] with:
+//   [0] = output buffer ptr (as i64, stored in slots 0-1 via i32 pair)
+//   [2] = byte position in output buffer
+//   [3] = bit position within current byte (0-7)
+//   [4] = current byte being accumulated
+
+// GAP: Cannot store ptr in i32 slot. We pass the output buffer separately.
+
+// Write `count` bits from `value` (MSB first) to the output buffer
+fn bits_write(outbuf: ptr[i32], pos: ptr[i32], value: i32, count: i32) {
+    // pos[0] = byte_pos, pos[1] = bit_pos, pos[2] = current_byte
+    let byte_pos: i32 = ptr_read_i32(pos, 0);
+    let bit_pos: i32 = ptr_read_i32(pos, 1);
+    let cur_byte: i32 = ptr_read_i32(pos, 2);
+
+    let i: i32 = count - 1;
+    while i >= 0 {
+        // Extract bit i from value
+        let bit: i32 = band(lshr(value, i), 1);
+        // Set this bit in current byte
+        cur_byte = bor(cur_byte, shl(bit, 7 - bit_pos));
+        bit_pos = bit_pos + 1;
+
+        if bit_pos >= 8 {
+            // Flush byte
+            ptr_write_u8(outbuf, byte_pos, cur_byte);
+            byte_pos = byte_pos + 1;
+            bit_pos = 0;
+            cur_byte = 0;
+        }
+
+        i = i - 1;
+    }
+
+    ptr_write_i32(pos, 0, byte_pos);
+    ptr_write_i32(pos, 1, bit_pos);
+    ptr_write_i32(pos, 2, cur_byte);
+}
+
+// Flush remaining bits (pad with zeros)
+fn bits_flush(outbuf: ptr[i32], pos: ptr[i32]) {
+    let bit_pos: i32 = ptr_read_i32(pos, 1);
+    if bit_pos > 0 {
+        let byte_pos: i32 = ptr_read_i32(pos, 0);
+        let cur_byte: i32 = ptr_read_i32(pos, 2);
+        ptr_write_u8(outbuf, byte_pos, cur_byte);
+        ptr_write_i32(pos, 0, byte_pos + 1);
+        ptr_write_i32(pos, 1, 0);
+        ptr_write_i32(pos, 2, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bit reader: read bits from a byte buffer
+// ---------------------------------------------------------------------------
+// pos[0] = byte_pos, pos[1] = bit_pos
+
+fn bits_read(inbuf: ptr[i32], pos: ptr[i32], count: i32) -> i32 {
+    let byte_pos: i32 = ptr_read_i32(pos, 0);
+    let bit_pos: i32 = ptr_read_i32(pos, 1);
+    let result: i32 = 0;
+
+    for i: i32 in range(0, count) {
+        let cur_byte: i32 = ptr_read_u8(inbuf, byte_pos);
+        let bit: i32 = band(lshr(cur_byte, 7 - bit_pos), 1);
+        result = bor(shl(result, 1), bit);
+        bit_pos = bit_pos + 1;
+        if bit_pos >= 8 {
+            bit_pos = 0;
+            byte_pos = byte_pos + 1;
+        }
+    }
+
+    ptr_write_i32(pos, 0, byte_pos);
+    ptr_write_i32(pos, 1, bit_pos);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Find best match in the window
+// ---------------------------------------------------------------------------
+// Returns match_offset in out[0], match_length in out[1]
+@pure
+fn find_best_match(input: ptr[i32], input_len: i32, pos: i32, out: ptr[i32]) {
+    let best_len: i32 = 0;
+    let best_off: i32 = 0;
+
+    // Search backwards in the window
+    let search_start: i32 = pos - WINDOW_SIZE();
+    if search_start < 0 {
+        search_start = 0;
+    }
+
+    let scan: i32 = search_start;
+    while scan < pos {
+        let match_len: i32 = 0;
+        let max_len: i32 = LOOKAHEAD_SIZE();
+        if pos + max_len > input_len {
+            max_len = input_len - pos;
+        }
+
+        while match_len < max_len {
+            if ptr_read_u8(input, scan + match_len) != ptr_read_u8(input, pos + match_len) {
+                break;
+            }
+            match_len = match_len + 1;
+        }
+
+        if match_len >= MIN_MATCH_LEN() and match_len > best_len {
+            best_len = match_len;
+            best_off = pos - scan;
+        }
+
+        scan = scan + 1;
+    }
+
+    ptr_write_i32(out, 0, best_off);
+    ptr_write_i32(out, 1, best_len);
+}
+
+// ---------------------------------------------------------------------------
+// Compress: input bytes -> compressed bit stream
+// Returns compressed size in bytes
+// ---------------------------------------------------------------------------
+fn heatshrink_compress(input: ptr[i32], input_len: i32,
+                       output: ptr[i32], max_output: i32) -> i32 {
+    // Bit writer state: [byte_pos, bit_pos, current_byte]
+    let bw: ptr[i32] = heap_alloc(3, 4);
+    ptr_write_i32(bw, 0, 0);
+    ptr_write_i32(bw, 1, 0);
+    ptr_write_i32(bw, 2, 0);
+
+    // Match result: [offset, length]
+    let match_result: ptr[i32] = heap_alloc(2, 4);
+
+    let pos: i32 = 0;
+    while pos < input_len {
+        find_best_match(input, input_len, pos, match_result);
+        let match_off: i32 = ptr_read_i32(match_result, 0);
+        let match_len: i32 = ptr_read_i32(match_result, 1);
+
+        if match_len >= MIN_MATCH_LEN() {
+            // Emit backref: tag=1, offset (WINDOW_BITS), length (LOOKAHEAD_BITS)
+            bits_write(output, bw, 1, 1);
+            bits_write(output, bw, match_off - 1, WINDOW_BITS());
+            bits_write(output, bw, match_len - MIN_MATCH_LEN(), LOOKAHEAD_BITS());
+            pos = pos + match_len;
+        } else {
+            // Emit literal: tag=0, byte value (8 bits)
+            bits_write(output, bw, 0, 1);
+            let byte_val: i32 = ptr_read_u8(input, pos);
+            bits_write(output, bw, byte_val, 8);
+            pos = pos + 1;
+        }
+    }
+
+    bits_flush(output, bw);
+    let compressed_size: i32 = ptr_read_i32(bw, 0);
+
+    heap_free(match_result);
+    heap_free(bw);
+    return compressed_size;
+}
+
+// ---------------------------------------------------------------------------
+// Decompress: compressed bit stream -> original bytes
+// Returns decompressed size in bytes
+// ---------------------------------------------------------------------------
+fn heatshrink_decompress(input: ptr[i32], input_bits_len: i32,
+                          output: ptr[i32], max_output: i32,
+                          expected_len: i32) -> i32 {
+    // Bit reader state: [byte_pos, bit_pos]
+    let br: ptr[i32] = heap_alloc(2, 4);
+    ptr_write_i32(br, 0, 0);
+    ptr_write_i32(br, 1, 0);
+
+    let out_pos: i32 = 0;
+
+    while out_pos < expected_len {
+        // Read tag bit
+        let tag: i32 = bits_read(input, br, 1);
+
+        if tag == 0 {
+            // Literal: read 8 bits
+            let byte_val: i32 = bits_read(input, br, 8);
+            if out_pos < max_output {
+                ptr_write_u8(output, out_pos, byte_val);
+            }
+            out_pos = out_pos + 1;
+        } else {
+            // Backref: read offset and length
+            let offset: i32 = bits_read(input, br, WINDOW_BITS()) + 1;
+            let length: i32 = bits_read(input, br, LOOKAHEAD_BITS()) + MIN_MATCH_LEN();
+
+            // Copy bytes from earlier in the output
+            for j: i32 in range(0, length) {
+                if out_pos < max_output {
+                    let src_pos: i32 = out_pos - offset;
+                    let src_byte: i32 = ptr_read_u8(output, src_pos);
+                    ptr_write_u8(output, out_pos, src_byte);
+                }
+                out_pos = out_pos + 1;
+            }
+        }
+    }
+
+    heap_free(br);
+    return out_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Verify: compare two byte buffers
+// ---------------------------------------------------------------------------
+@pure
+fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
+    for i: i32 in range(0, len) {
+        if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Fill test data with a repeating pattern (good for compression)
+// ---------------------------------------------------------------------------
+fn fill_repeating_pattern(buf: ptr[i32], len: i32) {
+    // Pattern: "ABCABCABCABC..." (3-byte repeat for good compression ratio)
+    for i: i32 in range(0, len) {
+        let mod3: i32 = i % 3;
+        if mod3 == 0 {
+            ptr_write_u8(buf, i, 65);  // 'A'
+        } else if mod3 == 1 {
+            ptr_write_u8(buf, i, 66);  // 'B'
+        } else {
+            ptr_write_u8(buf, i, 67);  // 'C'
+        }
+    }
+}
+
+// Fill with more complex pattern for realistic testing
+fn fill_mixed_pattern(buf: ptr[i32], len: i32) {
+    // Mix of repeated and non-repeated data
+    for i: i32 in range(0, len) {
+        let section: i32 = i / 32;
+        let offset: i32 = i % 32;
+        if section % 2 == 0 {
+            // Repeated section
+            ptr_write_u8(buf, i, band(offset % 4 + 65, 255));
+        } else {
+            // Semi-random section (still somewhat compressible)
+            ptr_write_u8(buf, i, band(i *% 37 + 13, 255));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+fn main() -> i32 {
+    print("=== Heatshrink Compression Port ===\n");
+    print("Window: ");
+    print_i32(WINDOW_SIZE());
+    print(" bytes, Lookahead: ");
+    print_i32(LOOKAHEAD_SIZE());
+    print(" bytes\n");
+
+    // --- Test 1: Simple repeating pattern ---
+    let test_len: i32 = 256;
+    let test_data: ptr[i32] = heap_alloc(test_len, 1);
+    fill_repeating_pattern(test_data, test_len);
+
+    // Compressed buffer (generous size)
+    let comp_buf_size: i32 = test_len * 2;
+    let comp_buf: ptr[i32] = heap_alloc(comp_buf_size, 1);
+    let decomp_buf: ptr[i32] = heap_alloc(test_len, 1);
+
+    print("\n--- Test 1: Repeating pattern (256 bytes) ---\n");
+    let comp_size: i32 = heatshrink_compress(test_data, test_len, comp_buf, comp_buf_size);
+    print("Original size: ");
+    print_i32(test_len);
+    print(" bytes\n");
+    print("Compressed size: ");
+    print_i32(comp_size);
+    print(" bytes\n");
+
+    // Compression ratio
+    if comp_size > 0 {
+        let ratio_pct: i32 = (comp_size * 100) / test_len;
+        print("Compression ratio: ");
+        print_i32(ratio_pct);
+        print("%\n");
+    }
+
+    // Decompress
+    let decomp_size: i32 = heatshrink_decompress(comp_buf, comp_size * 8,
+                                                   decomp_buf, test_len, test_len);
+    print("Decompressed size: ");
+    print_i32(decomp_size);
+    print(" bytes\n");
+
+    // Verify round-trip
+    if decomp_size == test_len and buffers_equal(test_data, decomp_buf, test_len) == 1 {
+        print("PASS: Round-trip verified\n");
+    } else {
+        print("FAIL: Round-trip mismatch\n");
+        // Print first few bytes for debugging
+        print("Expected first 8: ");
+        for i: i32 in range(0, 8) {
+            print_i32(ptr_read_u8(test_data, i));
+            print(" ");
+        }
+        print("\nGot first 8:      ");
+        for i: i32 in range(0, 8) {
+            print_i32(ptr_read_u8(decomp_buf, i));
+            print(" ");
+        }
+        print("\n");
+    }
+
+    heap_free(test_data);
+    heap_free(comp_buf);
+    heap_free(decomp_buf);
+
+    // --- Test 2: Mixed pattern ---
+    let test_len2: i32 = 512;
+    let test_data2: ptr[i32] = heap_alloc(test_len2, 1);
+    fill_mixed_pattern(test_data2, test_len2);
+
+    let comp_buf2_size: i32 = test_len2 * 2;
+    let comp_buf2: ptr[i32] = heap_alloc(comp_buf2_size, 1);
+    let decomp_buf2: ptr[i32] = heap_alloc(test_len2, 1);
+
+    print("\n--- Test 2: Mixed pattern (512 bytes) ---\n");
+    let comp_size2: i32 = heatshrink_compress(test_data2, test_len2, comp_buf2, comp_buf2_size);
+    print("Original size: ");
+    print_i32(test_len2);
+    print(" bytes\n");
+    print("Compressed size: ");
+    print_i32(comp_size2);
+    print(" bytes\n");
+
+    if comp_size2 > 0 {
+        let ratio_pct2: i32 = (comp_size2 * 100) / test_len2;
+        print("Compression ratio: ");
+        print_i32(ratio_pct2);
+        print("%\n");
+    }
+
+    let decomp_size2: i32 = heatshrink_decompress(comp_buf2, comp_size2 * 8,
+                                                    decomp_buf2, test_len2, test_len2);
+    if decomp_size2 == test_len2 and buffers_equal(test_data2, decomp_buf2, test_len2) == 1 {
+        print("PASS: Round-trip verified\n");
+    } else {
+        print("FAIL: Round-trip mismatch\n");
+    }
+
+    heap_free(test_data2);
+    heap_free(comp_buf2);
+    heap_free(decomp_buf2);
+
+    // --- Benchmark: compress 1KB data x 10K times ---
+    let bench_len: i32 = 1024;
+    let bench_data: ptr[i32] = heap_alloc(bench_len, 1);
+    fill_repeating_pattern(bench_data, bench_len);
+    let bench_comp: ptr[i32] = heap_alloc(bench_len * 2, 1);
+    let bench_decomp: ptr[i32] = heap_alloc(bench_len, 1);
+
+    let bench_iters: i32 = 10000;
+    print("\n--- Benchmark: 1KB x 10K compress/decompress ---\n");
+
+    let t0: i64 = clock_ns();
+    let checksum: i32 = 0;
+
+    for iter: i32 in range(0, bench_iters) {
+        let csz: i32 = heatshrink_compress(bench_data, bench_len, bench_comp, bench_len * 2);
+        let dsz: i32 = heatshrink_decompress(bench_comp, csz * 8, bench_decomp, bench_len, bench_len);
+        checksum = checksum +% csz +% dsz;
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        // Total data processed: bench_iters * bench_len * 2 (compress + decompress)
+        let total_kb: i64 = (widen(bench_iters) * widen(bench_len) * 2) / 1024;
+        let throughput_kbps: i64 = (total_kb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(throughput_kbps);
+        print(" KB/s\n");
+    }
+
+    heap_free(bench_data);
+    heap_free(bench_comp);
+    heap_free(bench_decomp);
+
+    print("\n=== Heatshrink complete ===\n");
+    return 0;
+}

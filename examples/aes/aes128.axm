@@ -1,0 +1,670 @@
+@module aes128;
+@intent("AES-128 ECB mode encryption/decryption with NIST test vector verification and benchmark");
+
+// =============================================================================
+// AES-128-ECB -- Tiny-AES port to AXIOM
+// =============================================================================
+//
+// Implements AES-128 encryption and decryption in ECB mode.
+// Key size: 16 bytes (128 bits), Block size: 16 bytes, Rounds: 10
+//
+// GAP: AXIOM has no u8 type; we use i32 to hold byte values [0..255].
+//      All byte operations mask with band(x, 255) where needed.
+// GAP: No multi-dimensional arrays; state[4][4] is flat array[i32, 16].
+//      Indexing: state[row][col] = state[row * 4 + col] (row-major for state).
+//      Note: AES state is column-major: state[row][col] where col is the
+//      byte index within a column. We store as flat[row * 4 + col].
+// GAP: No static/global arrays; S-box and tables are initialized in functions.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// AES constants
+// ---------------------------------------------------------------------------
+@const fn NB() -> i32 { return 4; }
+@const fn NK() -> i32 { return 4; }
+@const fn NR() -> i32 { return 10; }
+@const fn KEYLEN() -> i32 { return 16; }
+@const fn KEYEXPSIZE() -> i32 { return 176; }
+
+// ---------------------------------------------------------------------------
+// S-box initialization: 256-byte AES substitution box
+// ---------------------------------------------------------------------------
+fn init_sbox(s: ptr[i32]) {
+    // Row 0
+    ptr_write_i32(s, 0, 0x63); ptr_write_i32(s, 1, 0x7C); ptr_write_i32(s, 2, 0x77); ptr_write_i32(s, 3, 0x7B);
+    ptr_write_i32(s, 4, 0xF2); ptr_write_i32(s, 5, 0x6B); ptr_write_i32(s, 6, 0x6F); ptr_write_i32(s, 7, 0xC5);
+    ptr_write_i32(s, 8, 0x30); ptr_write_i32(s, 9, 0x01); ptr_write_i32(s, 10, 0x67); ptr_write_i32(s, 11, 0x2B);
+    ptr_write_i32(s, 12, 0xFE); ptr_write_i32(s, 13, 0xD7); ptr_write_i32(s, 14, 0xAB); ptr_write_i32(s, 15, 0x76);
+    // Row 1
+    ptr_write_i32(s, 16, 0xCA); ptr_write_i32(s, 17, 0x82); ptr_write_i32(s, 18, 0xC9); ptr_write_i32(s, 19, 0x7D);
+    ptr_write_i32(s, 20, 0xFA); ptr_write_i32(s, 21, 0x59); ptr_write_i32(s, 22, 0x47); ptr_write_i32(s, 23, 0xF0);
+    ptr_write_i32(s, 24, 0xAD); ptr_write_i32(s, 25, 0xD4); ptr_write_i32(s, 26, 0xA2); ptr_write_i32(s, 27, 0xAF);
+    ptr_write_i32(s, 28, 0x9C); ptr_write_i32(s, 29, 0xA4); ptr_write_i32(s, 30, 0x72); ptr_write_i32(s, 31, 0xC0);
+    // Row 2
+    ptr_write_i32(s, 32, 0xB7); ptr_write_i32(s, 33, 0xFD); ptr_write_i32(s, 34, 0x93); ptr_write_i32(s, 35, 0x26);
+    ptr_write_i32(s, 36, 0x36); ptr_write_i32(s, 37, 0x3F); ptr_write_i32(s, 38, 0xF7); ptr_write_i32(s, 39, 0xCC);
+    ptr_write_i32(s, 40, 0x34); ptr_write_i32(s, 41, 0xA5); ptr_write_i32(s, 42, 0xE5); ptr_write_i32(s, 43, 0xF1);
+    ptr_write_i32(s, 44, 0x71); ptr_write_i32(s, 45, 0xD8); ptr_write_i32(s, 46, 0x31); ptr_write_i32(s, 47, 0x15);
+    // Row 3
+    ptr_write_i32(s, 48, 0x04); ptr_write_i32(s, 49, 0xC7); ptr_write_i32(s, 50, 0x23); ptr_write_i32(s, 51, 0xC3);
+    ptr_write_i32(s, 52, 0x18); ptr_write_i32(s, 53, 0x96); ptr_write_i32(s, 54, 0x05); ptr_write_i32(s, 55, 0x9A);
+    ptr_write_i32(s, 56, 0x07); ptr_write_i32(s, 57, 0x12); ptr_write_i32(s, 58, 0x80); ptr_write_i32(s, 59, 0xE2);
+    ptr_write_i32(s, 60, 0xEB); ptr_write_i32(s, 61, 0x27); ptr_write_i32(s, 62, 0xB2); ptr_write_i32(s, 63, 0x75);
+    // Row 4
+    ptr_write_i32(s, 64, 0x09); ptr_write_i32(s, 65, 0x83); ptr_write_i32(s, 66, 0x2C); ptr_write_i32(s, 67, 0x1A);
+    ptr_write_i32(s, 68, 0x1B); ptr_write_i32(s, 69, 0x6E); ptr_write_i32(s, 70, 0x5A); ptr_write_i32(s, 71, 0xA0);
+    ptr_write_i32(s, 72, 0x52); ptr_write_i32(s, 73, 0x3B); ptr_write_i32(s, 74, 0xD6); ptr_write_i32(s, 75, 0xB3);
+    ptr_write_i32(s, 76, 0x29); ptr_write_i32(s, 77, 0xE3); ptr_write_i32(s, 78, 0x2F); ptr_write_i32(s, 79, 0x84);
+    // Row 5
+    ptr_write_i32(s, 80, 0x53); ptr_write_i32(s, 81, 0xD1); ptr_write_i32(s, 82, 0x00); ptr_write_i32(s, 83, 0xED);
+    ptr_write_i32(s, 84, 0x20); ptr_write_i32(s, 85, 0xFC); ptr_write_i32(s, 86, 0xB1); ptr_write_i32(s, 87, 0x5B);
+    ptr_write_i32(s, 88, 0x6A); ptr_write_i32(s, 89, 0xCB); ptr_write_i32(s, 90, 0xBE); ptr_write_i32(s, 91, 0x39);
+    ptr_write_i32(s, 92, 0x4A); ptr_write_i32(s, 93, 0x4C); ptr_write_i32(s, 94, 0x58); ptr_write_i32(s, 95, 0xCF);
+    // Row 6
+    ptr_write_i32(s, 96, 0xD0); ptr_write_i32(s, 97, 0xEF); ptr_write_i32(s, 98, 0xAA); ptr_write_i32(s, 99, 0xFB);
+    ptr_write_i32(s, 100, 0x43); ptr_write_i32(s, 101, 0x4D); ptr_write_i32(s, 102, 0x33); ptr_write_i32(s, 103, 0x85);
+    ptr_write_i32(s, 104, 0x45); ptr_write_i32(s, 105, 0xF9); ptr_write_i32(s, 106, 0x02); ptr_write_i32(s, 107, 0x7F);
+    ptr_write_i32(s, 108, 0x50); ptr_write_i32(s, 109, 0x3C); ptr_write_i32(s, 110, 0x9F); ptr_write_i32(s, 111, 0xA8);
+    // Row 7
+    ptr_write_i32(s, 112, 0x51); ptr_write_i32(s, 113, 0xA3); ptr_write_i32(s, 114, 0x40); ptr_write_i32(s, 115, 0x8F);
+    ptr_write_i32(s, 116, 0x92); ptr_write_i32(s, 117, 0x9D); ptr_write_i32(s, 118, 0x38); ptr_write_i32(s, 119, 0xF5);
+    ptr_write_i32(s, 120, 0xBC); ptr_write_i32(s, 121, 0xB6); ptr_write_i32(s, 122, 0xDA); ptr_write_i32(s, 123, 0x21);
+    ptr_write_i32(s, 124, 0x10); ptr_write_i32(s, 125, 0xFF); ptr_write_i32(s, 126, 0xF3); ptr_write_i32(s, 127, 0xD2);
+    // Row 8
+    ptr_write_i32(s, 128, 0xCD); ptr_write_i32(s, 129, 0x0C); ptr_write_i32(s, 130, 0x13); ptr_write_i32(s, 131, 0xEC);
+    ptr_write_i32(s, 132, 0x5F); ptr_write_i32(s, 133, 0x97); ptr_write_i32(s, 134, 0x44); ptr_write_i32(s, 135, 0x17);
+    ptr_write_i32(s, 136, 0xC4); ptr_write_i32(s, 137, 0xA7); ptr_write_i32(s, 138, 0x7E); ptr_write_i32(s, 139, 0x3D);
+    ptr_write_i32(s, 140, 0x64); ptr_write_i32(s, 141, 0x5D); ptr_write_i32(s, 142, 0x19); ptr_write_i32(s, 143, 0x73);
+    // Row 9
+    ptr_write_i32(s, 144, 0x60); ptr_write_i32(s, 145, 0x81); ptr_write_i32(s, 146, 0x4F); ptr_write_i32(s, 147, 0xDC);
+    ptr_write_i32(s, 148, 0x22); ptr_write_i32(s, 149, 0x2A); ptr_write_i32(s, 150, 0x90); ptr_write_i32(s, 151, 0x88);
+    ptr_write_i32(s, 152, 0x46); ptr_write_i32(s, 153, 0xEE); ptr_write_i32(s, 154, 0xB8); ptr_write_i32(s, 155, 0x14);
+    ptr_write_i32(s, 156, 0xDE); ptr_write_i32(s, 157, 0x5E); ptr_write_i32(s, 158, 0x0B); ptr_write_i32(s, 159, 0xDB);
+    // Row A
+    ptr_write_i32(s, 160, 0xE0); ptr_write_i32(s, 161, 0x32); ptr_write_i32(s, 162, 0x3A); ptr_write_i32(s, 163, 0x0A);
+    ptr_write_i32(s, 164, 0x49); ptr_write_i32(s, 165, 0x06); ptr_write_i32(s, 166, 0x24); ptr_write_i32(s, 167, 0x5C);
+    ptr_write_i32(s, 168, 0xC2); ptr_write_i32(s, 169, 0xD3); ptr_write_i32(s, 170, 0xAC); ptr_write_i32(s, 171, 0x62);
+    ptr_write_i32(s, 172, 0x91); ptr_write_i32(s, 173, 0x95); ptr_write_i32(s, 174, 0xE4); ptr_write_i32(s, 175, 0x79);
+    // Row B
+    ptr_write_i32(s, 176, 0xE7); ptr_write_i32(s, 177, 0xC8); ptr_write_i32(s, 178, 0x37); ptr_write_i32(s, 179, 0x6D);
+    ptr_write_i32(s, 180, 0x8D); ptr_write_i32(s, 181, 0xD5); ptr_write_i32(s, 182, 0x4E); ptr_write_i32(s, 183, 0xA9);
+    ptr_write_i32(s, 184, 0x6C); ptr_write_i32(s, 185, 0x56); ptr_write_i32(s, 186, 0xF4); ptr_write_i32(s, 187, 0xEA);
+    ptr_write_i32(s, 188, 0x65); ptr_write_i32(s, 189, 0x7A); ptr_write_i32(s, 190, 0xAE); ptr_write_i32(s, 191, 0x08);
+    // Row C
+    ptr_write_i32(s, 192, 0xBA); ptr_write_i32(s, 193, 0x78); ptr_write_i32(s, 194, 0x25); ptr_write_i32(s, 195, 0x2E);
+    ptr_write_i32(s, 196, 0x1C); ptr_write_i32(s, 197, 0xA6); ptr_write_i32(s, 198, 0xB4); ptr_write_i32(s, 199, 0xC6);
+    ptr_write_i32(s, 200, 0xE8); ptr_write_i32(s, 201, 0xDD); ptr_write_i32(s, 202, 0x74); ptr_write_i32(s, 203, 0x1F);
+    ptr_write_i32(s, 204, 0x4B); ptr_write_i32(s, 205, 0xBD); ptr_write_i32(s, 206, 0x8B); ptr_write_i32(s, 207, 0x8A);
+    // Row D
+    ptr_write_i32(s, 208, 0x70); ptr_write_i32(s, 209, 0x3E); ptr_write_i32(s, 210, 0xB5); ptr_write_i32(s, 211, 0x66);
+    ptr_write_i32(s, 212, 0x48); ptr_write_i32(s, 213, 0x03); ptr_write_i32(s, 214, 0xF6); ptr_write_i32(s, 215, 0x0E);
+    ptr_write_i32(s, 216, 0x61); ptr_write_i32(s, 217, 0x35); ptr_write_i32(s, 218, 0x57); ptr_write_i32(s, 219, 0xB9);
+    ptr_write_i32(s, 220, 0x86); ptr_write_i32(s, 221, 0xC1); ptr_write_i32(s, 222, 0x1D); ptr_write_i32(s, 223, 0x9E);
+    // Row E
+    ptr_write_i32(s, 224, 0xE1); ptr_write_i32(s, 225, 0xF8); ptr_write_i32(s, 226, 0x98); ptr_write_i32(s, 227, 0x11);
+    ptr_write_i32(s, 228, 0x69); ptr_write_i32(s, 229, 0xD9); ptr_write_i32(s, 230, 0x8E); ptr_write_i32(s, 231, 0x94);
+    ptr_write_i32(s, 232, 0x9B); ptr_write_i32(s, 233, 0x1E); ptr_write_i32(s, 234, 0x87); ptr_write_i32(s, 235, 0xE9);
+    ptr_write_i32(s, 236, 0xCE); ptr_write_i32(s, 237, 0x55); ptr_write_i32(s, 238, 0x28); ptr_write_i32(s, 239, 0xDF);
+    // Row F
+    ptr_write_i32(s, 240, 0x8C); ptr_write_i32(s, 241, 0xA1); ptr_write_i32(s, 242, 0x89); ptr_write_i32(s, 243, 0x0D);
+    ptr_write_i32(s, 244, 0xBF); ptr_write_i32(s, 245, 0xE6); ptr_write_i32(s, 246, 0x42); ptr_write_i32(s, 247, 0x68);
+    ptr_write_i32(s, 248, 0x41); ptr_write_i32(s, 249, 0x99); ptr_write_i32(s, 250, 0x2D); ptr_write_i32(s, 251, 0x0F);
+    ptr_write_i32(s, 252, 0xB0); ptr_write_i32(s, 253, 0x54); ptr_write_i32(s, 254, 0xBB); ptr_write_i32(s, 255, 0x16);
+}
+
+// ---------------------------------------------------------------------------
+// Inverse S-box initialization
+// ---------------------------------------------------------------------------
+fn init_rsbox(rs: ptr[i32]) {
+    ptr_write_i32(rs, 0, 0x52); ptr_write_i32(rs, 1, 0x09); ptr_write_i32(rs, 2, 0x6A); ptr_write_i32(rs, 3, 0xD5);
+    ptr_write_i32(rs, 4, 0x30); ptr_write_i32(rs, 5, 0x36); ptr_write_i32(rs, 6, 0xA5); ptr_write_i32(rs, 7, 0x38);
+    ptr_write_i32(rs, 8, 0xBF); ptr_write_i32(rs, 9, 0x40); ptr_write_i32(rs, 10, 0xA3); ptr_write_i32(rs, 11, 0x9E);
+    ptr_write_i32(rs, 12, 0x81); ptr_write_i32(rs, 13, 0xF3); ptr_write_i32(rs, 14, 0xD7); ptr_write_i32(rs, 15, 0xFB);
+    ptr_write_i32(rs, 16, 0x7C); ptr_write_i32(rs, 17, 0xE3); ptr_write_i32(rs, 18, 0x39); ptr_write_i32(rs, 19, 0x82);
+    ptr_write_i32(rs, 20, 0x9B); ptr_write_i32(rs, 21, 0x2F); ptr_write_i32(rs, 22, 0xFF); ptr_write_i32(rs, 23, 0x87);
+    ptr_write_i32(rs, 24, 0x34); ptr_write_i32(rs, 25, 0x8E); ptr_write_i32(rs, 26, 0x43); ptr_write_i32(rs, 27, 0x44);
+    ptr_write_i32(rs, 28, 0xC4); ptr_write_i32(rs, 29, 0xDE); ptr_write_i32(rs, 30, 0xE9); ptr_write_i32(rs, 31, 0xCB);
+    ptr_write_i32(rs, 32, 0x54); ptr_write_i32(rs, 33, 0x7B); ptr_write_i32(rs, 34, 0x94); ptr_write_i32(rs, 35, 0x32);
+    ptr_write_i32(rs, 36, 0xA6); ptr_write_i32(rs, 37, 0xC2); ptr_write_i32(rs, 38, 0x23); ptr_write_i32(rs, 39, 0x3D);
+    ptr_write_i32(rs, 40, 0xEE); ptr_write_i32(rs, 41, 0x4C); ptr_write_i32(rs, 42, 0x95); ptr_write_i32(rs, 43, 0x0B);
+    ptr_write_i32(rs, 44, 0x42); ptr_write_i32(rs, 45, 0xFA); ptr_write_i32(rs, 46, 0xC3); ptr_write_i32(rs, 47, 0x4E);
+    ptr_write_i32(rs, 48, 0x08); ptr_write_i32(rs, 49, 0x2E); ptr_write_i32(rs, 50, 0xA1); ptr_write_i32(rs, 51, 0x66);
+    ptr_write_i32(rs, 52, 0x28); ptr_write_i32(rs, 53, 0xD9); ptr_write_i32(rs, 54, 0x24); ptr_write_i32(rs, 55, 0xB2);
+    ptr_write_i32(rs, 56, 0x76); ptr_write_i32(rs, 57, 0x5B); ptr_write_i32(rs, 58, 0xA2); ptr_write_i32(rs, 59, 0x49);
+    ptr_write_i32(rs, 60, 0x6D); ptr_write_i32(rs, 61, 0x8B); ptr_write_i32(rs, 62, 0xD1); ptr_write_i32(rs, 63, 0x25);
+    ptr_write_i32(rs, 64, 0x72); ptr_write_i32(rs, 65, 0xF8); ptr_write_i32(rs, 66, 0xF6); ptr_write_i32(rs, 67, 0x64);
+    ptr_write_i32(rs, 68, 0x86); ptr_write_i32(rs, 69, 0x68); ptr_write_i32(rs, 70, 0x98); ptr_write_i32(rs, 71, 0x16);
+    ptr_write_i32(rs, 72, 0xD4); ptr_write_i32(rs, 73, 0xA4); ptr_write_i32(rs, 74, 0x5C); ptr_write_i32(rs, 75, 0xCC);
+    ptr_write_i32(rs, 76, 0x5D); ptr_write_i32(rs, 77, 0x65); ptr_write_i32(rs, 78, 0xB6); ptr_write_i32(rs, 79, 0x92);
+    ptr_write_i32(rs, 80, 0x6C); ptr_write_i32(rs, 81, 0x70); ptr_write_i32(rs, 82, 0x48); ptr_write_i32(rs, 83, 0x50);
+    ptr_write_i32(rs, 84, 0xFD); ptr_write_i32(rs, 85, 0xED); ptr_write_i32(rs, 86, 0xB9); ptr_write_i32(rs, 87, 0xDA);
+    ptr_write_i32(rs, 88, 0x5E); ptr_write_i32(rs, 89, 0x15); ptr_write_i32(rs, 90, 0x46); ptr_write_i32(rs, 91, 0x57);
+    ptr_write_i32(rs, 92, 0xA7); ptr_write_i32(rs, 93, 0x8D); ptr_write_i32(rs, 94, 0x9D); ptr_write_i32(rs, 95, 0x84);
+    ptr_write_i32(rs, 96, 0x90); ptr_write_i32(rs, 97, 0xD8); ptr_write_i32(rs, 98, 0xAB); ptr_write_i32(rs, 99, 0x00);
+    ptr_write_i32(rs, 100, 0x8C); ptr_write_i32(rs, 101, 0xBC); ptr_write_i32(rs, 102, 0xD3); ptr_write_i32(rs, 103, 0x0A);
+    ptr_write_i32(rs, 104, 0xF7); ptr_write_i32(rs, 105, 0xE4); ptr_write_i32(rs, 106, 0x58); ptr_write_i32(rs, 107, 0x05);
+    ptr_write_i32(rs, 108, 0xB8); ptr_write_i32(rs, 109, 0xB3); ptr_write_i32(rs, 110, 0x45); ptr_write_i32(rs, 111, 0x06);
+    ptr_write_i32(rs, 112, 0xD0); ptr_write_i32(rs, 113, 0x2C); ptr_write_i32(rs, 114, 0x1E); ptr_write_i32(rs, 115, 0x8F);
+    ptr_write_i32(rs, 116, 0xCA); ptr_write_i32(rs, 117, 0x3F); ptr_write_i32(rs, 118, 0x0F); ptr_write_i32(rs, 119, 0x02);
+    ptr_write_i32(rs, 120, 0xC1); ptr_write_i32(rs, 121, 0xAF); ptr_write_i32(rs, 122, 0xBD); ptr_write_i32(rs, 123, 0x03);
+    ptr_write_i32(rs, 124, 0x01); ptr_write_i32(rs, 125, 0x13); ptr_write_i32(rs, 126, 0x8A); ptr_write_i32(rs, 127, 0x6B);
+    ptr_write_i32(rs, 128, 0x3A); ptr_write_i32(rs, 129, 0x91); ptr_write_i32(rs, 130, 0x11); ptr_write_i32(rs, 131, 0x41);
+    ptr_write_i32(rs, 132, 0x4F); ptr_write_i32(rs, 133, 0x67); ptr_write_i32(rs, 134, 0xDC); ptr_write_i32(rs, 135, 0xEA);
+    ptr_write_i32(rs, 136, 0x97); ptr_write_i32(rs, 137, 0xF2); ptr_write_i32(rs, 138, 0xCF); ptr_write_i32(rs, 139, 0xCE);
+    ptr_write_i32(rs, 140, 0xF0); ptr_write_i32(rs, 141, 0xB4); ptr_write_i32(rs, 142, 0xE6); ptr_write_i32(rs, 143, 0x73);
+    ptr_write_i32(rs, 144, 0x96); ptr_write_i32(rs, 145, 0xAC); ptr_write_i32(rs, 146, 0x74); ptr_write_i32(rs, 147, 0x22);
+    ptr_write_i32(rs, 148, 0xE7); ptr_write_i32(rs, 149, 0xAD); ptr_write_i32(rs, 150, 0x35); ptr_write_i32(rs, 151, 0x85);
+    ptr_write_i32(rs, 152, 0xE2); ptr_write_i32(rs, 153, 0xF9); ptr_write_i32(rs, 154, 0x37); ptr_write_i32(rs, 155, 0xE8);
+    ptr_write_i32(rs, 156, 0x1C); ptr_write_i32(rs, 157, 0x75); ptr_write_i32(rs, 158, 0xDF); ptr_write_i32(rs, 159, 0x6E);
+    ptr_write_i32(rs, 160, 0x47); ptr_write_i32(rs, 161, 0xF1); ptr_write_i32(rs, 162, 0x1A); ptr_write_i32(rs, 163, 0x71);
+    ptr_write_i32(rs, 164, 0x1D); ptr_write_i32(rs, 165, 0x29); ptr_write_i32(rs, 166, 0xC5); ptr_write_i32(rs, 167, 0x89);
+    ptr_write_i32(rs, 168, 0x6F); ptr_write_i32(rs, 169, 0xB7); ptr_write_i32(rs, 170, 0x62); ptr_write_i32(rs, 171, 0x0E);
+    ptr_write_i32(rs, 172, 0xAA); ptr_write_i32(rs, 173, 0x18); ptr_write_i32(rs, 174, 0xBE); ptr_write_i32(rs, 175, 0x1B);
+    ptr_write_i32(rs, 176, 0xFC); ptr_write_i32(rs, 177, 0x56); ptr_write_i32(rs, 178, 0x3E); ptr_write_i32(rs, 179, 0x4B);
+    ptr_write_i32(rs, 180, 0xC6); ptr_write_i32(rs, 181, 0xD2); ptr_write_i32(rs, 182, 0x79); ptr_write_i32(rs, 183, 0x20);
+    ptr_write_i32(rs, 184, 0x9A); ptr_write_i32(rs, 185, 0xDB); ptr_write_i32(rs, 186, 0xC0); ptr_write_i32(rs, 187, 0xFE);
+    ptr_write_i32(rs, 188, 0x78); ptr_write_i32(rs, 189, 0xCD); ptr_write_i32(rs, 190, 0x5A); ptr_write_i32(rs, 191, 0xF4);
+    ptr_write_i32(rs, 192, 0x1F); ptr_write_i32(rs, 193, 0xDD); ptr_write_i32(rs, 194, 0xA8); ptr_write_i32(rs, 195, 0x33);
+    ptr_write_i32(rs, 196, 0x88); ptr_write_i32(rs, 197, 0x07); ptr_write_i32(rs, 198, 0xC7); ptr_write_i32(rs, 199, 0x31);
+    ptr_write_i32(rs, 200, 0xB1); ptr_write_i32(rs, 201, 0x12); ptr_write_i32(rs, 202, 0x10); ptr_write_i32(rs, 203, 0x59);
+    ptr_write_i32(rs, 204, 0x27); ptr_write_i32(rs, 205, 0x80); ptr_write_i32(rs, 206, 0xEC); ptr_write_i32(rs, 207, 0x5F);
+    ptr_write_i32(rs, 208, 0x60); ptr_write_i32(rs, 209, 0x51); ptr_write_i32(rs, 210, 0x7F); ptr_write_i32(rs, 211, 0xA9);
+    ptr_write_i32(rs, 212, 0x19); ptr_write_i32(rs, 213, 0xB5); ptr_write_i32(rs, 214, 0x4A); ptr_write_i32(rs, 215, 0x0D);
+    ptr_write_i32(rs, 216, 0x2D); ptr_write_i32(rs, 217, 0xE5); ptr_write_i32(rs, 218, 0x7A); ptr_write_i32(rs, 219, 0x9F);
+    ptr_write_i32(rs, 220, 0x93); ptr_write_i32(rs, 221, 0xC9); ptr_write_i32(rs, 222, 0x9C); ptr_write_i32(rs, 223, 0xEF);
+    ptr_write_i32(rs, 224, 0xA0); ptr_write_i32(rs, 225, 0xE0); ptr_write_i32(rs, 226, 0x3B); ptr_write_i32(rs, 227, 0x4D);
+    ptr_write_i32(rs, 228, 0xAE); ptr_write_i32(rs, 229, 0x2A); ptr_write_i32(rs, 230, 0xF5); ptr_write_i32(rs, 231, 0xB0);
+    ptr_write_i32(rs, 232, 0xC8); ptr_write_i32(rs, 233, 0xEB); ptr_write_i32(rs, 234, 0xBB); ptr_write_i32(rs, 235, 0x3C);
+    ptr_write_i32(rs, 236, 0x83); ptr_write_i32(rs, 237, 0x53); ptr_write_i32(rs, 238, 0x99); ptr_write_i32(rs, 239, 0x61);
+    ptr_write_i32(rs, 240, 0x17); ptr_write_i32(rs, 241, 0x2B); ptr_write_i32(rs, 242, 0x04); ptr_write_i32(rs, 243, 0x7E);
+    ptr_write_i32(rs, 244, 0xBA); ptr_write_i32(rs, 245, 0x77); ptr_write_i32(rs, 246, 0xD6); ptr_write_i32(rs, 247, 0x26);
+    ptr_write_i32(rs, 248, 0xE1); ptr_write_i32(rs, 249, 0x69); ptr_write_i32(rs, 250, 0x14); ptr_write_i32(rs, 251, 0x63);
+    ptr_write_i32(rs, 252, 0x55); ptr_write_i32(rs, 253, 0x21); ptr_write_i32(rs, 254, 0x0C); ptr_write_i32(rs, 255, 0x7D);
+}
+
+// ---------------------------------------------------------------------------
+// Rcon (round constants)
+// ---------------------------------------------------------------------------
+fn init_rcon(rc: ptr[i32]) {
+    ptr_write_i32(rc, 0, 0x8D); ptr_write_i32(rc, 1, 0x01); ptr_write_i32(rc, 2, 0x02);
+    ptr_write_i32(rc, 3, 0x04); ptr_write_i32(rc, 4, 0x08); ptr_write_i32(rc, 5, 0x10);
+    ptr_write_i32(rc, 6, 0x20); ptr_write_i32(rc, 7, 0x40); ptr_write_i32(rc, 8, 0x80);
+    ptr_write_i32(rc, 9, 0x1B); ptr_write_i32(rc, 10, 0x36);
+}
+
+// ---------------------------------------------------------------------------
+// GF(2^8) multiply by 2 (xtime)
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn xtime(x: i32) -> i32 {
+    // Shift left by 1, then XOR with 0x1B if high bit was set
+    let shifted: i32 = band(shl(x, 1), 0xFF);
+    // If bit 7 of x was set (x >= 128), XOR with 0x1B
+    // We use: ((x >> 7) & 1) * 0x1B to get conditional mask
+    let mask: i32 = band(lshr(x, 7), 1) * 0x1B;
+    return bxor(shifted, mask);
+}
+
+// ---------------------------------------------------------------------------
+// GF(2^8) general multiply
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn gmul(a: i32, b: i32) -> i32 {
+    let result: i32 = 0;
+    let aa: i32 = a;
+    let bb: i32 = b;
+
+    // Process 8 bits of b
+    if band(bb, 1) != 0 { result = bxor(result, aa); }
+    aa = xtime(aa); bb = lshr(bb, 1);
+    if band(bb, 1) != 0 { result = bxor(result, aa); }
+    aa = xtime(aa); bb = lshr(bb, 1);
+    if band(bb, 1) != 0 { result = bxor(result, aa); }
+    aa = xtime(aa); bb = lshr(bb, 1);
+    if band(bb, 1) != 0 { result = bxor(result, aa); }
+    aa = xtime(aa); bb = lshr(bb, 1);
+    if band(bb, 1) != 0 { result = bxor(result, aa); }
+    aa = xtime(aa); bb = lshr(bb, 1);
+    if band(bb, 1) != 0 { result = bxor(result, aa); }
+    aa = xtime(aa); bb = lshr(bb, 1);
+    if band(bb, 1) != 0 { result = bxor(result, aa); }
+    aa = xtime(aa); bb = lshr(bb, 1);
+    if band(bb, 1) != 0 { result = bxor(result, aa); }
+
+    return band(result, 0xFF);
+}
+
+// ---------------------------------------------------------------------------
+// Key Expansion
+// ---------------------------------------------------------------------------
+fn key_expansion(key: ptr[i32], round_key: ptr[i32], sbox: ptr[i32], rcon: ptr[i32]) {
+    // First round key is the key itself
+    for i: i32 in range(0, NK()) {
+        let base: i32 = i * 4;
+        ptr_write_i32(round_key, base, ptr_read_i32(key, base));
+        ptr_write_i32(round_key, base + 1, ptr_read_i32(key, base + 1));
+        ptr_write_i32(round_key, base + 2, ptr_read_i32(key, base + 2));
+        ptr_write_i32(round_key, base + 3, ptr_read_i32(key, base + 3));
+    }
+
+    // Generate remaining round keys
+    let i: i32 = NK();
+    while i < NB() * (NR() + 1) {
+        let k: i32 = (i - 1) * 4;
+        let t0: i32 = ptr_read_i32(round_key, k);
+        let t1: i32 = ptr_read_i32(round_key, k + 1);
+        let t2: i32 = ptr_read_i32(round_key, k + 2);
+        let t3: i32 = ptr_read_i32(round_key, k + 3);
+
+        if i % NK() == 0 {
+            // RotWord: rotate left by one byte
+            let tmp: i32 = t0;
+            t0 = t1;
+            t1 = t2;
+            t2 = t3;
+            t3 = tmp;
+            // SubWord: apply S-box
+            t0 = ptr_read_i32(sbox, t0);
+            t1 = ptr_read_i32(sbox, t1);
+            t2 = ptr_read_i32(sbox, t2);
+            t3 = ptr_read_i32(sbox, t3);
+            // XOR with Rcon
+            t0 = bxor(t0, ptr_read_i32(rcon, i / NK()));
+        }
+
+        let prev: i32 = (i - NK()) * 4;
+        let cur: i32 = i * 4;
+        ptr_write_i32(round_key, cur, bxor(ptr_read_i32(round_key, prev), t0));
+        ptr_write_i32(round_key, cur + 1, bxor(ptr_read_i32(round_key, prev + 1), t1));
+        ptr_write_i32(round_key, cur + 2, bxor(ptr_read_i32(round_key, prev + 2), t2));
+        ptr_write_i32(round_key, cur + 3, bxor(ptr_read_i32(round_key, prev + 3), t3));
+
+        i = i + 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AddRoundKey: XOR state with round key
+// ---------------------------------------------------------------------------
+@inline(always)
+fn add_round_key(round: i32, state: ptr[i32], round_key: ptr[i32]) {
+    // AES state is column-major: state[row][col]
+    // round_key layout: 4 bytes per word, 4 words per round key
+    for col: i32 in range(0, 4) {
+        for row: i32 in range(0, 4) {
+            let si: i32 = row * 4 + col;
+            let ki: i32 = (round * NB() + col) * 4 + row;
+            let sv: i32 = ptr_read_i32(state, si);
+            let kv: i32 = ptr_read_i32(round_key, ki);
+            ptr_write_i32(state, si, bxor(sv, kv));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SubBytes: substitute each byte using S-box
+// ---------------------------------------------------------------------------
+@inline(always)
+fn sub_bytes(state: ptr[i32], sbox: ptr[i32]) {
+    for i: i32 in range(0, 16) {
+        ptr_write_i32(state, i, ptr_read_i32(sbox, ptr_read_i32(state, i)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InvSubBytes: substitute each byte using inverse S-box
+// ---------------------------------------------------------------------------
+@inline(always)
+fn inv_sub_bytes(state: ptr[i32], rsbox: ptr[i32]) {
+    for i: i32 in range(0, 16) {
+        ptr_write_i32(state, i, ptr_read_i32(rsbox, ptr_read_i32(state, i)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ShiftRows: cyclically shift rows
+// ---------------------------------------------------------------------------
+@inline(always)
+fn shift_rows(state: ptr[i32]) {
+    // Row 0: no shift
+    // Row 1: shift left by 1
+    let t: i32 = ptr_read_i32(state, 1 * 4 + 0);
+    ptr_write_i32(state, 1 * 4 + 0, ptr_read_i32(state, 1 * 4 + 1));
+    ptr_write_i32(state, 1 * 4 + 1, ptr_read_i32(state, 1 * 4 + 2));
+    ptr_write_i32(state, 1 * 4 + 2, ptr_read_i32(state, 1 * 4 + 3));
+    ptr_write_i32(state, 1 * 4 + 3, t);
+
+    // Row 2: shift left by 2
+    let t0: i32 = ptr_read_i32(state, 2 * 4 + 0);
+    let t1: i32 = ptr_read_i32(state, 2 * 4 + 1);
+    ptr_write_i32(state, 2 * 4 + 0, ptr_read_i32(state, 2 * 4 + 2));
+    ptr_write_i32(state, 2 * 4 + 1, ptr_read_i32(state, 2 * 4 + 3));
+    ptr_write_i32(state, 2 * 4 + 2, t0);
+    ptr_write_i32(state, 2 * 4 + 3, t1);
+
+    // Row 3: shift left by 3 = shift right by 1
+    let t3: i32 = ptr_read_i32(state, 3 * 4 + 3);
+    ptr_write_i32(state, 3 * 4 + 3, ptr_read_i32(state, 3 * 4 + 2));
+    ptr_write_i32(state, 3 * 4 + 2, ptr_read_i32(state, 3 * 4 + 1));
+    ptr_write_i32(state, 3 * 4 + 1, ptr_read_i32(state, 3 * 4 + 0));
+    ptr_write_i32(state, 3 * 4 + 0, t3);
+}
+
+// ---------------------------------------------------------------------------
+// InvShiftRows: cyclically shift rows in reverse
+// ---------------------------------------------------------------------------
+@inline(always)
+fn inv_shift_rows(state: ptr[i32]) {
+    // Row 1: shift right by 1
+    let t: i32 = ptr_read_i32(state, 1 * 4 + 3);
+    ptr_write_i32(state, 1 * 4 + 3, ptr_read_i32(state, 1 * 4 + 2));
+    ptr_write_i32(state, 1 * 4 + 2, ptr_read_i32(state, 1 * 4 + 1));
+    ptr_write_i32(state, 1 * 4 + 1, ptr_read_i32(state, 1 * 4 + 0));
+    ptr_write_i32(state, 1 * 4 + 0, t);
+
+    // Row 2: shift right by 2
+    let t0: i32 = ptr_read_i32(state, 2 * 4 + 0);
+    let t1: i32 = ptr_read_i32(state, 2 * 4 + 1);
+    ptr_write_i32(state, 2 * 4 + 0, ptr_read_i32(state, 2 * 4 + 2));
+    ptr_write_i32(state, 2 * 4 + 1, ptr_read_i32(state, 2 * 4 + 3));
+    ptr_write_i32(state, 2 * 4 + 2, t0);
+    ptr_write_i32(state, 2 * 4 + 3, t1);
+
+    // Row 3: shift right by 3 = shift left by 1
+    let t3: i32 = ptr_read_i32(state, 3 * 4 + 0);
+    ptr_write_i32(state, 3 * 4 + 0, ptr_read_i32(state, 3 * 4 + 1));
+    ptr_write_i32(state, 3 * 4 + 1, ptr_read_i32(state, 3 * 4 + 2));
+    ptr_write_i32(state, 3 * 4 + 2, ptr_read_i32(state, 3 * 4 + 3));
+    ptr_write_i32(state, 3 * 4 + 3, t3);
+}
+
+// ---------------------------------------------------------------------------
+// MixColumns: mix columns using GF(2^8) arithmetic
+// ---------------------------------------------------------------------------
+@inline(always)
+fn mix_columns(state: ptr[i32]) {
+    for col: i32 in range(0, 4) {
+        let s0: i32 = ptr_read_i32(state, 0 * 4 + col);
+        let s1: i32 = ptr_read_i32(state, 1 * 4 + col);
+        let s2: i32 = ptr_read_i32(state, 2 * 4 + col);
+        let s3: i32 = ptr_read_i32(state, 3 * 4 + col);
+
+        let t: i32 = bxor(bxor(s0, s1), bxor(s2, s3));
+
+        let u0: i32 = s0;
+        let x: i32 = xtime(bxor(s0, s1));
+        ptr_write_i32(state, 0 * 4 + col, bxor(bxor(s0, x), t));
+
+        x = xtime(bxor(s1, s2));
+        ptr_write_i32(state, 1 * 4 + col, bxor(bxor(s1, x), t));
+
+        x = xtime(bxor(s2, s3));
+        ptr_write_i32(state, 2 * 4 + col, bxor(bxor(s2, x), t));
+
+        x = xtime(bxor(s3, u0));
+        ptr_write_i32(state, 3 * 4 + col, bxor(bxor(s3, x), t));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InvMixColumns: inverse mix columns using GF(2^8) multiply
+// ---------------------------------------------------------------------------
+@inline(always)
+fn inv_mix_columns(state: ptr[i32]) {
+    for col: i32 in range(0, 4) {
+        let s0: i32 = ptr_read_i32(state, 0 * 4 + col);
+        let s1: i32 = ptr_read_i32(state, 1 * 4 + col);
+        let s2: i32 = ptr_read_i32(state, 2 * 4 + col);
+        let s3: i32 = ptr_read_i32(state, 3 * 4 + col);
+
+        ptr_write_i32(state, 0 * 4 + col,
+            band(bxor(bxor(gmul(s0, 14), gmul(s1, 11)), bxor(gmul(s2, 13), gmul(s3, 9))), 0xFF));
+        ptr_write_i32(state, 1 * 4 + col,
+            band(bxor(bxor(gmul(s0, 9), gmul(s1, 14)), bxor(gmul(s2, 11), gmul(s3, 13))), 0xFF));
+        ptr_write_i32(state, 2 * 4 + col,
+            band(bxor(bxor(gmul(s0, 13), gmul(s1, 9)), bxor(gmul(s2, 14), gmul(s3, 11))), 0xFF));
+        ptr_write_i32(state, 3 * 4 + col,
+            band(bxor(bxor(gmul(s0, 11), gmul(s1, 13)), bxor(gmul(s2, 9), gmul(s3, 14))), 0xFF));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AES-128 Encrypt one block (16 bytes) in-place
+// State layout: state[row * 4 + col], input is column-major from plaintext
+// ---------------------------------------------------------------------------
+fn aes_encrypt_block(state: ptr[i32], round_key: ptr[i32], sbox: ptr[i32]) {
+    // Initial round key addition
+    add_round_key(0, state, round_key);
+
+    // Rounds 1..9: SubBytes, ShiftRows, MixColumns, AddRoundKey
+    for round: i32 in range(1, NR()) {
+        sub_bytes(state, sbox);
+        shift_rows(state);
+        mix_columns(state);
+        add_round_key(round, state, round_key);
+    }
+
+    // Final round (no MixColumns)
+    sub_bytes(state, sbox);
+    shift_rows(state);
+    add_round_key(NR(), state, round_key);
+}
+
+// ---------------------------------------------------------------------------
+// AES-128 Decrypt one block (16 bytes) in-place
+// ---------------------------------------------------------------------------
+fn aes_decrypt_block(state: ptr[i32], round_key: ptr[i32], rsbox: ptr[i32]) {
+    // Initial round key addition (last round key)
+    add_round_key(NR(), state, round_key);
+
+    // Rounds 9..1: InvShiftRows, InvSubBytes, AddRoundKey, InvMixColumns
+    let round: i32 = NR() - 1;
+    while round >= 1 {
+        inv_shift_rows(state);
+        inv_sub_bytes(state, rsbox);
+        add_round_key(round, state, round_key);
+        inv_mix_columns(state);
+        round = round - 1;
+    }
+
+    // Final round (no InvMixColumns)
+    inv_shift_rows(state);
+    inv_sub_bytes(state, rsbox);
+    add_round_key(0, state, round_key);
+}
+
+// ---------------------------------------------------------------------------
+// Load 16 bytes from plaintext into AES state (column-major)
+// plaintext[col*4 + row] -> state[row * 4 + col]
+// ---------------------------------------------------------------------------
+fn load_state(state: ptr[i32], input: ptr[i32]) {
+    for col: i32 in range(0, 4) {
+        for row: i32 in range(0, 4) {
+            ptr_write_i32(state, row * 4 + col, ptr_read_i32(input, col * 4 + row));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Store AES state back to output (column-major)
+// state[row * 4 + col] -> output[col*4 + row]
+// ---------------------------------------------------------------------------
+fn store_state(output: ptr[i32], state: ptr[i32]) {
+    for col: i32 in range(0, 4) {
+        for row: i32 in range(0, 4) {
+            ptr_write_i32(output, col * 4 + row, ptr_read_i32(state, row * 4 + col));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Print 16 bytes as hex
+// ---------------------------------------------------------------------------
+fn print_hex_byte(val: i32) {
+    let hi: i32 = lshr(band(val, 0xF0), 4);
+    let lo: i32 = band(val, 0x0F);
+    if hi < 10 { print_i32(hi); } else { print_i32(hi); }
+    // GAP: No character printing from int. We print decimal digits instead.
+    // In a real implementation, we'd print hex chars a-f.
+}
+
+fn print_block(label: ptr[i32], data: ptr[i32]) {
+    // GAP: Cannot pass string to generic print. Using print() for label.
+    for i: i32 in range(0, 16) {
+        print_i32(ptr_read_i32(data, i));
+        print(" ");
+    }
+    print("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Compare two 16-byte blocks
+// ---------------------------------------------------------------------------
+@pure
+fn blocks_equal(a: ptr[i32], b: ptr[i32]) -> i32 {
+    for i: i32 in range(0, 16) {
+        if ptr_read_i32(a, i) != ptr_read_i32(b, i) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Main: NIST test vector verification + benchmark
+// ---------------------------------------------------------------------------
+fn main() -> i32 {
+    print("=== AES-128-ECB Port ===\n");
+
+    // Allocate tables
+    let sbox: ptr[i32] = heap_alloc(256, 4);
+    let rsbox: ptr[i32] = heap_alloc(256, 4);
+    let rcon: ptr[i32] = heap_alloc(11, 4);
+    init_sbox(sbox);
+    init_rsbox(rsbox);
+    init_rcon(rcon);
+
+    // Allocate working buffers
+    let key: ptr[i32] = heap_alloc(16, 4);
+    let round_key: ptr[i32] = heap_alloc(176, 4);
+    let state: ptr[i32] = heap_alloc(16, 4);
+    let plaintext: ptr[i32] = heap_alloc(16, 4);
+    let ciphertext: ptr[i32] = heap_alloc(16, 4);
+    let decrypted: ptr[i32] = heap_alloc(16, 4);
+    let expected_cipher: ptr[i32] = heap_alloc(16, 4);
+
+    // --- NIST Test Vector ---
+    // Key: 2b7e151628aed2a6abf7158809cf4f3c
+    ptr_write_i32(key, 0, 0x2B); ptr_write_i32(key, 1, 0x7E); ptr_write_i32(key, 2, 0x15); ptr_write_i32(key, 3, 0x16);
+    ptr_write_i32(key, 4, 0x28); ptr_write_i32(key, 5, 0xAE); ptr_write_i32(key, 6, 0xD2); ptr_write_i32(key, 7, 0xA6);
+    ptr_write_i32(key, 8, 0xAB); ptr_write_i32(key, 9, 0xF7); ptr_write_i32(key, 10, 0x15); ptr_write_i32(key, 11, 0x88);
+    ptr_write_i32(key, 12, 0x09); ptr_write_i32(key, 13, 0xCF); ptr_write_i32(key, 14, 0x4F); ptr_write_i32(key, 15, 0x3C);
+
+    // Plaintext: 6bc1bee22e409f96e93d7e117393172a
+    ptr_write_i32(plaintext, 0, 0x6B); ptr_write_i32(plaintext, 1, 0xC1); ptr_write_i32(plaintext, 2, 0xBE); ptr_write_i32(plaintext, 3, 0xE2);
+    ptr_write_i32(plaintext, 4, 0x2E); ptr_write_i32(plaintext, 5, 0x40); ptr_write_i32(plaintext, 6, 0x9F); ptr_write_i32(plaintext, 7, 0x96);
+    ptr_write_i32(plaintext, 8, 0xE9); ptr_write_i32(plaintext, 9, 0x3D); ptr_write_i32(plaintext, 10, 0x7E); ptr_write_i32(plaintext, 11, 0x11);
+    ptr_write_i32(plaintext, 12, 0x73); ptr_write_i32(plaintext, 13, 0x93); ptr_write_i32(plaintext, 14, 0x17); ptr_write_i32(plaintext, 15, 0x2A);
+
+    // Expected ciphertext: 3ad77bb40d7a3660a89ecaf32466ef97
+    ptr_write_i32(expected_cipher, 0, 0x3A); ptr_write_i32(expected_cipher, 1, 0xD7); ptr_write_i32(expected_cipher, 2, 0x7B); ptr_write_i32(expected_cipher, 3, 0xB4);
+    ptr_write_i32(expected_cipher, 4, 0x0D); ptr_write_i32(expected_cipher, 5, 0x7A); ptr_write_i32(expected_cipher, 6, 0x36); ptr_write_i32(expected_cipher, 7, 0x60);
+    ptr_write_i32(expected_cipher, 8, 0xA8); ptr_write_i32(expected_cipher, 9, 0x9E); ptr_write_i32(expected_cipher, 10, 0xCA); ptr_write_i32(expected_cipher, 11, 0xF3);
+    ptr_write_i32(expected_cipher, 12, 0x24); ptr_write_i32(expected_cipher, 13, 0x66); ptr_write_i32(expected_cipher, 14, 0xEF); ptr_write_i32(expected_cipher, 15, 0x97);
+
+    // Expand key
+    key_expansion(key, round_key, sbox, rcon);
+
+    // --- Encrypt ---
+    print("Plaintext:  ");
+    print_block(plaintext, plaintext);
+
+    load_state(state, plaintext);
+    aes_encrypt_block(state, round_key, sbox);
+    store_state(ciphertext, state);
+
+    print("Ciphertext: ");
+    print_block(ciphertext, ciphertext);
+
+    print("Expected:   ");
+    print_block(expected_cipher, expected_cipher);
+
+    // Verify encryption
+    if blocks_equal(ciphertext, expected_cipher) == 1 {
+        print("PASS: Encryption matches NIST test vector\n");
+    } else {
+        print("FAIL: Encryption does not match NIST test vector\n");
+    }
+
+    // --- Decrypt ---
+    load_state(state, ciphertext);
+    aes_decrypt_block(state, round_key, rsbox);
+    store_state(decrypted, state);
+
+    print("Decrypted:  ");
+    print_block(decrypted, decrypted);
+
+    // Verify round-trip
+    if blocks_equal(decrypted, plaintext) == 1 {
+        print("PASS: Decrypt matches original plaintext\n");
+    } else {
+        print("FAIL: Decrypt does not match original plaintext\n");
+    }
+
+    // --- Benchmark: 1M encrypt/decrypt cycles ---
+    let iterations: i32 = 1000000;
+    print("Benchmarking: 1M encrypt/decrypt cycles...\n");
+
+    let t0: i64 = clock_ns();
+    let checksum: i32 = 0;
+
+    for iter: i32 in range(0, iterations) {
+        // Encrypt
+        load_state(state, plaintext);
+        aes_encrypt_block(state, round_key, sbox);
+        store_state(ciphertext, state);
+
+        // Decrypt
+        load_state(state, ciphertext);
+        aes_decrypt_block(state, round_key, rsbox);
+        store_state(decrypted, state);
+
+        // Accumulate checksum to prevent DCE
+        checksum = checksum +% ptr_read_i32(ciphertext, 0);
+        checksum = checksum +% ptr_read_i32(decrypted, 0);
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        // 2 operations per iteration (encrypt + decrypt), 16 bytes each
+        let total_bytes: i64 = widen(iterations) * 32;
+        let throughput_mbps: i64 = (total_bytes * 1000) / (elapsed_ms * 1048576);
+        print("Throughput: ");
+        print_i64(throughput_mbps);
+        print(" MB/s\n");
+    }
+
+    // --- Cleanup ---
+    heap_free(sbox);
+    heap_free(rsbox);
+    heap_free(rcon);
+    heap_free(key);
+    heap_free(round_key);
+    heap_free(state);
+    heap_free(plaintext);
+    heap_free(ciphertext);
+    heap_free(decrypted);
+    heap_free(expected_cipher);
+
+    print("=== AES-128-ECB complete ===\n");
+    return 0;
+}

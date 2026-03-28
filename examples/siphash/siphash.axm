@@ -1,0 +1,234 @@
+@module siphash;
+@intent("SipHash-2-4: 64-bit keyed hash function, ported from C reference implementation");
+
+// =============================================================================
+// SipHash-2-4 -- a fast, cryptographically strong PRF
+// =============================================================================
+//
+// Reference: https://131002.net/siphash/
+// Authors: Jean-Philippe Aumasson, Daniel J. Bernstein
+//
+// Translation notes:
+// - All 64-bit additions use +% (wrapping arithmetic)
+// - rotl/rotr builtins are i32-only, so we implement rotl64 manually
+// - XOR via bxor(), shifts via shl()/lshr()
+// - Little-endian byte reads via ptr_read_u8 + shift + OR
+//
+// GAP: rotl() builtin is i32-only; need manual i64 rotate
+// GAP: No u64 type; using i64 (bit patterns are the same for XOR/shift/rotate)
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// 64-bit rotate left: (x << b) | (x >>> (64 - b))
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn rotl64(x: i64, b: i64) -> i64 {
+    return bor(shl(x, b), lshr(x, 64 -% b));
+}
+
+// ---------------------------------------------------------------------------
+// Read 8 bytes from ptr as little-endian u64 (stored in i64)
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn u8to64_le(p: ptr[i64], offset: i32) -> i64 {
+    // Read individual bytes and combine as little-endian
+    let b0: i64 = widen(ptr_read_u8(p, offset));
+    let b1: i64 = widen(ptr_read_u8(p, offset + 1));
+    let b2: i64 = widen(ptr_read_u8(p, offset + 2));
+    let b3: i64 = widen(ptr_read_u8(p, offset + 3));
+    let b4: i64 = widen(ptr_read_u8(p, offset + 4));
+    let b5: i64 = widen(ptr_read_u8(p, offset + 5));
+    let b6: i64 = widen(ptr_read_u8(p, offset + 6));
+    let b7: i64 = widen(ptr_read_u8(p, offset + 7));
+    return bor(bor(bor(b0, shl(b1, 8)),
+                   bor(shl(b2, 16), shl(b3, 24))),
+               bor(bor(shl(b4, 32), shl(b5, 40)),
+                   bor(shl(b6, 48), shl(b7, 56))));
+}
+
+// ---------------------------------------------------------------------------
+// SIPROUND: the core mixing step
+// Uses ptr to 4-element i64 array for v0..v3 (no structs with mutation)
+// ---------------------------------------------------------------------------
+@inline(always)
+fn sipround(v: ptr[i64]) {
+    let v0: i64 = ptr_read_i64(v, 0);
+    let v1: i64 = ptr_read_i64(v, 1);
+    let v2: i64 = ptr_read_i64(v, 2);
+    let v3: i64 = ptr_read_i64(v, 3);
+
+    v0 = v0 +% v1;
+    v1 = rotl64(v1, 13);
+    v1 = bxor(v1, v0);
+    v0 = rotl64(v0, 32);
+
+    v2 = v2 +% v3;
+    v3 = rotl64(v3, 16);
+    v3 = bxor(v3, v2);
+
+    v0 = v0 +% v3;
+    v3 = rotl64(v3, 21);
+    v3 = bxor(v3, v0);
+
+    v2 = v2 +% v1;
+    v1 = rotl64(v1, 17);
+    v1 = bxor(v1, v2);
+    v2 = rotl64(v2, 32);
+
+    ptr_write_i64(v, 0, v0);
+    ptr_write_i64(v, 1, v1);
+    ptr_write_i64(v, 2, v2);
+    ptr_write_i64(v, 3, v3);
+}
+
+// ---------------------------------------------------------------------------
+// SipHash-2-4: hash `inlen` bytes from `in_ptr` with 128-bit key (k0, k1)
+// ---------------------------------------------------------------------------
+fn siphash_2_4(in_ptr: ptr[i64], inlen: i32, k0: i64, k1: i64) -> i64 {
+    // State initialization
+    let v: ptr[i64] = heap_alloc(4, 8);
+    ptr_write_i64(v, 0, bxor(k0, 0x736f6d6570736575));
+    ptr_write_i64(v, 1, bxor(k1, 0x646f72616e646f6d));
+    ptr_write_i64(v, 2, bxor(k0, 0x6c7967656e657261));
+    ptr_write_i64(v, 3, bxor(k1, 0x7465646279746573));
+
+    // Process full 8-byte blocks
+    let num_blocks: i32 = inlen / 8;
+    for i: i32 in range(0, num_blocks) {
+        let m: i64 = u8to64_le(in_ptr, i * 8);
+        ptr_write_i64(v, 3, bxor(ptr_read_i64(v, 3), m));
+        // 2 rounds (SipHash-2-4)
+        sipround(v);
+        sipround(v);
+        ptr_write_i64(v, 0, bxor(ptr_read_i64(v, 0), m));
+    }
+
+    // Handle remaining bytes (0..7) + length byte
+    let left: i32 = inlen - (num_blocks * 8);
+    let tail_offset: i32 = num_blocks * 8;
+
+    // Last block: remaining bytes in little-endian + (inlen % 256) in top byte
+    let b: i64 = shl(band(widen(inlen), 0xFF), 56);
+
+    // Fall-through accumulation of remaining bytes
+    if left >= 7 {
+        b = bor(b, shl(widen(ptr_read_u8(in_ptr, tail_offset + 6)), 48));
+    }
+    if left >= 6 {
+        b = bor(b, shl(widen(ptr_read_u8(in_ptr, tail_offset + 5)), 40));
+    }
+    if left >= 5 {
+        b = bor(b, shl(widen(ptr_read_u8(in_ptr, tail_offset + 4)), 32));
+    }
+    if left >= 4 {
+        b = bor(b, shl(widen(ptr_read_u8(in_ptr, tail_offset + 3)), 24));
+    }
+    if left >= 3 {
+        b = bor(b, shl(widen(ptr_read_u8(in_ptr, tail_offset + 2)), 16));
+    }
+    if left >= 2 {
+        b = bor(b, shl(widen(ptr_read_u8(in_ptr, tail_offset + 1)), 8));
+    }
+    if left >= 1 {
+        b = bor(b, widen(ptr_read_u8(in_ptr, tail_offset)));
+    }
+
+    // XOR last block into state and run rounds
+    ptr_write_i64(v, 3, bxor(ptr_read_i64(v, 3), b));
+    sipround(v);
+    sipround(v);
+    ptr_write_i64(v, 0, bxor(ptr_read_i64(v, 0), b));
+
+    // Finalization: XOR 0xFF into v2, then 4 rounds
+    ptr_write_i64(v, 2, bxor(ptr_read_i64(v, 2), 0xFF));
+    sipround(v);
+    sipround(v);
+    sipround(v);
+    sipround(v);
+
+    // Result = v0 ^ v1 ^ v2 ^ v3
+    let result: i64 = bxor(bxor(ptr_read_i64(v, 0), ptr_read_i64(v, 1)),
+                           bxor(ptr_read_i64(v, 2), ptr_read_i64(v, 3)));
+    heap_free(v);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Main: test vector + benchmark
+// ---------------------------------------------------------------------------
+fn main() -> i32 {
+    // Test vector: key = 00 01 02 ... 0F, message = 00 01 02 ... 0E (15 bytes)
+    // Key as two little-endian u64s:
+    //   k0 = 0x0706050403020100
+    //   k1 = 0x0F0E0D0C0B0A0908
+    let k0: i64 = 0x0706050403020100;
+    let k1: i64 = 0x0F0E0D0C0B0A0908;
+
+    // Message: 15 bytes (00 01 02 ... 0E)
+    let msg_len: i32 = 15;
+    let msg: ptr[i64] = heap_alloc(msg_len, 1);
+    for i: i32 in range(0, msg_len) {
+        ptr_write_u8(msg, i, i);
+    }
+
+    // Compute hash
+    let hash: i64 = siphash_2_4(msg, msg_len, k0, k1);
+
+    print("SipHash-2-4 Test\n");
+    print("Key: 00 01 02 ... 0F\n");
+    print("Message: 00 01 02 ... 0E (15 bytes)\n");
+    print("Hash result: ");
+    print_i64(hash);
+    print("\n");
+
+    // Expected result from SipHash reference: 0xa129ca6149be45e5
+    let expected: i64 = 0xa129ca6149be45e5;
+    print("Expected:    ");
+    print_i64(expected);
+    print("\n");
+
+    if hash == expected {
+        print("PASS: Hash matches reference!\n");
+    } else {
+        print("FAIL: Hash does not match reference.\n");
+    }
+
+    // Benchmark: 1,000,000 hashes
+    let iterations: i32 = 1000000;
+    let start: i64 = clock_ns();
+
+    let checksum: i64 = 0;
+    for i: i32 in range(0, iterations) {
+        let h: i64 = siphash_2_4(msg, msg_len, k0, k1);
+        checksum = bxor(checksum, h);
+    }
+
+    let end: i64 = clock_ns();
+    let elapsed_ns: i64 = end -% start;
+
+    print("Benchmark: ");
+    print_i32(iterations);
+    print(" hashes of 15-byte message\n");
+    print("Elapsed (ns): ");
+    print_i64(elapsed_ns);
+    print("\n");
+    print("Checksum: ");
+    print_i64(checksum);
+    print("\n");
+
+    // Throughput: (iterations * msg_len) bytes / elapsed_ns * 1e9 = bytes/sec
+    // Print bytes processed
+    let bytes_total: i64 = widen(iterations) *% widen(msg_len);
+    print("Total bytes hashed: ");
+    print_i64(bytes_total);
+    print("\n");
+
+    // MB/s = bytes_total / elapsed_ns * 1000
+    let throughput_mbps: i64 = (bytes_total *% 1000) / elapsed_ns;
+    print("Throughput: ~");
+    print_i64(throughput_mbps);
+    print(" MB/s\n");
+
+    heap_free(msg);
+    return 0;
+}

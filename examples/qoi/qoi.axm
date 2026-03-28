@@ -1,0 +1,488 @@
+@module qoi;
+@intent("QOI (Quite OK Image Format) encoder/decoder, ported from C reference");
+
+// =============================================================================
+// QOI -- Quite OK Image Format
+// =============================================================================
+//
+// Spec: https://qoiformat.org/qoi-specification.pdf
+// Lossless image compression with simple, fast encode/decode.
+//
+// Ops:
+//   QOI_OP_RGB    = 0xFE  (tag byte + r + g + b)
+//   QOI_OP_RGBA   = 0xFF  (tag byte + r + g + b + a)
+//   QOI_OP_INDEX  = 0x00..0x3F  (6-bit index into hash table)
+//   QOI_OP_DIFF   = 0x40..0x7F  (2-bit tag + 2+2+2 bit diffs, bias 2)
+//   QOI_OP_LUMA   = 0x80..0xBF  (2-bit tag + 6-bit green diff, then dr-dg,db-dg)
+//   QOI_OP_RUN    = 0xC0..0xFD  (2-bit tag + 6-bit run length, bias -1)
+//
+// Pixel hash: (r*3 + g*5 + b*7 + a*11) % 64
+//
+// Translation notes:
+// - Pixel RGBA stored as 4 separate channels in ptr[i64] (byte-level)
+// - 64-entry hash table as ptr[i64] storing packed RGBA
+// - All byte I/O via ptr_read_u8 / ptr_write_u8
+//
+// GAP: No struct mutation support; using ptr[i64] for pixel state
+// GAP: rotl() builtin is i32-only (not needed here)
+// GAP: No unsigned comparison; using signed i32 which is fine for 0..255 range
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+@const fn QOI_OP_INDEX() -> i32 { return 0x00; }
+@const fn QOI_OP_DIFF()  -> i32 { return 0x40; }
+@const fn QOI_OP_LUMA()  -> i32 { return 0x80; }
+@const fn QOI_OP_RUN()   -> i32 { return 0xC0; }
+@const fn QOI_OP_RGB()   -> i32 { return 0xFE; }
+@const fn QOI_OP_RGBA()  -> i32 { return 0xFF; }
+
+@const fn QOI_MAGIC() -> i32 { return 0x716F6966; }  // "qoif" in big-endian
+@const fn QOI_HEADER_SIZE() -> i32 { return 14; }
+@const fn QOI_END_MARKER_SIZE() -> i32 { return 8; }
+
+@const fn CHANNELS() -> i32 { return 4; }  // RGBA
+
+// ---------------------------------------------------------------------------
+// Pixel hash: (r*3 + g*5 + b*7 + a*11) % 64
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn qoi_color_hash(r: i32, g: i32, b: i32, a: i32) -> i32 {
+    return (r * 3 + g * 5 + b * 7 + a * 11) % 64;
+}
+
+// ---------------------------------------------------------------------------
+// Pack/unpack RGBA into i32 for hash table storage
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn pack_rgba(r: i32, g: i32, b: i32, a: i32) -> i32 {
+    return bor(bor(band(r, 0xFF), shl(band(g, 0xFF), 8)),
+               bor(shl(band(b, 0xFF), 16), shl(band(a, 0xFF), 24)));
+}
+
+@pure @inline(always)
+fn unpack_r(packed: i32) -> i32 { return band(packed, 0xFF); }
+
+@pure @inline(always)
+fn unpack_g(packed: i32) -> i32 { return band(lshr(packed, 8), 0xFF); }
+
+@pure @inline(always)
+fn unpack_b(packed: i32) -> i32 { return band(lshr(packed, 16), 0xFF); }
+
+@pure @inline(always)
+fn unpack_a(packed: i32) -> i32 { return band(lshr(packed, 24), 0xFF); }
+
+// ---------------------------------------------------------------------------
+// Write big-endian 32-bit value to byte buffer
+// ---------------------------------------------------------------------------
+@inline(always)
+fn write_be32(buf: ptr[i64], offset: i32, val: i32) {
+    ptr_write_u8(buf, offset,     band(lshr(val, 24), 0xFF));
+    ptr_write_u8(buf, offset + 1, band(lshr(val, 16), 0xFF));
+    ptr_write_u8(buf, offset + 2, band(lshr(val, 8), 0xFF));
+    ptr_write_u8(buf, offset + 3, band(val, 0xFF));
+}
+
+// ---------------------------------------------------------------------------
+// Read big-endian 32-bit value from byte buffer
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn read_be32(buf: ptr[i64], offset: i32) -> i32 {
+    let b0: i32 = ptr_read_u8(buf, offset);
+    let b1: i32 = ptr_read_u8(buf, offset + 1);
+    let b2: i32 = ptr_read_u8(buf, offset + 2);
+    let b3: i32 = ptr_read_u8(buf, offset + 3);
+    return bor(bor(shl(b0, 24), shl(b1, 16)), bor(shl(b2, 8), b3));
+}
+
+// ---------------------------------------------------------------------------
+// QOI Encode
+// Returns number of bytes written to `out`
+// `pixels` is raw RGBA (4 bytes per pixel), `w` x `h` image
+// `out` must be pre-allocated with enough space (w*h*5 + header + end is safe)
+// ---------------------------------------------------------------------------
+fn qoi_encode(pixels: ptr[i64], w: i32, h: i32, out: ptr[i64]) -> i32 {
+    let total_pixels: i32 = w * h;
+
+    // Write QOI header (14 bytes)
+    write_be32(out, 0, QOI_MAGIC());
+    write_be32(out, 4, w);
+    write_be32(out, 8, h);
+    ptr_write_u8(out, 12, CHANNELS());  // channels = 4 (RGBA)
+    ptr_write_u8(out, 13, 0);           // colorspace = 0 (sRGB with linear alpha)
+
+    let p: i32 = QOI_HEADER_SIZE();
+
+    // Hash table: 64 entries, each packed RGBA as i32
+    let index: ptr[i32] = heap_alloc(64, 4);
+    for i: i32 in range(0, 64) {
+        ptr_write_i32(index, i, 0);
+    }
+
+    // Previous pixel state
+    let prev_r: i32 = 0;
+    let prev_g: i32 = 0;
+    let prev_b: i32 = 0;
+    let prev_a: i32 = 255;
+
+    let run: i32 = 0;
+
+    for px_idx: i32 in range(0, total_pixels) {
+        let byte_off: i32 = px_idx * 4;
+        let r: i32 = ptr_read_u8(pixels, byte_off);
+        let g: i32 = ptr_read_u8(pixels, byte_off + 1);
+        let b: i32 = ptr_read_u8(pixels, byte_off + 2);
+        let a: i32 = ptr_read_u8(pixels, byte_off + 3);
+
+        // Check if same as previous pixel -> run
+        if r == prev_r and g == prev_g and b == prev_b and a == prev_a {
+            run = run + 1;
+            // Flush run if max (62) or last pixel
+            if run == 62 or px_idx == total_pixels - 1 {
+                ptr_write_u8(out, p, bor(QOI_OP_RUN(), run - 1));
+                p = p + 1;
+                run = 0;
+            }
+        } else {
+            // Flush any pending run
+            if run > 0 {
+                ptr_write_u8(out, p, bor(QOI_OP_RUN(), run - 1));
+                p = p + 1;
+                run = 0;
+            }
+
+            // Check hash table
+            let hash_idx: i32 = qoi_color_hash(r, g, b, a);
+            let packed: i32 = pack_rgba(r, g, b, a);
+            let table_val: i32 = ptr_read_i32(index, hash_idx);
+
+            if table_val == packed {
+                // QOI_OP_INDEX
+                ptr_write_u8(out, p, hash_idx);
+                p = p + 1;
+            } else {
+                // Update hash table
+                ptr_write_i32(index, hash_idx, packed);
+
+                if a == prev_a {
+                    // Try QOI_OP_DIFF
+                    let dr: i32 = r - prev_r;
+                    let dg: i32 = g - prev_g;
+                    let db: i32 = b - prev_b;
+
+                    if dr >= -2 and dr <= 1 and dg >= -2 and dg <= 1 and db >= -2 and db <= 1 {
+                        // QOI_OP_DIFF: 2-bit tag (01) + dr+2, dg+2, db+2 (each 2 bits)
+                        ptr_write_u8(out, p, bor(QOI_OP_DIFF(),
+                            bor(bor(shl(dr + 2, 4), shl(dg + 2, 2)), db + 2)));
+                        p = p + 1;
+                    } else {
+                        // Try QOI_OP_LUMA
+                        let dr_dg: i32 = dr - dg;
+                        let db_dg: i32 = db - dg;
+
+                        if dg >= -32 and dg <= 31 and dr_dg >= -8 and dr_dg <= 7 and db_dg >= -8 and db_dg <= 7 {
+                            // QOI_OP_LUMA: byte1 = 10gggggg, byte2 = drdg:4 dbdg:4
+                            ptr_write_u8(out, p, bor(QOI_OP_LUMA(), dg + 32));
+                            ptr_write_u8(out, p + 1, bor(shl(dr_dg + 8, 4), db_dg + 8));
+                            p = p + 2;
+                        } else {
+                            // QOI_OP_RGB
+                            ptr_write_u8(out, p, QOI_OP_RGB());
+                            ptr_write_u8(out, p + 1, r);
+                            ptr_write_u8(out, p + 2, g);
+                            ptr_write_u8(out, p + 3, b);
+                            p = p + 4;
+                        }
+                    }
+                } else {
+                    // QOI_OP_RGBA
+                    ptr_write_u8(out, p, QOI_OP_RGBA());
+                    ptr_write_u8(out, p + 1, r);
+                    ptr_write_u8(out, p + 2, g);
+                    ptr_write_u8(out, p + 3, b);
+                    ptr_write_u8(out, p + 4, a);
+                    p = p + 5;
+                }
+            }
+
+            prev_r = r;
+            prev_g = g;
+            prev_b = b;
+            prev_a = a;
+        }
+    }
+
+    // Write 8-byte end marker: 7x 0x00 + 1x 0x01
+    for i: i32 in range(0, 7) {
+        ptr_write_u8(out, p + i, 0);
+    }
+    ptr_write_u8(out, p + 7, 1);
+    p = p + 8;
+
+    heap_free(index);
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// QOI Decode
+// Returns number of pixels decoded (should be w*h)
+// `data` is encoded QOI data, `data_len` bytes
+// `out_pixels` is pre-allocated RGBA buffer
+// ---------------------------------------------------------------------------
+fn qoi_decode(data: ptr[i64], data_len: i32, out_pixels: ptr[i64]) -> i32 {
+    // Read and validate header
+    let magic: i32 = read_be32(data, 0);
+    if magic != QOI_MAGIC() {
+        print("ERROR: Invalid QOI magic number\n");
+        return 0;
+    }
+
+    let w: i32 = read_be32(data, 4);
+    let h: i32 = read_be32(data, 8);
+    let channels: i32 = ptr_read_u8(data, 12);
+    let total_pixels: i32 = w * h;
+
+    let p: i32 = QOI_HEADER_SIZE();
+
+    // Hash table
+    let index: ptr[i32] = heap_alloc(64, 4);
+    for i: i32 in range(0, 64) {
+        ptr_write_i32(index, i, 0);
+    }
+
+    let r: i32 = 0;
+    let g: i32 = 0;
+    let b: i32 = 0;
+    let a: i32 = 255;
+
+    let px_written: i32 = 0;
+    let run: i32 = 0;
+
+    while px_written < total_pixels {
+        if run > 0 {
+            run = run - 1;
+        } else {
+            let tag: i32 = ptr_read_u8(data, p);
+            p = p + 1;
+
+            if tag == QOI_OP_RGB() {
+                r = ptr_read_u8(data, p);
+                g = ptr_read_u8(data, p + 1);
+                b = ptr_read_u8(data, p + 2);
+                p = p + 3;
+            } else if tag == QOI_OP_RGBA() {
+                r = ptr_read_u8(data, p);
+                g = ptr_read_u8(data, p + 1);
+                b = ptr_read_u8(data, p + 2);
+                a = ptr_read_u8(data, p + 3);
+                p = p + 4;
+            } else if band(tag, 0xC0) == QOI_OP_INDEX() {
+                // 6-bit index
+                let idx: i32 = band(tag, 0x3F);
+                let packed: i32 = ptr_read_i32(index, idx);
+                r = unpack_r(packed);
+                g = unpack_g(packed);
+                b = unpack_b(packed);
+                a = unpack_a(packed);
+            } else if band(tag, 0xC0) == QOI_OP_DIFF() {
+                // 2-bit diffs with bias 2
+                r = band(r + band(lshr(tag, 4), 0x03) - 2, 0xFF);
+                g = band(g + band(lshr(tag, 2), 0x03) - 2, 0xFF);
+                b = band(b + band(tag, 0x03) - 2, 0xFF);
+            } else if band(tag, 0xC0) == QOI_OP_LUMA() {
+                let dg: i32 = band(tag, 0x3F) - 32;
+                let next_byte: i32 = ptr_read_u8(data, p);
+                p = p + 1;
+                let dr_dg: i32 = band(lshr(next_byte, 4), 0x0F) - 8;
+                let db_dg: i32 = band(next_byte, 0x0F) - 8;
+                r = band(r + dg + dr_dg, 0xFF);
+                g = band(g + dg, 0xFF);
+                b = band(b + dg + db_dg, 0xFF);
+            } else {
+                // QOI_OP_RUN: tag & 0x3F is run length - 1
+                run = band(tag, 0x3F);
+                // run will be decremented on next iterations
+            }
+
+            // Update hash table with current pixel
+            let hash_idx: i32 = qoi_color_hash(r, g, b, a);
+            ptr_write_i32(index, hash_idx, pack_rgba(r, g, b, a));
+        }
+
+        // Write decoded pixel
+        let out_off: i32 = px_written * 4;
+        ptr_write_u8(out_pixels, out_off, r);
+        ptr_write_u8(out_pixels, out_off + 1, g);
+        ptr_write_u8(out_pixels, out_off + 2, b);
+        ptr_write_u8(out_pixels, out_off + 3, a);
+
+        px_written = px_written + 1;
+    }
+
+    heap_free(index);
+    return px_written;
+}
+
+// ---------------------------------------------------------------------------
+// Generate test image: 256x256 gradient pattern
+// ---------------------------------------------------------------------------
+fn generate_test_image(pixels: ptr[i64], w: i32, h: i32) {
+    for y: i32 in range(0, h) {
+        for x: i32 in range(0, w) {
+            let off: i32 = (y * w + x) * 4;
+            // R = x, G = y, B = (x+y)/2, A = 255
+            ptr_write_u8(pixels, off, band(x, 0xFF));
+            ptr_write_u8(pixels, off + 1, band(y, 0xFF));
+            ptr_write_u8(pixels, off + 2, band((x + y) / 2, 0xFF));
+            ptr_write_u8(pixels, off + 3, 255);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Verify round-trip: compare original and decoded pixels
+// ---------------------------------------------------------------------------
+fn verify_roundtrip(original: ptr[i64], decoded: ptr[i64], total_pixels: i32) -> i32 {
+    let errors: i32 = 0;
+    for i: i32 in range(0, total_pixels * 4) {
+        let orig_byte: i32 = ptr_read_u8(original, i);
+        let dec_byte: i32 = ptr_read_u8(decoded, i);
+        if orig_byte != dec_byte {
+            errors = errors + 1;
+            if errors <= 5 {
+                print("  Mismatch at byte ");
+                print_i32(i);
+                print(": original=");
+                print_i32(orig_byte);
+                print(" decoded=");
+                print_i32(dec_byte);
+                print("\n");
+            }
+        }
+    }
+    return errors;
+}
+
+// ---------------------------------------------------------------------------
+// Main: generate image, encode, decode, verify, benchmark
+// ---------------------------------------------------------------------------
+fn main() -> i32 {
+    let w: i32 = 256;
+    let h: i32 = 256;
+    let total_pixels: i32 = w * h;
+    let raw_size: i32 = total_pixels * 4;
+
+    print("=== QOI Image Codec Test ===\n");
+    print("Image size: 256x256 RGBA\n");
+
+    // Allocate buffers
+    let pixels: ptr[i64] = heap_alloc(raw_size, 1);
+    // Worst case encoded size: header(14) + pixels*5 + end(8)
+    let max_encoded: i32 = QOI_HEADER_SIZE() + total_pixels * 5 + QOI_END_MARKER_SIZE();
+    let encoded: ptr[i64] = heap_alloc(max_encoded, 1);
+    let decoded: ptr[i64] = heap_alloc(raw_size, 1);
+
+    // Generate test image
+    print("Generating test image...\n");
+    generate_test_image(pixels, w, h);
+
+    // Encode
+    print("Encoding with QOI...\n");
+    let encoded_size: i32 = qoi_encode(pixels, w, h, encoded);
+    print("Raw size:     ");
+    print_i32(raw_size);
+    print(" bytes\n");
+    print("Encoded size: ");
+    print_i32(encoded_size);
+    print(" bytes\n");
+
+    // Compression ratio
+    let ratio_x100: i32 = (raw_size * 100) / encoded_size;
+    print("Compression ratio: ");
+    print_i32(ratio_x100 / 100);
+    print(".");
+    let frac: i32 = ratio_x100 % 100;
+    if frac < 10 {
+        print("0");
+    }
+    print_i32(frac);
+    print("x\n");
+
+    // Decode
+    print("Decoding QOI...\n");
+    let decoded_pixels: i32 = qoi_decode(encoded, encoded_size, decoded);
+    print("Decoded pixels: ");
+    print_i32(decoded_pixels);
+    print("\n");
+
+    // Verify round-trip
+    print("Verifying round-trip...\n");
+    let errors: i32 = verify_roundtrip(pixels, decoded, total_pixels);
+    if errors == 0 {
+        print("PASS: Round-trip verified, all pixels match!\n");
+    } else {
+        print("FAIL: ");
+        print_i32(errors);
+        print(" byte mismatches found\n");
+    }
+
+    // Benchmark: 1000 encode/decode cycles
+    let bench_iters: i32 = 1000;
+    print("\nBenchmark: ");
+    print_i32(bench_iters);
+    print(" encode/decode cycles\n");
+
+    // Encode benchmark
+    let start_enc: i64 = clock_ns();
+    let enc_checksum: i64 = 0;
+    for i: i32 in range(0, bench_iters) {
+        let sz: i32 = qoi_encode(pixels, w, h, encoded);
+        enc_checksum = enc_checksum +% widen(sz);
+    }
+    let end_enc: i64 = clock_ns();
+    let enc_ns: i64 = end_enc -% start_enc;
+
+    // Decode benchmark
+    let start_dec: i64 = clock_ns();
+    let dec_checksum: i64 = 0;
+    for i: i32 in range(0, bench_iters) {
+        let npx: i32 = qoi_decode(encoded, encoded_size, decoded);
+        dec_checksum = dec_checksum +% widen(npx);
+    }
+    let end_dec: i64 = clock_ns();
+    let dec_ns: i64 = end_dec -% start_dec;
+
+    // Print encode throughput
+    // MB/s = (raw_size * bench_iters) / elapsed_ns * 1000
+    let total_bytes: i64 = widen(raw_size) *% widen(bench_iters);
+    let enc_mbps: i64 = (total_bytes *% 1000) / enc_ns;
+    print("Encode: ");
+    print_i64(enc_ns);
+    print(" ns, ~");
+    print_i64(enc_mbps);
+    print(" MB/s\n");
+
+    // Print decode throughput
+    let dec_mbps: i64 = (total_bytes *% 1000) / dec_ns;
+    print("Decode: ");
+    print_i64(dec_ns);
+    print(" ns, ~");
+    print_i64(dec_mbps);
+    print(" MB/s\n");
+
+    // Checksums (prevent dead code elimination)
+    print("Encode checksum: ");
+    print_i64(enc_checksum);
+    print("\nDecode checksum: ");
+    print_i64(dec_checksum);
+    print("\n");
+
+    // Cleanup
+    heap_free(pixels);
+    heap_free(encoded);
+    heap_free(decoded);
+
+    print("\n=== QOI test complete ===\n");
+    return 0;
+}
