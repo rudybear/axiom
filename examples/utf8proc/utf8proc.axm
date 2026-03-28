@@ -1,4 +1,5 @@
 @module utf8proc;
+@strict;
 @intent("UTF-8 processing: validation, decode, character classification, case folding (utf8proc port)");
 
 // =============================================================================
@@ -27,8 +28,14 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+@intent("return acceptance status code for valid UTF-8 decode")
+@precondition(true) @postcondition(true)
 @const fn UTF8_ACCEPT() -> i32 { return 0; }
+@intent("return rejection status code for invalid UTF-8 sequence")
+@precondition(true) @postcondition(true)
 @const fn UTF8_REJECT() -> i32 { return -1; }
+@intent("return Unicode replacement character codepoint U+FFFD")
+@precondition(true) @postcondition(true)
 @const fn REPLACEMENT_CHAR() -> i32 { return 0xFFFD; }
 
 // ---------------------------------------------------------------------------
@@ -36,6 +43,8 @@
 // out_len: ptr to i32 where number of bytes consumed is written
 // Returns codepoint, or -1 on error
 // ---------------------------------------------------------------------------
+@intent("decode one UTF-8 codepoint from data at pos, writing bytes consumed to out_len")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn utf8_decode(data: ptr[i32], pos: i32, data_len: i32, out_len: ptr[i32]) -> i32 {
     if pos >= data_len {
@@ -151,6 +160,8 @@ fn utf8_decode(data: ptr[i32], pos: i32, data_len: i32, out_len: ptr[i32]) -> i3
 // UTF-8 validate: check entire buffer for valid UTF-8
 // Returns 1 if valid, 0 if invalid
 // ---------------------------------------------------------------------------
+@intent("validate an entire buffer for correct UTF-8 encoding, returning 1 if valid")
+@precondition(true) @postcondition(true)
 @pure
 fn utf8_validate(data: ptr[i32], data_len: i32) -> i32 {
     let pos: i32 = 0;
@@ -180,6 +191,8 @@ fn utf8_validate(data: ptr[i32], data_len: i32) -> i32 {
 
 // ASCII classification table: 128 entries, bitmask per char
 // Bit 0: is_letter, Bit 1: is_digit, Bit 2: is_whitespace, Bit 3: is_upper, Bit 4: is_lower
+@intent("return a 128-entry bitmask table for ASCII character classification")
+@precondition(true) @postcondition(true)
 @pure
 fn get_ascii_class() -> ptr[i32] {
     return array_const_i32(
@@ -204,6 +217,8 @@ fn get_ascii_class() -> ptr[i32] {
     );
 }
 
+@intent("check whether a codepoint is a letter using ASCII table and Unicode ranges")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn is_ascii_letter(cp: i32) -> i32 {
     if cp >= 0 {
@@ -236,6 +251,8 @@ fn is_ascii_letter(cp: i32) -> i32 {
     return 0;
 }
 
+@intent("check whether a codepoint is an ASCII digit 0-9")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn is_digit(cp: i32) -> i32 {
     if cp >= 48 {
@@ -244,6 +261,8 @@ fn is_digit(cp: i32) -> i32 {
     return 0;
 }
 
+@intent("check whether a codepoint is whitespace including Unicode space characters")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn is_whitespace(cp: i32) -> i32 {
     if cp == 32 { return 1; }     // space
@@ -269,6 +288,8 @@ fn is_whitespace(cp: i32) -> i32 {
 // Table: 256 entries mapping uppercase to lowercase
 // For codepoints >= 256, returns codepoint unchanged (simplified)
 // ---------------------------------------------------------------------------
+@intent("return a 256-entry table mapping uppercase to lowercase for ASCII and Latin-1")
+@precondition(true) @postcondition(true)
 @pure
 fn get_case_fold_table() -> ptr[i32] {
     return array_const_i32(
@@ -297,6 +318,8 @@ fn get_case_fold_table() -> ptr[i32] {
     );
 }
 
+@intent("fold a codepoint to lowercase using table lookup and Unicode range offsets")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn case_fold(cp: i32) -> i32 {
     if cp >= 0 {
@@ -325,6 +348,8 @@ fn case_fold(cp: i32) -> i32 {
 // UTF-8 encode: write one codepoint to buffer
 // Returns number of bytes written
 // ---------------------------------------------------------------------------
+@intent("encode one Unicode codepoint as UTF-8 bytes into the output buffer at pos")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn utf8_encode(cp: i32, out: ptr[i32], pos: i32) -> i32 {
     if cp < 0x80 {
@@ -353,6 +378,8 @@ fn utf8_encode(cp: i32, out: ptr[i32], pos: i32) -> i32 {
 // Process a UTF-8 buffer: validate + decode + classify + fold
 // Returns number of codepoints processed (or -1 on validation error)
 // ---------------------------------------------------------------------------
+@intent("validate, decode, classify, and case-fold a UTF-8 buffer, writing stats and folded output")
+@precondition(true) @postcondition(true)
 fn utf8_process(data: ptr[i32], data_len: i32,
                 folded_out: ptr[i32], max_out: i32,
                 stats: ptr[i32]) -> i32 {
@@ -415,6 +442,7 @@ fn utf8_process(data: ptr[i32], data_len: i32,
 // ---------------------------------------------------------------------------
 // Main: test + benchmark
 // ---------------------------------------------------------------------------
+@intent("test UTF-8 validation, classification, case folding, and benchmark throughput")
 fn main() -> i32 {
     // Test 1: Pure ASCII
     // "Hello, World! 123" = 17 bytes

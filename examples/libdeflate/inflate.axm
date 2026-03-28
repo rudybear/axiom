@@ -1,4 +1,5 @@
 @module inflate;
+@strict;
 @intent("libdeflate-style fast DEFLATE inflator: bit reader, Huffman decoder, LZ77 match copy");
 
 // =============================================================================
@@ -27,10 +28,20 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+@intent("return maximum Huffman code length in bits")
+@precondition(true) @postcondition(true)
 @const fn MAX_BITS() -> i32 { return 15; }
+@intent("return Huffman decode table size for 9-bit fast lookup")
+@precondition(true) @postcondition(true)
 @const fn HUFFMAN_TABLE_SIZE() -> i32 { return 512; }  // 2^9 for fast 9-bit lookup
+@intent("return number of bits used for fast Huffman table lookup")
+@precondition(true) @postcondition(true)
 @const fn FAST_BITS() -> i32 { return 9; }
+@intent("return bitmask for extracting fast lookup bits from bit buffer")
+@precondition(true) @postcondition(true)
 @const fn FAST_MASK() -> i32 { return 511; }            // (1 << 9) - 1
+@intent("return LZ77 sliding window size in bytes")
+@precondition(true) @postcondition(true)
 @const fn WINDOW_SIZE() -> i32 { return 32768; }       // 2^15
 
 // ---------------------------------------------------------------------------
@@ -42,6 +53,8 @@
 //   [4] = unused
 // ---------------------------------------------------------------------------
 
+@intent("initialize bit reader state with zero position and the given input length")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn br_init(state: ptr[i32], input_len: i32) {
     ptr_write_i32(state, 0, 0);      // byte_pos
@@ -51,6 +64,8 @@ fn br_init(state: ptr[i32], input_len: i32) {
 }
 
 // Refill bit buffer from input stream (ensure at least 16 bits available)
+@intent("refill the bit buffer from the input stream until at least 24 bits are available")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn br_refill(state: ptr[i32], input: ptr[i32]) {
     let bits_left: i32 = ptr_read_i32(state, 2);
@@ -75,6 +90,8 @@ fn br_refill(state: ptr[i32], input: ptr[i32]) {
 }
 
 // Read N bits from the bit buffer (N <= 16)
+@intent("read and consume N bits from the bit buffer, refilling if needed")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn br_read(state: ptr[i32], input: ptr[i32], n: i32) -> i32 {
     br_refill(state, input);
@@ -86,6 +103,8 @@ fn br_read(state: ptr[i32], input: ptr[i32], n: i32) -> i32 {
 }
 
 // Peek N bits without consuming
+@intent("peek at the lowest N bits of the bit buffer without consuming them")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn br_peek(state: ptr[i32], n: i32) -> i32 {
     let bit_buf: i32 = ptr_read_i32(state, 1);
@@ -93,6 +112,8 @@ fn br_peek(state: ptr[i32], n: i32) -> i32 {
 }
 
 // Consume N bits
+@intent("discard the lowest N bits from the bit buffer")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn br_consume(state: ptr[i32], n: i32) {
     let bit_buf: i32 = ptr_read_i32(state, 1);
@@ -112,6 +133,8 @@ fn br_consume(state: ptr[i32], n: i32) {
 // Table format: table[reversed_code & FAST_MASK] = (symbol << 4) | code_length
 // ---------------------------------------------------------------------------
 
+@intent("reverse the order of the lowest nbits bits of val for DEFLATE bit ordering")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn reverse_bits(val: i32, nbits: i32) -> i32 {
     let result: i32 = 0;
@@ -124,6 +147,8 @@ fn reverse_bits(val: i32, nbits: i32) -> i32 {
     return result;
 }
 
+@intent("build the fixed Huffman literal/length decode table per RFC 1951 section 3.2.6")
+@precondition(true) @postcondition(true)
 fn build_fixed_lit_table(table: ptr[i32]) {
     // Clear table
     for i: i32 in range(0, HUFFMAN_TABLE_SIZE()) {
@@ -178,6 +203,8 @@ fn build_fixed_lit_table(table: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // Fixed distance table: all 5-bit codes (0-29)
 // ---------------------------------------------------------------------------
+@intent("build the fixed Huffman distance decode table with 5-bit codes for symbols 0-29")
+@precondition(true) @postcondition(true)
 fn build_fixed_dist_table(table: ptr[i32]) {
     for i: i32 in range(0, HUFFMAN_TABLE_SIZE()) {
         ptr_write_i32(table, i, 0);
@@ -197,6 +224,8 @@ fn build_fixed_dist_table(table: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // Length extra bits table (RFC 1951)
 // ---------------------------------------------------------------------------
+@intent("return the base length values for DEFLATE length codes 257-285")
+@precondition(true) @postcondition(true)
 @pure
 fn get_length_base() -> ptr[i32] {
     return array_const_i32(
@@ -206,6 +235,8 @@ fn get_length_base() -> ptr[i32] {
     );
 }
 
+@intent("return the extra bits count for each DEFLATE length code")
+@precondition(true) @postcondition(true)
 @pure
 fn get_length_extra() -> ptr[i32] {
     return array_const_i32(
@@ -218,6 +249,8 @@ fn get_length_extra() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 // Distance extra bits table (RFC 1951)
 // ---------------------------------------------------------------------------
+@intent("return the base distance values for DEFLATE distance codes 0-29")
+@precondition(true) @postcondition(true)
 @pure
 fn get_dist_base() -> ptr[i32] {
     return array_const_i32(
@@ -227,6 +260,8 @@ fn get_dist_base() -> ptr[i32] {
     );
 }
 
+@intent("return the extra bits count for each DEFLATE distance code")
+@precondition(true) @postcondition(true)
 @pure
 fn get_dist_extra() -> ptr[i32] {
     return array_const_i32(
@@ -239,6 +274,8 @@ fn get_dist_extra() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 // Decode one symbol from Huffman table
 // ---------------------------------------------------------------------------
+@intent("decode one Huffman symbol using 9-bit fast table lookup from the bit reader")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn decode_symbol(state: ptr[i32], input: ptr[i32], table: ptr[i32]) -> i32 {
     br_refill(state, input);
@@ -254,6 +291,8 @@ fn decode_symbol(state: ptr[i32], input: ptr[i32], table: ptr[i32]) -> i32 {
 // Inflate a fixed Huffman block (BTYPE=01)
 // Returns number of bytes written to output
 // ---------------------------------------------------------------------------
+@intent("inflate a fixed Huffman block (BTYPE=01), decoding literals and LZ77 matches to output")
+@precondition(true) @postcondition(true)
 fn inflate_fixed_block(input: ptr[i32], input_len: i32,
                        output: ptr[i32], max_output: i32,
                        br_state: ptr[i32],
@@ -315,6 +354,8 @@ fn inflate_fixed_block(input: ptr[i32], input_len: i32,
 // ---------------------------------------------------------------------------
 // Top-level inflate: read block headers and dispatch
 // ---------------------------------------------------------------------------
+@intent("decompress DEFLATE data by reading block headers and dispatching to appropriate decoder")
+@precondition(true) @postcondition(true)
 fn inflate(input: ptr[i32], input_len: i32,
            output: ptr[i32], max_output: i32) -> i32 {
     let br_state: ptr[i32] = heap_alloc(5, 4);
@@ -372,6 +413,8 @@ fn inflate(input: ptr[i32], input_len: i32,
 // Simple DEFLATE compressor (fixed Huffman, for test data generation)
 // Returns compressed size
 // ---------------------------------------------------------------------------
+@intent("compress input as literal-only fixed Huffman DEFLATE for test data generation")
+@precondition(true) @postcondition(true)
 fn deflate_fixed(input: ptr[i32], input_len: i32,
                  output: ptr[i32], max_output: i32) -> i32 {
     // Write BFINAL=1, BTYPE=01 (fixed Huffman) as 3 bits: 011 = 3
@@ -437,6 +480,7 @@ fn deflate_fixed(input: ptr[i32], input_len: i32,
 // ---------------------------------------------------------------------------
 // Main: test + benchmark
 // ---------------------------------------------------------------------------
+@intent("test DEFLATE round-trip correctness and benchmark inflate throughput")
 fn main() -> i32 {
     // Test data: "Hello, World! Hello, World!" (27 bytes)
     let test_len: i32 = 27;

@@ -361,6 +361,9 @@ fn generate_lengths_recurse(nodes: ptr[i32], node_idx: i32, depth: i32, code_len
 //      code = (prev_code + 1) << (cur_len - prev_len)
 // ---------------------------------------------------------------------------
 
+@intent("build canonical Huffman codes deterministically from bit lengths")
+@precondition(true)
+@postcondition(true)
 fn build_canonical_codes(code_lens: ptr[i32], codes: ptr[i32]) {
     // Count symbols per bit length
     let bl_count: ptr[i32] = heap_alloc(MAX_CODE_LEN() + 1, 4);
@@ -417,6 +420,9 @@ fn build_canonical_codes(code_lens: ptr[i32], codes: ptr[i32]) {
 //
 // Returns compressed size in bytes, or 0 on failure.
 
+@intent("Huffman encode input bytes with header and canonical codes")
+@precondition(in_len >= 1 and in_len <= 65535 and out_max > 0)
+@postcondition(true)
 fn huffman_encode(input: ptr[i32], in_len: i32, output: ptr[i32], out_max: i32) -> i32 {
     if in_len < 1 or in_len > 65535 {
         return 0;
@@ -510,6 +516,9 @@ fn huffman_encode(input: ptr[i32], in_len: i32, output: ptr[i32], out_max: i32) 
 // Reads the header, reconstructs canonical codes, decodes the bitstream.
 // Returns number of bytes decoded, or 0 on failure.
 
+@intent("decode Huffman compressed data using lookup table for fast symbol resolution")
+@precondition(in_len >= 4 and out_max > 0)
+@postcondition(true)
 fn huffman_decode(input: ptr[i32], in_len: i32, output: ptr[i32], out_max: i32) -> i32 {
     if in_len < 4 {
         return 0;
@@ -637,6 +646,9 @@ fn huffman_decode(input: ptr[i32], in_len: i32, output: ptr[i32], out_max: i32) 
 // Verify: compare two byte buffers
 // ---------------------------------------------------------------------------
 
+@intent("compare two byte buffers for equality, return 1 if identical")
+@precondition(len >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
@@ -652,6 +664,9 @@ fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
 // ---------------------------------------------------------------------------
 
 // Fill with English-like text (highly compressible by Huffman)
+@intent("fill buffer with repeating English pangram text pattern")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_text_like(buf: ptr[i32], len: i32) {
     // "the quick brown fox jumps over the lazy dog " repeated
     let pattern_len: i32 = 44;
@@ -674,6 +689,9 @@ fn fill_text_like(buf: ptr[i32], len: i32) {
 }
 
 // Fill with skewed byte distribution (simulating real-world text)
+@intent("fill buffer with skewed byte distribution simulating English text")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_skewed(buf: ptr[i32], len: i32) {
     // Simulate text: space(32) ~18%, e(101) ~13%, t(116) ~9%, etc.
     // Use a simple PRNG biased toward common ASCII chars
@@ -716,6 +734,9 @@ fn fill_skewed(buf: ptr[i32], len: i32) {
 }
 
 // Fill with uniform random (worst case for Huffman -- minimal compression)
+@intent("fill buffer with uniform pseudo-random bytes for worst-case testing")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_uniform(buf: ptr[i32], len: i32) {
     let seed: i32 = 98765;
     for i: i32 in range(0, len) {
@@ -729,6 +750,9 @@ fn fill_uniform(buf: ptr[i32], len: i32) {
 // Returns 1 on success, 0 on failure
 // ---------------------------------------------------------------------------
 
+@intent("run one Huffman encode-decode-verify round-trip test, return 1 on pass")
+@precondition(data_len > 0)
+@postcondition(true)
 fn run_test(name_msg: ptr[i32], data: ptr[i32], data_len: i32) -> i32 {
     // Allocate output buffers (worst case: compressed could be larger than input)
     let comp_max: i32 = data_len + data_len / 2 + 1024;

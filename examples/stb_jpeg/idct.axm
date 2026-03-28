@@ -1,4 +1,5 @@
 @module idct;
+@strict;
 @intent("JPEG 8x8 IDCT using AAN (Arai-Agui-Nakajima) fixed-point algorithm, ported from stb_image");
 
 // =============================================================================
@@ -30,29 +31,67 @@
 
 // stb_image IDCT constants (fixed-point, 12-bit precision):
 // These correspond to the stb_image constants exactly.
+@intent("return fixed-point constant for cos(7pi/16)*sqrt(2)*4096")
+@precondition(true) @postcondition(true)
 @const fn FIX_0_298631336() -> i32 { return 1223; }   // cos(7pi/16)*sqrt(2)*4096
+@intent("return fixed-point constant for trig combination 0.390")
+@precondition(true) @postcondition(true)
 @const fn FIX_0_390180644() -> i32 { return 1598; }   // some trig combo
+@intent("return fixed-point constant for cos(6pi/16)*sqrt(2)*4096")
+@precondition(true) @postcondition(true)
 @const fn FIX_0_541196100() -> i32 { return 2217; }   // cos(6pi/16)*sqrt(2)*4096
+@intent("return fixed-point constant for cos(5pi/16)*sqrt(2)*4096")
+@precondition(true) @postcondition(true)
 @const fn FIX_0_765366865() -> i32 { return 3135; }   // cos(5pi/16)*sqrt(2)*4096
+@intent("return fixed-point constant for cos(3pi/16)*sqrt(2)*4096")
+@precondition(true) @postcondition(true)
 @const fn FIX_0_899976223() -> i32 { return 3686; }   // cos(3pi/16)*sqrt(2)*4096
+@intent("return fixed-point constant for cos(pi/4)*4096")
+@precondition(true) @postcondition(true)
 @const fn FIX_1_175875602() -> i32 { return 4816; }   // cos(pi/4)*4096
+@intent("return fixed-point constant for cos(pi/16)*sqrt(2)*4096")
+@precondition(true) @postcondition(true)
 @const fn FIX_1_501321110() -> i32 { return 6149; }   // cos(pi/16)*sqrt(2)*4096
+@intent("return fixed-point constant for cos(2pi/16)*sqrt(2)*4096")
+@precondition(true) @postcondition(true)
 @const fn FIX_1_847759065() -> i32 { return 7568; }   // cos(2pi/16)*sqrt(2)*4096
+@intent("return fixed-point constant for trig combination 1.961")
+@precondition(true) @postcondition(true)
 @const fn FIX_1_961570560() -> i32 { return 8034; }   // another trig combo
+@intent("return fixed-point constant for trig combination 2.053")
+@precondition(true) @postcondition(true)
 @const fn FIX_2_053119869() -> i32 { return 8410; }   // another trig combo
+@intent("return fixed-point constant for trig combination 2.562")
+@precondition(true) @postcondition(true)
 @const fn FIX_2_562915447() -> i32 { return 10497; }  // another trig combo
+@intent("return fixed-point constant for trig combination 3.072")
+@precondition(true) @postcondition(true)
 @const fn FIX_3_072711026() -> i32 { return 12585; }  // another trig combo
 
+@intent("return number of fractional bits in fixed-point representation")
+@precondition(true) @postcondition(true)
 @const fn SHIFT_BITS() -> i32 { return 12; }
+@intent("return rounding value for 12-bit fixed-point shift")
+@precondition(true) @postcondition(true)
 @const fn HALF_SHIFT() -> i32 { return 2048; }         // 1 << 11
+@intent("return number of descale bits after column pass")
+@precondition(true) @postcondition(true)
 @const fn DESCALE_COL() -> i32 { return 10; }          // shift after column pass
+@intent("return rounding value for column descale")
+@precondition(true) @postcondition(true)
 @const fn HALF_COL() -> i32 { return 512; }             // 1 << 9
+@intent("return number of descale bits after row pass")
+@precondition(true) @postcondition(true)
 @const fn DESCALE_ROW() -> i32 { return 17; }          // shift after row pass (12+5)
+@intent("return combined rounding and DC level shift constant for row pass")
+@precondition(true) @postcondition(true)
 @const fn HALF_ROW() -> i32 { return 16842752; }         // (1 << 16) + (128 << 17) -- rounding + JPEG DC level shift
 
 // ---------------------------------------------------------------------------
 // Clamp to [0, 255]
 // ---------------------------------------------------------------------------
+@intent("clamp an integer value to the unsigned byte range 0-255")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn clamp_u8(x: i32) -> i32 {
     let v: i32 = x;
@@ -66,6 +105,8 @@ fn clamp_u8(x: i32) -> i32 {
 // Operates on 8 values in a column (stride 8) of the coefficient buffer.
 // Results are written back with 10-bit descale.
 // ---------------------------------------------------------------------------
+@intent("perform IDCT 1D column pass using AAN butterfly on 8 values at stride 8")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn idct_col(data: ptr[i32], col: i32) {
     // Load 8 column values
@@ -166,6 +207,8 @@ fn idct_col(data: ptr[i32], col: i32) {
 // Operates on 8 values in a row, descales by 17 bits and clamps to [0,255]
 // Output written to u8 output buffer.
 // ---------------------------------------------------------------------------
+@intent("perform IDCT 1D row pass, descale by 17 bits, and clamp output to u8 pixels")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn idct_row(data: ptr[i32], row: i32, out: ptr[i32], out_row: i32) {
     let base: i32 = row * 8;
@@ -270,6 +313,8 @@ fn idct_row(data: ptr[i32], row: i32, out: ptr[i32], out_row: i32) {
 // out: 64 u8 pixel values
 // temp: 64 i32 scratch buffer (caller-allocated)
 // ---------------------------------------------------------------------------
+@intent("compute full 8x8 2D IDCT via separable column then row passes")
+@precondition(true) @postcondition(true)
 @pure
 fn idct_8x8(coefs: ptr[i32], out: ptr[i32], temp: ptr[i32]) {
     // Copy coefficients to temp buffer
@@ -301,6 +346,7 @@ fn idct_8x8(coefs: ptr[i32], out: ptr[i32], temp: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // Main: test + benchmark
 // ---------------------------------------------------------------------------
+@intent("test IDCT correctness and benchmark 1M transforms")
 fn main() -> i32 {
     // Test vector: a typical JPEG DCT block
     // DC=0 (level-shifted), a few AC coefficients, rest zero

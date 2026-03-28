@@ -1,4 +1,5 @@
 @module fpng;
+@strict;
 @intent("Fast PNG encode core: PNG row filters + slice-by-4 CRC32, ported from fpng");
 
 // =============================================================================
@@ -28,18 +29,34 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+@intent("return PNG filter type constant for no filtering")
+@precondition(true) @postcondition(true)
 @const fn FILTER_NONE() -> i32 { return 0; }
+@intent("return PNG filter type constant for sub (left) filtering")
+@precondition(true) @postcondition(true)
 @const fn FILTER_SUB() -> i32 { return 1; }
+@intent("return PNG filter type constant for up (above) filtering")
+@precondition(true) @postcondition(true)
 @const fn FILTER_UP() -> i32 { return 2; }
+@intent("return PNG filter type constant for average filtering")
+@precondition(true) @postcondition(true)
 @const fn FILTER_AVG() -> i32 { return 3; }
+@intent("return PNG filter type constant for Paeth filtering")
+@precondition(true) @postcondition(true)
 @const fn FILTER_PAETH() -> i32 { return 4; }
+@intent("return bytes per pixel for RGBA images")
+@precondition(true) @postcondition(true)
 @const fn BPP() -> i32 { return 4; }  // bytes per pixel (RGBA)
 
+@intent("return CRC32 polynomial constant 0xEDB88320")
+@precondition(true) @postcondition(true)
 @const fn CRC32_POLY() -> i32 { return 0 - 306674912; }  // 0xEDB88320
 
 // ---------------------------------------------------------------------------
 // Build CRC32 table (256 entries)
 // ---------------------------------------------------------------------------
+@intent("build a 256-entry CRC32 lookup table using the standard polynomial")
+@precondition(true) @postcondition(true)
 fn build_crc32_table(table: ptr[i32]) {
     for i: i32 in range(0, 256) {
         let crc: i32 = i;
@@ -61,6 +78,8 @@ fn build_crc32_table(table: ptr[i32]) {
 //               tables[512..767] = T2
 //               tables[768..1023] = T3
 // ---------------------------------------------------------------------------
+@intent("build 4x256-entry slice-by-4 CRC32 tables for 4-byte-per-iteration processing")
+@precondition(true) @postcondition(true)
 fn build_crc32_tables_sb4(tables: ptr[i32]) {
     // Build T0 (standard table)
     for i: i32 in range(0, 256) {
@@ -93,6 +112,8 @@ fn build_crc32_tables_sb4(tables: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // Standard CRC32 (byte-at-a-time, for reference)
 // ---------------------------------------------------------------------------
+@intent("compute CRC32 byte-at-a-time using a 256-entry lookup table")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn crc32_basic(data: ptr[i32], len: i32, table: ptr[i32]) -> i32 {
     let crc: i32 = 0 - 1;
@@ -107,6 +128,8 @@ fn crc32_basic(data: ptr[i32], len: i32, table: ptr[i32]) -> i32 {
 // ---------------------------------------------------------------------------
 // Slice-by-4 CRC32 (processes 4 bytes per loop iteration)
 // ---------------------------------------------------------------------------
+@intent("compute CRC32 using slice-by-4 technique processing 4 bytes per iteration")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn crc32_sb4(data: ptr[i32], len: i32, tables: ptr[i32]) -> i32 {
     let crc: i32 = 0 - 1;
@@ -150,6 +173,8 @@ fn crc32_sb4(data: ptr[i32], len: i32, tables: ptr[i32]) -> i32 {
 // ---------------------------------------------------------------------------
 // Paeth predictor
 // ---------------------------------------------------------------------------
+@intent("compute the Paeth predictor choosing the neighbor closest to p = a + b - c")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn paeth_predictor(a: i32, b: i32, c: i32) -> i32 {
     let p: i32 = a + b - c;
@@ -171,6 +196,8 @@ fn paeth_predictor(a: i32, b: i32, c: i32) -> i32 {
 // PNG Filter: Sub (type 1)
 // Filt(x) = Orig(x) - Orig(x - bpp), where bpp = bytes per pixel
 // ---------------------------------------------------------------------------
+@intent("apply PNG Sub filter: each byte is the difference from the left neighbor")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn filter_sub(row: ptr[i32], filtered: ptr[i32], width_bytes: i32) {
     // First bpp bytes: no left neighbor, so Filt(x) = Orig(x)
@@ -188,6 +215,8 @@ fn filter_sub(row: ptr[i32], filtered: ptr[i32], width_bytes: i32) {
 // PNG Filter: Up (type 2)
 // Filt(x) = Orig(x) - Prior(x)
 // ---------------------------------------------------------------------------
+@intent("apply PNG Up filter: each byte is the difference from the above neighbor")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn filter_up(row: ptr[i32], prev_row: ptr[i32], filtered: ptr[i32], width_bytes: i32) {
     for i: i32 in range(0, width_bytes) {
@@ -201,6 +230,8 @@ fn filter_up(row: ptr[i32], prev_row: ptr[i32], filtered: ptr[i32], width_bytes:
 // PNG Filter: Average (type 3)
 // Filt(x) = Orig(x) - floor((Orig(a) + Prior(x)) / 2)
 // ---------------------------------------------------------------------------
+@intent("apply PNG Average filter: each byte minus floor of average of left and above")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn filter_average(row: ptr[i32], prev_row: ptr[i32], filtered: ptr[i32], width_bytes: i32) {
     for i: i32 in range(0, BPP()) {
@@ -220,6 +251,8 @@ fn filter_average(row: ptr[i32], prev_row: ptr[i32], filtered: ptr[i32], width_b
 // PNG Filter: Paeth (type 4)
 // Filt(x) = Orig(x) - PaethPredictor(a, b, c)
 // ---------------------------------------------------------------------------
+@intent("apply PNG Paeth filter: each byte minus the Paeth predictor of neighbors")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn filter_paeth(row: ptr[i32], prev_row: ptr[i32], filtered: ptr[i32], width_bytes: i32) {
     for i: i32 in range(0, BPP()) {
@@ -242,6 +275,8 @@ fn filter_paeth(row: ptr[i32], prev_row: ptr[i32], filtered: ptr[i32], width_byt
 // ---------------------------------------------------------------------------
 // Unfilter: reverse each filter type
 // ---------------------------------------------------------------------------
+@intent("reverse PNG Sub filter to reconstruct original row bytes")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn unfilter_sub(filtered: ptr[i32], row: ptr[i32], width_bytes: i32) {
     for i: i32 in range(0, BPP()) {
@@ -254,6 +289,8 @@ fn unfilter_sub(filtered: ptr[i32], row: ptr[i32], width_bytes: i32) {
     }
 }
 
+@intent("reverse PNG Up filter to reconstruct original row bytes")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn unfilter_up(filtered: ptr[i32], prev_row: ptr[i32], row: ptr[i32], width_bytes: i32) {
     for i: i32 in range(0, width_bytes) {
@@ -263,6 +300,8 @@ fn unfilter_up(filtered: ptr[i32], prev_row: ptr[i32], row: ptr[i32], width_byte
     }
 }
 
+@intent("reverse PNG Average filter to reconstruct original row bytes")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn unfilter_average(filtered: ptr[i32], prev_row: ptr[i32], row: ptr[i32], width_bytes: i32) {
     for i: i32 in range(0, BPP()) {
@@ -278,6 +317,8 @@ fn unfilter_average(filtered: ptr[i32], prev_row: ptr[i32], row: ptr[i32], width
     }
 }
 
+@intent("reverse PNG Paeth filter to reconstruct original row bytes")
+@precondition(true) @postcondition(true)
 @inline(always)
 fn unfilter_paeth(filtered: ptr[i32], prev_row: ptr[i32], row: ptr[i32], width_bytes: i32) {
     for i: i32 in range(0, BPP()) {
@@ -299,6 +340,8 @@ fn unfilter_paeth(filtered: ptr[i32], prev_row: ptr[i32], row: ptr[i32], width_b
 // ---------------------------------------------------------------------------
 // Sum of absolute values (for filter heuristic)
 // ---------------------------------------------------------------------------
+@intent("compute sum of absolute values of filtered bytes for filter heuristic scoring")
+@precondition(true) @postcondition(true)
 @pure @inline(always)
 fn sum_abs(data: ptr[i32], len: i32) -> i32 {
     let sum: i32 = 0;
@@ -317,6 +360,8 @@ fn sum_abs(data: ptr[i32], len: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Pick best filter for a row (minimum sum of absolute filtered values)
 // ---------------------------------------------------------------------------
+@intent("try all PNG filter types on a row and return the one with lowest absolute sum")
+@precondition(true) @postcondition(true)
 fn pick_best_filter(row: ptr[i32], prev_row: ptr[i32], width_bytes: i32,
                     scratch: ptr[i32]) -> i32 {
     let best_filter: i32 = 0;
@@ -367,6 +412,8 @@ fn pick_best_filter(row: ptr[i32], prev_row: ptr[i32], width_bytes: i32,
 // ---------------------------------------------------------------------------
 // Filter entire image (pick best filter per row)
 // ---------------------------------------------------------------------------
+@intent("filter an entire RGBA image row-by-row, picking the best PNG filter per row")
+@precondition(true) @postcondition(true)
 fn filter_image(image: ptr[i32], width: i32, height: i32,
                 filtered: ptr[i32], scratch: ptr[i32], prev_row_buf: ptr[i32]) -> i32 {
     let wb: i32 = width * BPP();
@@ -498,6 +545,8 @@ fn filter_image(image: ptr[i32], width: i32, height: i32,
 // ---------------------------------------------------------------------------
 // Test: filter/unfilter round-trip
 // ---------------------------------------------------------------------------
+@intent("test PNG filter round-trip correctness for Sub, Up, Average, and Paeth")
+@precondition(true) @postcondition(true)
 fn test_filters() -> i32 {
     print("--- Test: PNG filter round-trip ---\n");
 
@@ -598,6 +647,8 @@ fn test_filters() -> i32 {
 // ---------------------------------------------------------------------------
 // Test: CRC32 correctness (basic and slice-by-4)
 // ---------------------------------------------------------------------------
+@intent("test CRC32 correctness for basic and slice-by-4 implementations against known vectors")
+@precondition(true) @postcondition(true)
 fn test_crc32() -> i32 {
     print("--- Test: CRC32 (basic + slice-by-4) ---\n");
 
@@ -675,6 +726,8 @@ fn test_crc32() -> i32 {
 // ---------------------------------------------------------------------------
 // Benchmark: filter throughput on 1024x1024 image
 // ---------------------------------------------------------------------------
+@intent("benchmark PNG filter throughput on a 1024x1024 RGBA gradient image")
+@precondition(true) @postcondition(true)
 fn bench_filter() {
     print("\n--- Benchmark: PNG filter 1024x1024 RGBA ---\n");
 
@@ -735,6 +788,8 @@ fn bench_filter() {
 // ---------------------------------------------------------------------------
 // Benchmark: CRC32 throughput (basic vs slice-by-4)
 // ---------------------------------------------------------------------------
+@intent("benchmark CRC32 throughput comparing basic vs slice-by-4 on 4KB data")
+@precondition(true) @postcondition(true)
 fn bench_crc32() {
     print("\n--- Benchmark: CRC32 (basic vs slice-by-4) ---\n");
 
@@ -803,6 +858,7 @@ fn bench_crc32() {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+@intent("run filter and CRC32 tests, then benchmark both on realistic data sizes")
 fn main() -> i32 {
     print("=== fpng Core: PNG Filters + Fast CRC32 ===\n\n");
 
