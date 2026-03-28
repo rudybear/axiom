@@ -1,0 +1,626 @@
+@module turbopfor;
+@intent("TurboPFor-style integer compression: bit-packing, delta encoding, variable-byte encoding with benchmarks");
+
+// =============================================================================
+// TurboPFor -- Integer compression for search engines / databases
+// =============================================================================
+//
+// Core techniques:
+//   1. Bit-packing: find minimum bit width for an array, pack all values
+//      into that many bits per integer. E.g. values 0..15 need only 4 bits.
+//   2. Delta encoding: store differences between consecutive sorted values.
+//      Sorted arrays like [100, 103, 107, 115] become [100, 3, 4, 8].
+//   3. Variable-byte (VByte): encode each integer using 1-5 bytes,
+//      using high bit as continuation flag.
+//
+// GAP: No unsigned types. We use i32 with band/lshr for unsigned semantics.
+// GAP: No global mutable state. All state is passed as parameters.
+// GAP: No memcpy. Byte-by-byte or word-by-word copy.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Bit-width calculation: find minimum bits needed for max value in array
+// ---------------------------------------------------------------------------
+
+@pure
+fn find_max_value(input: ptr[i32], n: i32) -> i32 {
+    let max_val: i32 = 0;
+    for i: i32 in range(0, n) {
+        let v: i32 = ptr_read_i32(input, i);
+        if v > max_val {
+            max_val = v;
+        }
+    }
+    return max_val;
+}
+
+@pure
+fn bit_width(val: i32) -> i32 {
+    // Count bits needed to represent val (0 needs 0 bits, but we return 1 minimum)
+    if val == 0 {
+        return 1;
+    }
+    let bits: i32 = 0;
+    let v: i32 = val;
+    while v > 0 {
+        bits = bits + 1;
+        v = lshr(v, 1);
+    }
+    return bits;
+}
+
+// ---------------------------------------------------------------------------
+// Bit-pack encode
+// ---------------------------------------------------------------------------
+// Packs n integers from input[] into output byte stream using 'bits' bits each.
+// Returns: number of bytes written to output.
+//
+// Algorithm: maintain a bit buffer (32-bit accumulator). For each value,
+// OR it into the accumulator at the current bit offset, flush full bytes.
+
+fn bitpack_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
+    let max_val: i32 = find_max_value(input, n);
+    let bits: i32 = bit_width(max_val);
+
+    // Write header: first byte = bit width
+    ptr_write_u8(output, 0, bits);
+    let out_pos: i32 = 1;
+
+    let bit_buf: i32 = 0;     // accumulator
+    let bit_count: i32 = 0;   // bits in accumulator
+
+    for i: i32 in range(0, n) {
+        let val: i32 = ptr_read_i32(input, i);
+        let masked: i32 = band(val, shl(1, bits) - 1);
+
+        // Shift value into accumulator at current offset
+        bit_buf = bor(bit_buf, shl(masked, bit_count));
+        bit_count = bit_count + bits;
+
+        // Flush complete bytes
+        while bit_count >= 8 {
+            ptr_write_u8(output, out_pos, band(bit_buf, 255));
+            out_pos = out_pos + 1;
+            bit_buf = lshr(bit_buf, 8);
+            bit_count = bit_count - 8;
+        }
+    }
+
+    // Flush remaining bits
+    if bit_count > 0 {
+        ptr_write_u8(output, out_pos, band(bit_buf, 255));
+        out_pos = out_pos + 1;
+    }
+
+    return out_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Bit-pack decode
+// ---------------------------------------------------------------------------
+// Decodes n integers from input byte stream into output[].
+// bits = number of bits per integer (read from header by caller).
+
+fn bitpack_decode(input: ptr[i32], start: i32, n: i32, bits: i32, output: ptr[i32]) {
+    let in_pos: i32 = start;
+    let bit_buf: i32 = 0;
+    let bit_count: i32 = 0;
+    let mask: i32 = shl(1, bits) - 1;
+
+    for i: i32 in range(0, n) {
+        // Ensure we have enough bits
+        while bit_count < bits {
+            let byte_val: i32 = ptr_read_u8(input, in_pos);
+            bit_buf = bor(bit_buf, shl(byte_val, bit_count));
+            bit_count = bit_count + 8;
+            in_pos = in_pos + 1;
+        }
+
+        // Extract value
+        let val: i32 = band(bit_buf, mask);
+        ptr_write_i32(output, i, val);
+
+        // Consume bits
+        bit_buf = lshr(bit_buf, bits);
+        bit_count = bit_count - bits;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Delta encode: store differences between consecutive values
+// ---------------------------------------------------------------------------
+// For sorted input [100, 103, 107, 115], output = [100, 3, 4, 8].
+
+fn delta_encode(input: ptr[i32], n: i32, output: ptr[i32]) {
+    if n < 1 {
+        return;
+    }
+    ptr_write_i32(output, 0, ptr_read_i32(input, 0));
+    for i: i32 in range(1, n) {
+        let delta: i32 = ptr_read_i32(input, i) - ptr_read_i32(input, i - 1);
+        ptr_write_i32(output, i, delta);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Delta decode: reconstruct original values from deltas
+// ---------------------------------------------------------------------------
+
+fn delta_decode(input: ptr[i32], n: i32, output: ptr[i32]) {
+    if n < 1 {
+        return;
+    }
+    ptr_write_i32(output, 0, ptr_read_i32(input, 0));
+    for i: i32 in range(1, n) {
+        let prev: i32 = ptr_read_i32(output, i - 1);
+        ptr_write_i32(output, i, prev + ptr_read_i32(input, i));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Variable-byte (VByte) encode
+// ---------------------------------------------------------------------------
+// Each integer encoded as 1-5 bytes. High bit = 1 means more bytes follow.
+// Low 7 bits carry payload.
+// Returns: number of bytes written.
+
+fn vbyte_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
+    let out_pos: i32 = 0;
+    for i: i32 in range(0, n) {
+        let val: i32 = ptr_read_i32(input, i);
+        let v: i32 = val;
+
+        // Handle zero explicitly
+        if v == 0 {
+            ptr_write_u8(output, out_pos, 0);
+            out_pos = out_pos + 1;
+            continue;
+        }
+
+        // Encode 7 bits at a time, MSB = continuation
+        while v > 0 {
+            let byte_val: i32 = band(v, 127);
+            v = lshr(v, 7);
+            if v > 0 {
+                // More bytes follow: set high bit
+                byte_val = bor(byte_val, 128);
+            }
+            ptr_write_u8(output, out_pos, byte_val);
+            out_pos = out_pos + 1;
+        }
+    }
+    return out_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Variable-byte (VByte) decode
+// ---------------------------------------------------------------------------
+// Decodes n integers from input byte stream into output[].
+// Returns: number of bytes consumed from input.
+
+fn vbyte_decode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
+    let in_pos: i32 = 0;
+    for i: i32 in range(0, n) {
+        let val: i32 = 0;
+        let shift: i32 = 0;
+        let more: i32 = 1;
+        while more == 1 {
+            let byte_val: i32 = ptr_read_u8(input, in_pos);
+            in_pos = in_pos + 1;
+            val = bor(val, shl(band(byte_val, 127), shift));
+            shift = shift + 7;
+            if band(byte_val, 128) == 0 {
+                more = 0;
+            }
+        }
+        ptr_write_i32(output, i, val);
+    }
+    return in_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Combined pipeline: delta + bitpack encode
+// ---------------------------------------------------------------------------
+
+fn delta_bitpack_encode(input: ptr[i32], n: i32,
+                        delta_buf: ptr[i32],
+                        output: ptr[i32]) -> i32 {
+    delta_encode(input, n, delta_buf);
+    return bitpack_encode(delta_buf, n, output);
+}
+
+// ---------------------------------------------------------------------------
+// Combined pipeline: bitpack + delta decode
+// ---------------------------------------------------------------------------
+
+fn delta_bitpack_decode(input: ptr[i32], n: i32,
+                        delta_buf: ptr[i32],
+                        output: ptr[i32]) {
+    // Read bit width from header
+    let bits: i32 = ptr_read_u8(input, 0);
+    // Decode bitpacked data (skip header byte at offset 0)
+    bitpack_decode(input, 1, n, bits, delta_buf);
+    delta_decode(delta_buf, n, output);
+}
+
+// ---------------------------------------------------------------------------
+// Verify: compare two i32 arrays
+// ---------------------------------------------------------------------------
+
+@pure
+fn arrays_equal(a: ptr[i32], b: ptr[i32], n: i32) -> i32 {
+    for i: i32 in range(0, n) {
+        if ptr_read_i32(a, i) != ptr_read_i32(b, i) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Pseudo-random number generator (LCG)
+// ---------------------------------------------------------------------------
+
+fn lcg_next(state: ptr[i32]) -> i32 {
+    let s: i32 = ptr_read_i32(state, 0);
+    // LCG: next = (s * 1103515245 + 12345) & 0x7FFFFFFF
+    // 1103515245 as i32 = 1103515245 (fits in signed)
+    let next: i32 = band((s *% 1103515245) +% 12345, 2147483647);
+    ptr_write_i32(state, 0, next);
+    return next;
+}
+
+// ---------------------------------------------------------------------------
+// Generate sorted test data simulating document IDs
+// ---------------------------------------------------------------------------
+
+fn generate_sorted_ids(output: ptr[i32], n: i32, seed: i32) {
+    let state: ptr[i32] = heap_alloc(1, 4);
+    ptr_write_i32(state, 0, seed);
+
+    let cur: i32 = 1;
+    for i: i32 in range(0, n) {
+        // Gap between 1 and 20 (simulating posting list gaps)
+        let gap: i32 = (lcg_next(state) % 20) + 1;
+        cur = cur + gap;
+        ptr_write_i32(output, i, cur);
+    }
+
+    heap_free(state);
+}
+
+// ---------------------------------------------------------------------------
+// Generate small-value data (simulating frequency counts)
+// ---------------------------------------------------------------------------
+
+fn generate_small_values(output: ptr[i32], n: i32, seed: i32, max_val: i32) {
+    let state: ptr[i32] = heap_alloc(1, 4);
+    ptr_write_i32(state, 0, seed);
+
+    for i: i32 in range(0, n) {
+        let v: i32 = lcg_next(state) % max_val;
+        ptr_write_i32(output, i, v);
+    }
+
+    heap_free(state);
+}
+
+// ---------------------------------------------------------------------------
+// Main: test all encodings, benchmark, report ratios
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    print("=== TurboPFor Integer Compression Port ===\n\n");
+
+    let n: i32 = 10000;
+    let pass_count: i32 = 0;
+    let total_tests: i32 = 0;
+
+    // Allocate work buffers
+    let input: ptr[i32] = heap_alloc(n, 4);
+    let delta_buf: ptr[i32] = heap_alloc(n, 4);
+    let decoded: ptr[i32] = heap_alloc(n, 4);
+    // Worst case: 4 bytes per int for bitpack, 5 bytes per int for vbyte
+    let packed_buf: ptr[i32] = heap_alloc(n * 5 + 64, 1);
+
+    // =====================================================================
+    // Test 1: Delta encoding round-trip on sorted data
+    // =====================================================================
+    print("--- Test 1: Delta encoding (10K sorted IDs) ---\n");
+    total_tests = total_tests + 1;
+    generate_sorted_ids(input, n, 42);
+
+    delta_encode(input, n, delta_buf);
+    delta_decode(delta_buf, n, decoded);
+
+    if arrays_equal(input, decoded, n) == 1 {
+        print("PASS: Delta round-trip verified\n");
+        pass_count = pass_count + 1;
+    } else {
+        print("FAIL: Delta round-trip mismatch\n");
+    }
+
+    // Show delta statistics
+    let max_delta: i32 = find_max_value(delta_buf, n);
+    let delta_bits: i32 = bit_width(max_delta);
+    print("Max delta: ");
+    print_i32(max_delta);
+    print(", Bits needed: ");
+    print_i32(delta_bits);
+    print("\n");
+
+    // =====================================================================
+    // Test 2: Bit-packing round-trip on small values
+    // =====================================================================
+    print("\n--- Test 2: Bit-packing (10K small values 0..255) ---\n");
+    total_tests = total_tests + 1;
+    generate_small_values(input, n, 123, 256);
+
+    let packed_size: i32 = bitpack_encode(input, n, packed_buf);
+    let raw_size: i32 = n * 4;
+
+    print("Raw size: ");
+    print_i32(raw_size);
+    print(" bytes\n");
+    print("Packed size: ");
+    print_i32(packed_size);
+    print(" bytes\n");
+
+    // Read bit width from header for decode
+    let bp_bits: i32 = ptr_read_u8(packed_buf, 0);
+    print("Bit width: ");
+    print_i32(bp_bits);
+    print(" bits/int\n");
+
+    // Decode from byte 1 (skip header byte)
+    bitpack_decode(packed_buf, 1, n, bp_bits, decoded);
+
+    if arrays_equal(input, decoded, n) == 1 {
+        print("PASS: Bitpack round-trip verified\n");
+        pass_count = pass_count + 1;
+    } else {
+        print("FAIL: Bitpack round-trip mismatch\n");
+        // Debug: show first 5 values
+        print("First 5 input:   ");
+        for i: i32 in range(0, 5) {
+            print_i32(ptr_read_i32(input, i));
+            print(" ");
+        }
+        print("\nFirst 5 decoded: ");
+        for i: i32 in range(0, 5) {
+            print_i32(ptr_read_i32(decoded, i));
+            print(" ");
+        }
+        print("\n");
+    }
+
+    let ratio_bp: i32 = (packed_size * 100) / raw_size;
+    print("Compression ratio: ");
+    print_i32(ratio_bp);
+    print("% (");
+    print_i32(raw_size / packed_size);
+    print("x)\n");
+
+    // =====================================================================
+    // Test 3: VByte encoding round-trip
+    // =====================================================================
+    print("\n--- Test 3: VByte encoding (10K values 0..1023) ---\n");
+    total_tests = total_tests + 1;
+    generate_small_values(input, n, 456, 1024);
+
+    let vbyte_size: i32 = vbyte_encode(input, n, packed_buf);
+
+    print("Raw size: ");
+    print_i32(raw_size);
+    print(" bytes\n");
+    print("VByte size: ");
+    print_i32(vbyte_size);
+    print(" bytes\n");
+
+    let vbyte_consumed: i32 = vbyte_decode(packed_buf, n, decoded);
+
+    if arrays_equal(input, decoded, n) == 1 {
+        print("PASS: VByte round-trip verified\n");
+        pass_count = pass_count + 1;
+    } else {
+        print("FAIL: VByte round-trip mismatch\n");
+    }
+
+    let ratio_vb: i32 = (vbyte_size * 100) / raw_size;
+    print("Compression ratio: ");
+    print_i32(ratio_vb);
+    print("% (");
+    print_i32(raw_size / vbyte_size);
+    print("x)\n");
+
+    // =====================================================================
+    // Test 4: Delta + Bitpack pipeline on sorted data
+    // =====================================================================
+    print("\n--- Test 4: Delta+Bitpack pipeline (10K sorted IDs) ---\n");
+    total_tests = total_tests + 1;
+    generate_sorted_ids(input, n, 789);
+
+    let pipeline_size: i32 = delta_bitpack_encode(input, n, delta_buf, packed_buf);
+
+    print("Raw size: ");
+    print_i32(raw_size);
+    print(" bytes\n");
+    print("Delta+Bitpack size: ");
+    print_i32(pipeline_size);
+    print(" bytes\n");
+
+    // Decode pipeline
+    delta_bitpack_decode(packed_buf, n, delta_buf, decoded);
+
+    if arrays_equal(input, decoded, n) == 1 {
+        print("PASS: Delta+Bitpack pipeline round-trip verified\n");
+        pass_count = pass_count + 1;
+    } else {
+        print("FAIL: Delta+Bitpack pipeline round-trip mismatch\n");
+        // Debug
+        print("First 5 input:   ");
+        for i: i32 in range(0, 5) {
+            print_i32(ptr_read_i32(input, i));
+            print(" ");
+        }
+        print("\nFirst 5 decoded: ");
+        for i: i32 in range(0, 5) {
+            print_i32(ptr_read_i32(decoded, i));
+            print(" ");
+        }
+        print("\n");
+    }
+
+    let ratio_dp: i32 = (pipeline_size * 100) / raw_size;
+    print("Compression ratio: ");
+    print_i32(ratio_dp);
+    print("% (");
+    if pipeline_size > 0 {
+        print_i32(raw_size / pipeline_size);
+    } else {
+        print_i32(0);
+    }
+    print("x)\n");
+
+    // =====================================================================
+    // Test 5: Delta + VByte pipeline on sorted data
+    // =====================================================================
+    print("\n--- Test 5: Delta+VByte pipeline (10K sorted IDs) ---\n");
+    total_tests = total_tests + 1;
+    generate_sorted_ids(input, n, 321);
+
+    delta_encode(input, n, delta_buf);
+    let dv_size: i32 = vbyte_encode(delta_buf, n, packed_buf);
+
+    print("Raw size: ");
+    print_i32(raw_size);
+    print(" bytes\n");
+    print("Delta+VByte size: ");
+    print_i32(dv_size);
+    print(" bytes\n");
+
+    // Decode
+    let dv_consumed: i32 = vbyte_decode(packed_buf, n, delta_buf);
+    delta_decode(delta_buf, n, decoded);
+
+    if arrays_equal(input, decoded, n) == 1 {
+        print("PASS: Delta+VByte pipeline round-trip verified\n");
+        pass_count = pass_count + 1;
+    } else {
+        print("FAIL: Delta+VByte pipeline round-trip mismatch\n");
+    }
+
+    let ratio_dv: i32 = (dv_size * 100) / raw_size;
+    print("Compression ratio: ");
+    print_i32(ratio_dv);
+    print("% (");
+    if dv_size > 0 {
+        print_i32(raw_size / dv_size);
+    } else {
+        print_i32(0);
+    }
+    print("x)\n");
+
+    // =====================================================================
+    // Summary
+    // =====================================================================
+    print("\n--- Summary ---\n");
+    print("Tests passed: ");
+    print_i32(pass_count);
+    print("/");
+    print_i32(total_tests);
+    print("\n");
+
+    // =====================================================================
+    // Benchmark: Delta+Bitpack encode/decode 10K sorted ints x 10K iters
+    // =====================================================================
+    print("\n--- Benchmark: Delta+Bitpack 10K ints x 10K iterations ---\n");
+
+    generate_sorted_ids(input, n, 42);
+    let bench_iters: i32 = 10000;
+
+    let t0: i64 = clock_ns();
+    let checksum: i32 = 0;
+
+    for iter: i32 in range(0, bench_iters) {
+        let enc_sz: i32 = delta_bitpack_encode(input, n, delta_buf, packed_buf);
+        delta_bitpack_decode(packed_buf, n, delta_buf, decoded);
+        checksum = checksum +% enc_sz +% ptr_read_i32(decoded, 0);
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        // Total integers processed = bench_iters * n * 2 (encode + decode)
+        let total_ints: i64 = widen(bench_iters) * widen(n) * 2;
+        let ints_per_sec: i64 = (total_ints * 1000) / elapsed_ms;
+        let m_ints_per_sec: i64 = ints_per_sec / 1000000;
+        print("Throughput: ");
+        print_i64(m_ints_per_sec);
+        print(" M ints/sec\n");
+
+        let total_mb: i64 = (widen(bench_iters) * widen(n) * 4 * 2) / 1048576;
+        let mbps: i64 = (total_mb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(mbps);
+        print(" MB/s\n");
+    }
+
+    // =====================================================================
+    // Benchmark: VByte encode/decode 10K ints x 10K iterations
+    // =====================================================================
+    print("\n--- Benchmark: VByte 10K ints x 10K iterations ---\n");
+
+    generate_small_values(input, n, 42, 1024);
+
+    let t2: i64 = clock_ns();
+    let checksum2: i32 = 0;
+
+    for iter2: i32 in range(0, bench_iters) {
+        let vb_sz: i32 = vbyte_encode(input, n, packed_buf);
+        let vb_con: i32 = vbyte_decode(packed_buf, n, decoded);
+        checksum2 = checksum2 +% vb_sz +% ptr_read_i32(decoded, 0);
+    }
+
+    let t3: i64 = clock_ns();
+    let elapsed_ms2: i64 = (t3 - t2) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms2);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum2);
+    print("\n");
+
+    if elapsed_ms2 > 0 {
+        let total_ints2: i64 = widen(bench_iters) * widen(n) * 2;
+        let ints_per_sec2: i64 = (total_ints2 * 1000) / elapsed_ms2;
+        let m_ints_per_sec2: i64 = ints_per_sec2 / 1000000;
+        print("Throughput: ");
+        print_i64(m_ints_per_sec2);
+        print(" M ints/sec\n");
+
+        let total_mb2: i64 = (widen(bench_iters) * widen(n) * 4 * 2) / 1048576;
+        let mbps2: i64 = (total_mb2 * 1000) / elapsed_ms2;
+        print("Throughput: ");
+        print_i64(mbps2);
+        print(" MB/s\n");
+    }
+
+    // Cleanup
+    heap_free(input);
+    heap_free(delta_buf);
+    heap_free(decoded);
+    heap_free(packed_buf);
+
+    print("\n=== TurboPFor complete ===\n");
+    return 0;
+}

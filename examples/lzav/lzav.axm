@@ -1,0 +1,758 @@
+@module lzav;
+@intent("LZAV-style compression/decompression with improved ratio over LZ4, verification and benchmark");
+
+// =============================================================================
+// LZAV -- Improved LZ77 compressor with better ratio than LZ4/Snappy
+// =============================================================================
+//
+// Core algorithm:
+//   1. Larger hash table (16384 entries) for finding longer/better matches
+//   2. Token format: 2-bit type + 6-bit length
+//      Type 0 = literal run
+//      Type 1 = short match (offset < 256, length 4..67)
+//      Type 2 = long match  (offset < 65536, length 4..67)
+//      Type 3 = repeat match (reuse last offset, length 4..67)
+//   3. Variable-length extension for lengths > 63
+//   4. Variable-length offset encoding for long matches
+//
+// GAP: No unsigned types. We use i32 with band/lshr for unsigned semantics.
+// GAP: No global mutable state. Hash table allocated per call.
+// GAP: No memcpy. Byte-by-byte copy.
+// GAP: No unions or tagged enums at codegen level. Use integer encoding.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+@const fn HASH_TABLE_SIZE() -> i32 { return 16384; }
+@const fn HASH_LOG() -> i32 { return 14; }
+@const fn HASH_MASK() -> i32 { return 16383; }
+@const fn MIN_MATCH() -> i32 { return 4; }
+@const fn MAX_TOKEN_LEN() -> i32 { return 63; }
+
+// Token type codes (upper 2 bits of token byte)
+@const fn TYPE_LITERAL() -> i32 { return 0; }
+@const fn TYPE_SHORT_MATCH() -> i32 { return 1; }
+@const fn TYPE_LONG_MATCH() -> i32 { return 2; }
+@const fn TYPE_REPEAT_MATCH() -> i32 { return 3; }
+
+// Hash multiplier (2654435761 as signed i32 = -1640531535)
+@const fn HASH_MULT() -> i32 { return 0 - 1640531535; }
+
+// ---------------------------------------------------------------------------
+// Helper: read 4 bytes as a 32-bit value (little-endian)
+// ---------------------------------------------------------------------------
+
+@pure @inline(always)
+fn read32_le(data: ptr[i32], byte_offset: i32) -> i32 {
+    let b0: i32 = ptr_read_u8(data, byte_offset);
+    let b1: i32 = ptr_read_u8(data, byte_offset + 1);
+    let b2: i32 = ptr_read_u8(data, byte_offset + 2);
+    let b3: i32 = ptr_read_u8(data, byte_offset + 3);
+    return bor(bor(b0, shl(b1, 8)), bor(shl(b2, 16), shl(b3, 24)));
+}
+
+// ---------------------------------------------------------------------------
+// Hash function: hash 4 bytes at position
+// ---------------------------------------------------------------------------
+
+@pure @inline(always)
+fn lzav_hash(val: i32) -> i32 {
+    return band(lshr(val *% HASH_MULT(), 18), HASH_MASK());
+}
+
+// ---------------------------------------------------------------------------
+// Write token byte: 2-bit type + 6-bit length
+// ---------------------------------------------------------------------------
+
+@inline(always)
+fn write_token(dst: ptr[i32], pos: i32, tok_type: i32, length: i32) {
+    let token: i32 = bor(shl(tok_type, 6), band(length, MAX_TOKEN_LEN()));
+    ptr_write_u8(dst, pos, token);
+}
+
+// ---------------------------------------------------------------------------
+// Write extended length (for lengths > 63)
+// Encodes remainder in 255-byte run-length chunks
+// ---------------------------------------------------------------------------
+
+fn write_extended_length(dst: ptr[i32], pos: i32, length: i32) -> i32 {
+    let rem: i32 = length;
+    let p: i32 = pos;
+    while rem >= 255 {
+        ptr_write_u8(dst, p, 255);
+        p = p + 1;
+        rem = rem - 255;
+    }
+    ptr_write_u8(dst, p, rem);
+    p = p + 1;
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// Read extended length during decompression
+// ---------------------------------------------------------------------------
+
+fn read_extended_length(src: ptr[i32], pos: i32, base_len: i32,
+                        out_len: ptr[i32], out_pos: ptr[i32], src_len: i32) {
+    let length: i32 = base_len;
+    let p: i32 = pos;
+    let extra: i32 = 255;
+    while extra == 255 {
+        if p >= src_len {
+            ptr_write_i32(out_len, 0, 0 - 1);
+            ptr_write_i32(out_pos, 0, p);
+            return;
+        }
+        extra = ptr_read_u8(src, p);
+        p = p + 1;
+        length = length + extra;
+    }
+    ptr_write_i32(out_len, 0, length);
+    ptr_write_i32(out_pos, 0, p);
+}
+
+// ---------------------------------------------------------------------------
+// Write offset: 1 byte for short, 2 bytes for long
+// ---------------------------------------------------------------------------
+
+@inline(always)
+fn write_offset_short(dst: ptr[i32], pos: i32, offset: i32) -> i32 {
+    ptr_write_u8(dst, pos, band(offset, 255));
+    return pos + 1;
+}
+
+@inline(always)
+fn write_offset_long(dst: ptr[i32], pos: i32, offset: i32) -> i32 {
+    ptr_write_u8(dst, pos, band(offset, 255));
+    ptr_write_u8(dst, pos + 1, band(lshr(offset, 8), 255));
+    return pos + 2;
+}
+
+// ---------------------------------------------------------------------------
+// Compute match length between two positions
+// ---------------------------------------------------------------------------
+
+@inline(always)
+fn match_length(src: ptr[i32], pos1: i32, pos2: i32, max_len: i32) -> i32 {
+    let len: i32 = 0;
+    while len < max_len {
+        if ptr_read_u8(src, pos1 + len) != ptr_read_u8(src, pos2 + len) {
+            return len;
+        }
+        len = len + 1;
+    }
+    return len;
+}
+
+// ---------------------------------------------------------------------------
+// LZAV Compress
+// ---------------------------------------------------------------------------
+// Returns compressed size in bytes, or 0 on failure.
+
+fn lzav_compress(src: ptr[i32], src_len: i32,
+                 dst: ptr[i32], dst_max: i32) -> i32 {
+    if src_len < 1 {
+        return 0;
+    }
+
+    // Allocate and zero hash table
+    let hash_table: ptr[i32] = heap_alloc(HASH_TABLE_SIZE(), 4);
+    for i: i32 in range(0, HASH_TABLE_SIZE()) {
+        ptr_write_i32(hash_table, i, 0 - 1);
+    }
+
+    let src_pos: i32 = 0;
+    let dst_pos: i32 = 0;
+    let anchor: i32 = 0;
+    let src_end: i32 = src_len;
+    let match_limit: i32 = src_len - MIN_MATCH();
+    let last_offset: i32 = 0;
+
+    // Too small to compress
+    if src_len < MIN_MATCH() {
+        let lit_len: i32 = src_len;
+        let tok_len: i32 = lit_len;
+        if tok_len > MAX_TOKEN_LEN() {
+            tok_len = MAX_TOKEN_LEN();
+        }
+        write_token(dst, dst_pos, TYPE_LITERAL(), tok_len);
+        dst_pos = dst_pos + 1;
+        if lit_len > MAX_TOKEN_LEN() {
+            dst_pos = write_extended_length(dst, dst_pos, lit_len - MAX_TOKEN_LEN());
+        }
+        for i: i32 in range(0, lit_len) {
+            ptr_write_u8(dst, dst_pos, ptr_read_u8(src, i));
+            dst_pos = dst_pos + 1;
+        }
+        heap_free(hash_table);
+        return dst_pos;
+    }
+
+    // Main compression loop
+    while src_pos <= match_limit {
+        let cur_val: i32 = read32_le(src, src_pos);
+        let h: i32 = lzav_hash(cur_val);
+        let ref_pos: i32 = ptr_read_i32(hash_table, h);
+
+        // Update hash table
+        ptr_write_i32(hash_table, h, src_pos);
+
+        // Try repeat match first (reuse last offset)
+        let best_len: i32 = 0;
+        let best_offset: i32 = 0;
+        let best_type: i32 = TYPE_LITERAL();
+
+        if last_offset > 0 and src_pos >= last_offset {
+            let rep_ref: i32 = src_pos - last_offset;
+            if rep_ref >= 0 {
+                let max_ext: i32 = src_end - src_pos;
+                let rep_len: i32 = match_length(src, rep_ref, src_pos, max_ext);
+                if rep_len >= MIN_MATCH() {
+                    best_len = rep_len;
+                    best_offset = last_offset;
+                    best_type = TYPE_REPEAT_MATCH();
+                }
+            }
+        }
+
+        // Try hash match
+        if ref_pos >= 0 {
+            let offset: i32 = src_pos - ref_pos;
+            if offset > 0 and offset < 65536 {
+                let ref_val: i32 = read32_le(src, ref_pos);
+                if cur_val == ref_val {
+                    let max_ext: i32 = src_end - src_pos;
+                    let m_len: i32 = match_length(src, ref_pos, src_pos, max_ext);
+                    if m_len >= MIN_MATCH() and m_len > best_len {
+                        best_len = m_len;
+                        best_offset = offset;
+                        if offset < 256 {
+                            best_type = TYPE_SHORT_MATCH();
+                        } else {
+                            best_type = TYPE_LONG_MATCH();
+                        }
+                    }
+                }
+            }
+        }
+
+        // No match found
+        if best_len < MIN_MATCH() {
+            src_pos = src_pos + 1;
+            continue;
+        }
+
+        // Emit literal run from anchor to src_pos
+        let lit_len: i32 = src_pos - anchor;
+        if lit_len > 0 {
+            let tok_len: i32 = lit_len;
+            if tok_len > MAX_TOKEN_LEN() {
+                tok_len = MAX_TOKEN_LEN();
+            }
+
+            // Check output space
+            if dst_pos + 1 + lit_len + 3 + 4 > dst_max {
+                heap_free(hash_table);
+                return 0;
+            }
+
+            write_token(dst, dst_pos, TYPE_LITERAL(), tok_len);
+            dst_pos = dst_pos + 1;
+            if lit_len > MAX_TOKEN_LEN() {
+                dst_pos = write_extended_length(dst, dst_pos, lit_len - MAX_TOKEN_LEN());
+            }
+            for i: i32 in range(0, lit_len) {
+                ptr_write_u8(dst, dst_pos, ptr_read_u8(src, anchor + i));
+                dst_pos = dst_pos + 1;
+            }
+        }
+
+        // Emit match token
+        let ml_code: i32 = best_len - MIN_MATCH();
+        let tok_ml: i32 = ml_code;
+        if tok_ml > MAX_TOKEN_LEN() {
+            tok_ml = MAX_TOKEN_LEN();
+        }
+
+        // Check output space
+        if dst_pos + 4 > dst_max {
+            heap_free(hash_table);
+            return 0;
+        }
+
+        write_token(dst, dst_pos, best_type, tok_ml);
+        dst_pos = dst_pos + 1;
+
+        // Write extended match length if needed
+        if ml_code > MAX_TOKEN_LEN() {
+            dst_pos = write_extended_length(dst, dst_pos, ml_code - MAX_TOKEN_LEN());
+        }
+
+        // Write offset based on match type
+        if best_type == TYPE_SHORT_MATCH() {
+            dst_pos = write_offset_short(dst, dst_pos, best_offset);
+        } else if best_type == TYPE_LONG_MATCH() {
+            dst_pos = write_offset_long(dst, dst_pos, best_offset);
+        }
+        // TYPE_REPEAT_MATCH writes no offset (reuses last)
+
+        last_offset = best_offset;
+        src_pos = src_pos + best_len;
+        anchor = src_pos;
+
+        // Hash positions we skipped over
+        if src_pos <= match_limit {
+            let skip_val: i32 = read32_le(src, src_pos);
+            let skip_h: i32 = lzav_hash(skip_val);
+            ptr_write_i32(hash_table, skip_h, src_pos);
+        }
+    }
+
+    // Emit final literal run
+    let last_lit_len: i32 = src_end - anchor;
+    if last_lit_len > 0 {
+        let tok_len2: i32 = last_lit_len;
+        if tok_len2 > MAX_TOKEN_LEN() {
+            tok_len2 = MAX_TOKEN_LEN();
+        }
+        if dst_pos + 1 + last_lit_len + 4 > dst_max {
+            heap_free(hash_table);
+            return 0;
+        }
+        write_token(dst, dst_pos, TYPE_LITERAL(), tok_len2);
+        dst_pos = dst_pos + 1;
+        if last_lit_len > MAX_TOKEN_LEN() {
+            dst_pos = write_extended_length(dst, dst_pos, last_lit_len - MAX_TOKEN_LEN());
+        }
+        for i: i32 in range(0, last_lit_len) {
+            ptr_write_u8(dst, dst_pos, ptr_read_u8(src, anchor + i));
+            dst_pos = dst_pos + 1;
+        }
+    }
+
+    heap_free(hash_table);
+    return dst_pos;
+}
+
+// ---------------------------------------------------------------------------
+// LZAV Decompress
+// ---------------------------------------------------------------------------
+// Returns decompressed size in bytes, or 0 on failure.
+
+fn lzav_decompress(src: ptr[i32], src_len: i32,
+                   dst: ptr[i32], dst_max: i32) -> i32 {
+    let src_pos: i32 = 0;
+    let dst_pos: i32 = 0;
+    let last_offset: i32 = 0;
+
+    // Temp buffers for extended length reading
+    let tmp_len: ptr[i32] = heap_alloc(1, 4);
+    let tmp_pos: ptr[i32] = heap_alloc(1, 4);
+
+    while src_pos < src_len {
+        // Read token byte
+        let token: i32 = ptr_read_u8(src, src_pos);
+        src_pos = src_pos + 1;
+
+        let tok_type: i32 = band(lshr(token, 6), 3);
+        let tok_len: i32 = band(token, MAX_TOKEN_LEN());
+
+        if tok_type == TYPE_LITERAL() {
+            // Literal run
+            let lit_len: i32 = tok_len;
+            if tok_len == MAX_TOKEN_LEN() {
+                read_extended_length(src, src_pos, tok_len, tmp_len, tmp_pos, src_len);
+                lit_len = ptr_read_i32(tmp_len, 0);
+                src_pos = ptr_read_i32(tmp_pos, 0);
+                if lit_len < 0 {
+                    heap_free(tmp_len);
+                    heap_free(tmp_pos);
+                    return 0;
+                }
+            }
+            if dst_pos + lit_len > dst_max {
+                heap_free(tmp_len);
+                heap_free(tmp_pos);
+                return 0;
+            }
+            for i: i32 in range(0, lit_len) {
+                ptr_write_u8(dst, dst_pos + i, ptr_read_u8(src, src_pos + i));
+            }
+            src_pos = src_pos + lit_len;
+            dst_pos = dst_pos + lit_len;
+
+        } else if tok_type == TYPE_SHORT_MATCH() {
+            // Short match: 1-byte offset
+            let ml_code: i32 = tok_len;
+            if tok_len == MAX_TOKEN_LEN() {
+                read_extended_length(src, src_pos, tok_len, tmp_len, tmp_pos, src_len);
+                ml_code = ptr_read_i32(tmp_len, 0);
+                src_pos = ptr_read_i32(tmp_pos, 0);
+                if ml_code < 0 {
+                    heap_free(tmp_len);
+                    heap_free(tmp_pos);
+                    return 0;
+                }
+            }
+            if src_pos >= src_len {
+                heap_free(tmp_len);
+                heap_free(tmp_pos);
+                return 0;
+            }
+            let offset: i32 = ptr_read_u8(src, src_pos);
+            src_pos = src_pos + 1;
+            let m_len: i32 = ml_code + MIN_MATCH();
+            let match_src: i32 = dst_pos - offset;
+            if match_src < 0 or dst_pos + m_len > dst_max {
+                heap_free(tmp_len);
+                heap_free(tmp_pos);
+                return 0;
+            }
+            for i: i32 in range(0, m_len) {
+                ptr_write_u8(dst, dst_pos + i, ptr_read_u8(dst, match_src + i));
+            }
+            dst_pos = dst_pos + m_len;
+            last_offset = offset;
+
+        } else if tok_type == TYPE_LONG_MATCH() {
+            // Long match: 2-byte offset
+            let ml_code2: i32 = tok_len;
+            if tok_len == MAX_TOKEN_LEN() {
+                read_extended_length(src, src_pos, tok_len, tmp_len, tmp_pos, src_len);
+                ml_code2 = ptr_read_i32(tmp_len, 0);
+                src_pos = ptr_read_i32(tmp_pos, 0);
+                if ml_code2 < 0 {
+                    heap_free(tmp_len);
+                    heap_free(tmp_pos);
+                    return 0;
+                }
+            }
+            if src_pos + 2 > src_len {
+                heap_free(tmp_len);
+                heap_free(tmp_pos);
+                return 0;
+            }
+            let lo: i32 = ptr_read_u8(src, src_pos);
+            let hi: i32 = ptr_read_u8(src, src_pos + 1);
+            let offset2: i32 = bor(lo, shl(hi, 8));
+            src_pos = src_pos + 2;
+            let m_len2: i32 = ml_code2 + MIN_MATCH();
+            let match_src2: i32 = dst_pos - offset2;
+            if match_src2 < 0 or dst_pos + m_len2 > dst_max {
+                heap_free(tmp_len);
+                heap_free(tmp_pos);
+                return 0;
+            }
+            for i: i32 in range(0, m_len2) {
+                ptr_write_u8(dst, dst_pos + i, ptr_read_u8(dst, match_src2 + i));
+            }
+            dst_pos = dst_pos + m_len2;
+            last_offset = offset2;
+
+        } else {
+            // Repeat match: reuse last_offset, no offset bytes
+            let ml_code3: i32 = tok_len;
+            if tok_len == MAX_TOKEN_LEN() {
+                read_extended_length(src, src_pos, tok_len, tmp_len, tmp_pos, src_len);
+                ml_code3 = ptr_read_i32(tmp_len, 0);
+                src_pos = ptr_read_i32(tmp_pos, 0);
+                if ml_code3 < 0 {
+                    heap_free(tmp_len);
+                    heap_free(tmp_pos);
+                    return 0;
+                }
+            }
+            if last_offset == 0 {
+                heap_free(tmp_len);
+                heap_free(tmp_pos);
+                return 0;
+            }
+            let m_len3: i32 = ml_code3 + MIN_MATCH();
+            let match_src3: i32 = dst_pos - last_offset;
+            if match_src3 < 0 or dst_pos + m_len3 > dst_max {
+                heap_free(tmp_len);
+                heap_free(tmp_pos);
+                return 0;
+            }
+            for i: i32 in range(0, m_len3) {
+                ptr_write_u8(dst, dst_pos + i, ptr_read_u8(dst, match_src3 + i));
+            }
+            dst_pos = dst_pos + m_len3;
+        }
+    }
+
+    heap_free(tmp_len);
+    heap_free(tmp_pos);
+    return dst_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Verify: compare two byte buffers
+// ---------------------------------------------------------------------------
+
+@pure
+fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
+    for i: i32 in range(0, len) {
+        if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Test data generators
+// ---------------------------------------------------------------------------
+
+fn fill_repeating(buf: ptr[i32], len: i32) {
+    // "ABCDEFGH" repeating -- 8-byte cycle with 4-byte matches
+    for i: i32 in range(0, len) {
+        let c: i32 = band(i, 7) + 65;
+        ptr_write_u8(buf, i, c);
+    }
+}
+
+fn fill_mixed(buf: ptr[i32], len: i32) {
+    for i: i32 in range(0, len) {
+        let section: i32 = i / 64;
+        if section % 2 == 0 {
+            ptr_write_u8(buf, i, band(i % 8 + 65, 255));
+        } else {
+            ptr_write_u8(buf, i, band(i *% 37 + 13, 255));
+        }
+    }
+}
+
+fn fill_text_like(buf: ptr[i32], len: i32) {
+    let pattern_len: i32 = 44;
+    let pat: ptr[i32] = heap_alloc(pattern_len, 1);
+    ptr_write_u8(pat, 0, 116); ptr_write_u8(pat, 1, 104); ptr_write_u8(pat, 2, 101); ptr_write_u8(pat, 3, 32);
+    ptr_write_u8(pat, 4, 113); ptr_write_u8(pat, 5, 117); ptr_write_u8(pat, 6, 105); ptr_write_u8(pat, 7, 99);
+    ptr_write_u8(pat, 8, 107); ptr_write_u8(pat, 9, 32); ptr_write_u8(pat, 10, 98); ptr_write_u8(pat, 11, 114);
+    ptr_write_u8(pat, 12, 111); ptr_write_u8(pat, 13, 119); ptr_write_u8(pat, 14, 110); ptr_write_u8(pat, 15, 32);
+    ptr_write_u8(pat, 16, 102); ptr_write_u8(pat, 17, 111); ptr_write_u8(pat, 18, 120); ptr_write_u8(pat, 19, 32);
+    ptr_write_u8(pat, 20, 106); ptr_write_u8(pat, 21, 117); ptr_write_u8(pat, 22, 109); ptr_write_u8(pat, 23, 112);
+    ptr_write_u8(pat, 24, 115); ptr_write_u8(pat, 25, 32); ptr_write_u8(pat, 26, 111); ptr_write_u8(pat, 27, 118);
+    ptr_write_u8(pat, 28, 101); ptr_write_u8(pat, 29, 114); ptr_write_u8(pat, 30, 32); ptr_write_u8(pat, 31, 116);
+    ptr_write_u8(pat, 32, 104); ptr_write_u8(pat, 33, 101); ptr_write_u8(pat, 34, 32); ptr_write_u8(pat, 35, 108);
+    ptr_write_u8(pat, 36, 97); ptr_write_u8(pat, 37, 122); ptr_write_u8(pat, 38, 121); ptr_write_u8(pat, 39, 32);
+    ptr_write_u8(pat, 40, 100); ptr_write_u8(pat, 41, 111); ptr_write_u8(pat, 42, 103); ptr_write_u8(pat, 43, 32);
+    for i: i32 in range(0, len) {
+        ptr_write_u8(buf, i, ptr_read_u8(pat, i % pattern_len));
+    }
+    heap_free(pat);
+}
+
+// Fill with highly repetitive data (tests repeat-match encoding)
+fn fill_run_data(buf: ptr[i32], len: i32) {
+    // Runs of the same 4 bytes at varying offsets
+    for i: i32 in range(0, len) {
+        let block: i32 = i / 128;
+        let phase: i32 = band(block, 3);
+        if phase == 0 {
+            ptr_write_u8(buf, i, band(i, 7) + 65);
+        } else if phase == 1 {
+            ptr_write_u8(buf, i, band(i, 3) + 48);
+        } else if phase == 2 {
+            ptr_write_u8(buf, i, band(i, 7) + 65);
+        } else {
+            ptr_write_u8(buf, i, band(i, 15) + 97);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main: verify round-trip, then benchmark, compare with LZ4
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    print("=== LZAV Compression Port ===\n");
+    print("Token: 2-bit type (lit/short/long/repeat) + 6-bit length\n");
+    print("Hash table: 16K entries (vs LZ4's 4K)\n\n");
+
+    let pass_count: i32 = 0;
+
+    // --- Test 1: Repeating pattern ---
+    print("--- Test 1: Repeating pattern (1024B) ---\n");
+    let test_len1: i32 = 1024;
+    let src1: ptr[i32] = heap_alloc(test_len1, 1);
+    fill_repeating(src1, test_len1);
+    let comp_max1: i32 = test_len1 + test_len1 / 4 + 64;
+    let comp1: ptr[i32] = heap_alloc(comp_max1, 1);
+    let decomp1: ptr[i32] = heap_alloc(test_len1 + 64, 1);
+    let csz1: i32 = lzav_compress(src1, test_len1, comp1, comp_max1);
+    print("Original: ");
+    print_i32(test_len1);
+    print(" bytes, Compressed: ");
+    print_i32(csz1);
+    print(" bytes");
+    if csz1 > 0 {
+        let ratio1: i32 = (csz1 * 100) / test_len1;
+        print(", Ratio: ");
+        print_i32(ratio1);
+        print("%");
+        let dsz1: i32 = lzav_decompress(comp1, csz1, decomp1, test_len1 + 64);
+        if dsz1 == test_len1 and buffers_equal(src1, decomp1, test_len1) == 1 {
+            print(" -- PASS\n");
+            pass_count = pass_count + 1;
+        } else {
+            print(" -- FAIL\n");
+        }
+    } else {
+        print(" -- FAIL (compression returned 0)\n");
+    }
+    heap_free(src1);
+    heap_free(comp1);
+    heap_free(decomp1);
+
+    // --- Test 2: Mixed data ---
+    print("\n--- Test 2: Mixed data (2048B) ---\n");
+    let test_len2: i32 = 2048;
+    let src2: ptr[i32] = heap_alloc(test_len2, 1);
+    fill_mixed(src2, test_len2);
+    let comp_max2: i32 = test_len2 + test_len2 / 4 + 64;
+    let comp2: ptr[i32] = heap_alloc(comp_max2, 1);
+    let decomp2: ptr[i32] = heap_alloc(test_len2 + 64, 1);
+    let csz2: i32 = lzav_compress(src2, test_len2, comp2, comp_max2);
+    print("Original: ");
+    print_i32(test_len2);
+    print(" bytes, Compressed: ");
+    print_i32(csz2);
+    print(" bytes");
+    if csz2 > 0 {
+        let ratio2: i32 = (csz2 * 100) / test_len2;
+        print(", Ratio: ");
+        print_i32(ratio2);
+        print("%");
+        let dsz2: i32 = lzav_decompress(comp2, csz2, decomp2, test_len2 + 64);
+        if dsz2 == test_len2 and buffers_equal(src2, decomp2, test_len2) == 1 {
+            print(" -- PASS\n");
+            pass_count = pass_count + 1;
+        } else {
+            print(" -- FAIL\n");
+        }
+    } else {
+        print(" -- FAIL (compression returned 0)\n");
+    }
+    heap_free(src2);
+    heap_free(comp2);
+    heap_free(decomp2);
+
+    // --- Test 3: Text-like data ---
+    print("\n--- Test 3: Text-like data (4096B) ---\n");
+    let test_len3: i32 = 4096;
+    let src3: ptr[i32] = heap_alloc(test_len3, 1);
+    fill_text_like(src3, test_len3);
+    let comp_max3: i32 = test_len3 + test_len3 / 4 + 64;
+    let comp3: ptr[i32] = heap_alloc(comp_max3, 1);
+    let decomp3: ptr[i32] = heap_alloc(test_len3 + 64, 1);
+    let csz3: i32 = lzav_compress(src3, test_len3, comp3, comp_max3);
+    print("Original: ");
+    print_i32(test_len3);
+    print(" bytes, Compressed: ");
+    print_i32(csz3);
+    print(" bytes");
+    if csz3 > 0 {
+        let ratio3: i32 = (csz3 * 100) / test_len3;
+        print(", Ratio: ");
+        print_i32(ratio3);
+        print("%");
+        let dsz3: i32 = lzav_decompress(comp3, csz3, decomp3, test_len3 + 64);
+        if dsz3 == test_len3 and buffers_equal(src3, decomp3, test_len3) == 1 {
+            print(" -- PASS\n");
+            pass_count = pass_count + 1;
+        } else {
+            print(" -- FAIL\n");
+        }
+    } else {
+        print(" -- FAIL (compression returned 0)\n");
+    }
+    heap_free(src3);
+    heap_free(comp3);
+    heap_free(decomp3);
+
+    // --- Test 4: Run data (tests repeat-match) ---
+    print("\n--- Test 4: Run data (4096B) ---\n");
+    let test_len4: i32 = 4096;
+    let src4: ptr[i32] = heap_alloc(test_len4, 1);
+    fill_run_data(src4, test_len4);
+    let comp_max4: i32 = test_len4 + test_len4 / 4 + 64;
+    let comp4: ptr[i32] = heap_alloc(comp_max4, 1);
+    let decomp4: ptr[i32] = heap_alloc(test_len4 + 64, 1);
+    let csz4: i32 = lzav_compress(src4, test_len4, comp4, comp_max4);
+    print("Original: ");
+    print_i32(test_len4);
+    print(" bytes, Compressed: ");
+    print_i32(csz4);
+    print(" bytes");
+    if csz4 > 0 {
+        let ratio4: i32 = (csz4 * 100) / test_len4;
+        print(", Ratio: ");
+        print_i32(ratio4);
+        print("%");
+        let dsz4: i32 = lzav_decompress(comp4, csz4, decomp4, test_len4 + 64);
+        if dsz4 == test_len4 and buffers_equal(src4, decomp4, test_len4) == 1 {
+            print(" -- PASS\n");
+            pass_count = pass_count + 1;
+        } else {
+            print(" -- FAIL\n");
+        }
+    } else {
+        print(" -- FAIL (compression returned 0)\n");
+    }
+    heap_free(src4);
+    heap_free(comp4);
+    heap_free(decomp4);
+
+    print("\nTests passed: ");
+    print_i32(pass_count);
+    print("/4\n");
+
+    // --- Benchmark: compress + decompress 4KB text x 50K iterations ---
+    let bench_len: i32 = 4096;
+    let bench_src: ptr[i32] = heap_alloc(bench_len, 1);
+    fill_text_like(bench_src, bench_len);
+
+    let bench_comp_max: i32 = bench_len + bench_len / 4 + 64;
+    let bench_comp: ptr[i32] = heap_alloc(bench_comp_max, 1);
+    let bench_decomp: ptr[i32] = heap_alloc(bench_len + 64, 1);
+
+    let iterations: i32 = 50000;
+    print("\n--- Benchmark: 4KB text x 50K compress+decompress ---\n");
+
+    let t0: i64 = clock_ns();
+    let checksum: i32 = 0;
+
+    for iter: i32 in range(0, iterations) {
+        let csz: i32 = lzav_compress(bench_src, bench_len, bench_comp, bench_comp_max);
+        let dsz: i32 = lzav_decompress(bench_comp, csz, bench_decomp, bench_len + 64);
+        checksum = checksum +% csz +% dsz;
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        let total_mb: i64 = (widen(iterations) * widen(bench_len) * 2) / 1048576;
+        let throughput: i64 = (total_mb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(throughput);
+        print(" MB/s\n");
+    }
+
+    heap_free(bench_src);
+    heap_free(bench_comp);
+    heap_free(bench_decomp);
+
+    print("\n=== LZAV complete ===\n");
+    return 0;
+}
