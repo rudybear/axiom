@@ -83,7 +83,8 @@
 @postcondition(true)
 @pure @inline(always)
 fn qoi_color_hash(r: i32, g: i32, b: i32, a: i32) -> i32 {
-    return (r * 3 + g * 5 + b * 7 + a * 11) % 64;
+    // band(x, 63) is equivalent to x % 64 but avoids integer division (1 cycle vs 20-80 cycles)
+    return band(r * 3 + g * 5 + b * 7 + a * 11, 63);
 }
 
 // ---------------------------------------------------------------------------

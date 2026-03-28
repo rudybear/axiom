@@ -316,7 +316,7 @@ fn fill_mixed_pattern(buf: ptr[i32], len: i32) {
     // Mix of repeated and non-repeated data
     for i: i32 in range(0, len) {
         let section: i32 = i / 32;
-        let offset: i32 = i % 32;
+        let offset: i32 = band(i, 31);
         if section % 2 == 0 {
             // Repeated section
             ptr_write_u8(buf, i, band(offset % 4 + 65, 255));

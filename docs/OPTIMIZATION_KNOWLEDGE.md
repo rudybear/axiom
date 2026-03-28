@@ -413,3 +413,18 @@ have been in a form that LLVM optimized perfectly.
 - `memcpy` replacing byte loops (LLVM sometimes misses this)
 - `array_const` for static tables (LLVM can't create globals from runtime code)
 - Algorithmic improvements (different algorithm, not code reshuffling)
+
+## Rule 16: Replace power-of-2 modulo with band()
+
+**Pattern:** `x % 64` → `band(x, 63)`. `x % 256` → `band(x, 255)`. Any `x % N` where N is a power of 2.
+
+**Why:** `srem` (signed remainder) is 20-80 CPU cycles. `and` (bitwise AND) is 1 cycle.
+LLVM sometimes optimizes `% power_of_2` to `and` automatically, but NOT when the value
+could be negative (signed integers). Since AXIOM uses signed i32 by default, the compiler
+must emit `srem` which preserves sign. `band(x, N-1)` is always 1 cycle.
+
+**Measured impact:** QOI image codec: 336ms → 267ms (-20%) just from this one change
+in the pixel hash function (called 65,536 times per encode).
+
+**When to apply:** Any hash function, index computation, or modular arithmetic where
+the divisor is a power of 2. Common in: hash tables, ring buffers, CRC, pixel hashing.

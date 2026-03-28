@@ -418,7 +418,7 @@ fn main() -> i32 {
     let start: i64 = clock_ns();
     for i: i32 in range(0, iterations) {
         // Vary DC slightly to prevent over-optimization
-        ptr_write_i32(coefs, 0, i % 64);
+        ptr_write_i32(coefs, 0, band(i, 63));
         idct_8x8(coefs, out, temp);
         checksum = checksum +% ptr_read_u8(out, 0);
     }
