@@ -1,0 +1,831 @@
+@module fpng;
+@intent("Fast PNG encode core: PNG row filters + slice-by-4 CRC32, ported from fpng");
+
+// =============================================================================
+// fpng core -- PNG filter prediction + fast CRC32 (slice-by-4)
+// =============================================================================
+//
+// Fast PNG encoding hot paths:
+//   1. PNG row filters: Sub, Up, Average, Paeth
+//   2. Filter selection: pick best filter per row (lowest sum of abs values)
+//   3. Fast CRC32: slice-by-4 technique (processes 4 bytes per iteration)
+//
+// PNG filter types (RFC 2083):
+//   0 = None:    Filt(x) = Orig(x)
+//   1 = Sub:     Filt(x) = Orig(x) - Orig(a)        [a = left pixel]
+//   2 = Up:      Filt(x) = Orig(x) - Orig(b)        [b = above pixel]
+//   3 = Average: Filt(x) = Orig(x) - floor((a+b)/2)
+//   4 = Paeth:   Filt(x) = Orig(x) - PaethPredictor(a,b,c)
+//     where c = upper-left pixel
+//
+// Slice-by-4 CRC32: processes 4 bytes at a time using 4 separate 256-entry
+// tables, achieving ~4x throughput vs byte-at-a-time CRC.
+//
+// GAP: No u32 type; use i32 with wrapping ops and logical shifts.
+// GAP: No struct; image stored as flat byte buffer (row-major RGBA).
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+@const fn FILTER_NONE() -> i32 { return 0; }
+@const fn FILTER_SUB() -> i32 { return 1; }
+@const fn FILTER_UP() -> i32 { return 2; }
+@const fn FILTER_AVG() -> i32 { return 3; }
+@const fn FILTER_PAETH() -> i32 { return 4; }
+@const fn BPP() -> i32 { return 4; }  // bytes per pixel (RGBA)
+
+@const fn CRC32_POLY() -> i32 { return 0 - 306674912; }  // 0xEDB88320
+
+// ---------------------------------------------------------------------------
+// Build CRC32 table (256 entries)
+// ---------------------------------------------------------------------------
+fn build_crc32_table(table: ptr[i32]) {
+    for i: i32 in range(0, 256) {
+        let crc: i32 = i;
+        for j: i32 in range(0, 8) {
+            if band(crc, 1) == 1 {
+                crc = bxor(lshr(crc, 1), CRC32_POLY());
+            } else {
+                crc = lshr(crc, 1);
+            }
+        }
+        ptr_write_i32(table, i, crc);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Build slice-by-4 CRC32 tables (4 x 256 entries = 1024 total)
+// Table layout: tables[0..255] = standard CRC table (T0)
+//               tables[256..511] = T1
+//               tables[512..767] = T2
+//               tables[768..1023] = T3
+// ---------------------------------------------------------------------------
+fn build_crc32_tables_sb4(tables: ptr[i32]) {
+    // Build T0 (standard table)
+    for i: i32 in range(0, 256) {
+        let crc: i32 = i;
+        for j: i32 in range(0, 8) {
+            if band(crc, 1) == 1 {
+                crc = bxor(lshr(crc, 1), CRC32_POLY());
+            } else {
+                crc = lshr(crc, 1);
+            }
+        }
+        ptr_write_i32(tables, i, crc);
+    }
+
+    // Build T1, T2, T3 from T0
+    for i: i32 in range(0, 256) {
+        let t0_val: i32 = ptr_read_i32(tables, i);
+        // T1[i] = T0[T0[i] & 0xFF] ^ (T0[i] >> 8)
+        let t1: i32 = bxor(ptr_read_i32(tables, band(t0_val, 0xFF)), lshr(t0_val, 8));
+        ptr_write_i32(tables, 256 + i, t1);
+        // T2[i] = T0[T1[i] & 0xFF] ^ (T1[i] >> 8)
+        let t2: i32 = bxor(ptr_read_i32(tables, band(t1, 0xFF)), lshr(t1, 8));
+        ptr_write_i32(tables, 512 + i, t2);
+        // T3[i] = T0[T2[i] & 0xFF] ^ (T2[i] >> 8)
+        let t3: i32 = bxor(ptr_read_i32(tables, band(t2, 0xFF)), lshr(t2, 8));
+        ptr_write_i32(tables, 768 + i, t3);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Standard CRC32 (byte-at-a-time, for reference)
+// ---------------------------------------------------------------------------
+@inline(always)
+fn crc32_basic(data: ptr[i32], len: i32, table: ptr[i32]) -> i32 {
+    let crc: i32 = 0 - 1;
+    for i: i32 in range(0, len) {
+        let byte_val: i32 = ptr_read_u8(data, i);
+        let idx: i32 = band(bxor(crc, byte_val), 0xFF);
+        crc = bxor(lshr(crc, 8), ptr_read_i32(table, idx));
+    }
+    return bxor(crc, 0 - 1);
+}
+
+// ---------------------------------------------------------------------------
+// Slice-by-4 CRC32 (processes 4 bytes per loop iteration)
+// ---------------------------------------------------------------------------
+@inline(always)
+fn crc32_sb4(data: ptr[i32], len: i32, tables: ptr[i32]) -> i32 {
+    let crc: i32 = 0 - 1;
+    let i: i32 = 0;
+
+    // Process 4 bytes at a time
+    let aligned_len: i32 = band(len, 0 - 4);  // len & ~3 (round down to multiple of 4)
+    while i < aligned_len {
+        // Read 4 bytes
+        let b0: i32 = ptr_read_u8(data, i);
+        let b1: i32 = ptr_read_u8(data, i + 1);
+        let b2: i32 = ptr_read_u8(data, i + 2);
+        let b3: i32 = ptr_read_u8(data, i + 3);
+
+        // XOR with current CRC
+        let x0: i32 = band(bxor(crc, b0), 0xFF);
+        let x1: i32 = band(bxor(lshr(crc, 8), b1), 0xFF);
+        let x2: i32 = band(bxor(lshr(crc, 16), b2), 0xFF);
+        let x3: i32 = band(bxor(lshr(crc, 24), b3), 0xFF);
+
+        // Lookup in 4 tables and XOR
+        crc = bxor(bxor(ptr_read_i32(tables, 768 + x0),
+                        ptr_read_i32(tables, 512 + x1)),
+                   bxor(ptr_read_i32(tables, 256 + x2),
+                        ptr_read_i32(tables, x3)));
+
+        i = i + 4;
+    }
+
+    // Process remaining bytes
+    while i < len {
+        let byte_val: i32 = ptr_read_u8(data, i);
+        let idx: i32 = band(bxor(crc, byte_val), 0xFF);
+        crc = bxor(lshr(crc, 8), ptr_read_i32(tables, idx));
+        i = i + 1;
+    }
+
+    return bxor(crc, 0 - 1);
+}
+
+// ---------------------------------------------------------------------------
+// Paeth predictor
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn paeth_predictor(a: i32, b: i32, c: i32) -> i32 {
+    let p: i32 = a + b - c;
+    let pa: i32 = p - a;
+    let pb: i32 = p - b;
+    let pc: i32 = p - c;
+    if pa < 0 { pa = 0 - pa; }
+    if pb < 0 { pb = 0 - pb; }
+    if pc < 0 { pc = 0 - pc; }
+    if pa <= pb and pa <= pc {
+        return a;
+    } else if pb <= pc {
+        return b;
+    }
+    return c;
+}
+
+// ---------------------------------------------------------------------------
+// PNG Filter: Sub (type 1)
+// Filt(x) = Orig(x) - Orig(x - bpp), where bpp = bytes per pixel
+// ---------------------------------------------------------------------------
+@inline(always)
+fn filter_sub(row: ptr[i32], filtered: ptr[i32], width_bytes: i32) {
+    // First bpp bytes: no left neighbor, so Filt(x) = Orig(x)
+    for i: i32 in range(0, BPP()) {
+        ptr_write_u8(filtered, i, ptr_read_u8(row, i));
+    }
+    for i: i32 in range(BPP(), width_bytes) {
+        let orig: i32 = ptr_read_u8(row, i);
+        let left: i32 = ptr_read_u8(row, i - BPP());
+        ptr_write_u8(filtered, i, band(orig - left, 0xFF));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PNG Filter: Up (type 2)
+// Filt(x) = Orig(x) - Prior(x)
+// ---------------------------------------------------------------------------
+@inline(always)
+fn filter_up(row: ptr[i32], prev_row: ptr[i32], filtered: ptr[i32], width_bytes: i32) {
+    for i: i32 in range(0, width_bytes) {
+        let orig: i32 = ptr_read_u8(row, i);
+        let above: i32 = ptr_read_u8(prev_row, i);
+        ptr_write_u8(filtered, i, band(orig - above, 0xFF));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PNG Filter: Average (type 3)
+// Filt(x) = Orig(x) - floor((Orig(a) + Prior(x)) / 2)
+// ---------------------------------------------------------------------------
+@inline(always)
+fn filter_average(row: ptr[i32], prev_row: ptr[i32], filtered: ptr[i32], width_bytes: i32) {
+    for i: i32 in range(0, BPP()) {
+        let orig: i32 = ptr_read_u8(row, i);
+        let above: i32 = ptr_read_u8(prev_row, i);
+        ptr_write_u8(filtered, i, band(orig - lshr(above, 1), 0xFF));
+    }
+    for i: i32 in range(BPP(), width_bytes) {
+        let orig: i32 = ptr_read_u8(row, i);
+        let left: i32 = ptr_read_u8(row, i - BPP());
+        let above: i32 = ptr_read_u8(prev_row, i);
+        ptr_write_u8(filtered, i, band(orig - lshr(left + above, 1), 0xFF));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PNG Filter: Paeth (type 4)
+// Filt(x) = Orig(x) - PaethPredictor(a, b, c)
+// ---------------------------------------------------------------------------
+@inline(always)
+fn filter_paeth(row: ptr[i32], prev_row: ptr[i32], filtered: ptr[i32], width_bytes: i32) {
+    for i: i32 in range(0, BPP()) {
+        let orig: i32 = ptr_read_u8(row, i);
+        let above: i32 = ptr_read_u8(prev_row, i);
+        // a=0, b=above, c=0 -> Paeth = above if above < above (never), else 0 or above
+        let pred: i32 = paeth_predictor(0, above, 0);
+        ptr_write_u8(filtered, i, band(orig - pred, 0xFF));
+    }
+    for i: i32 in range(BPP(), width_bytes) {
+        let orig: i32 = ptr_read_u8(row, i);
+        let left: i32 = ptr_read_u8(row, i - BPP());
+        let above: i32 = ptr_read_u8(prev_row, i);
+        let upper_left: i32 = ptr_read_u8(prev_row, i - BPP());
+        let pred: i32 = paeth_predictor(left, above, upper_left);
+        ptr_write_u8(filtered, i, band(orig - pred, 0xFF));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unfilter: reverse each filter type
+// ---------------------------------------------------------------------------
+@inline(always)
+fn unfilter_sub(filtered: ptr[i32], row: ptr[i32], width_bytes: i32) {
+    for i: i32 in range(0, BPP()) {
+        ptr_write_u8(row, i, ptr_read_u8(filtered, i));
+    }
+    for i: i32 in range(BPP(), width_bytes) {
+        let filt: i32 = ptr_read_u8(filtered, i);
+        let left: i32 = ptr_read_u8(row, i - BPP());
+        ptr_write_u8(row, i, band(filt + left, 0xFF));
+    }
+}
+
+@inline(always)
+fn unfilter_up(filtered: ptr[i32], prev_row: ptr[i32], row: ptr[i32], width_bytes: i32) {
+    for i: i32 in range(0, width_bytes) {
+        let filt: i32 = ptr_read_u8(filtered, i);
+        let above: i32 = ptr_read_u8(prev_row, i);
+        ptr_write_u8(row, i, band(filt + above, 0xFF));
+    }
+}
+
+@inline(always)
+fn unfilter_average(filtered: ptr[i32], prev_row: ptr[i32], row: ptr[i32], width_bytes: i32) {
+    for i: i32 in range(0, BPP()) {
+        let filt: i32 = ptr_read_u8(filtered, i);
+        let above: i32 = ptr_read_u8(prev_row, i);
+        ptr_write_u8(row, i, band(filt + lshr(above, 1), 0xFF));
+    }
+    for i: i32 in range(BPP(), width_bytes) {
+        let filt: i32 = ptr_read_u8(filtered, i);
+        let left: i32 = ptr_read_u8(row, i - BPP());
+        let above: i32 = ptr_read_u8(prev_row, i);
+        ptr_write_u8(row, i, band(filt + lshr(left + above, 1), 0xFF));
+    }
+}
+
+@inline(always)
+fn unfilter_paeth(filtered: ptr[i32], prev_row: ptr[i32], row: ptr[i32], width_bytes: i32) {
+    for i: i32 in range(0, BPP()) {
+        let filt: i32 = ptr_read_u8(filtered, i);
+        let above: i32 = ptr_read_u8(prev_row, i);
+        let pred: i32 = paeth_predictor(0, above, 0);
+        ptr_write_u8(row, i, band(filt + pred, 0xFF));
+    }
+    for i: i32 in range(BPP(), width_bytes) {
+        let filt: i32 = ptr_read_u8(filtered, i);
+        let left: i32 = ptr_read_u8(row, i - BPP());
+        let above: i32 = ptr_read_u8(prev_row, i);
+        let upper_left: i32 = ptr_read_u8(prev_row, i - BPP());
+        let pred: i32 = paeth_predictor(left, above, upper_left);
+        ptr_write_u8(row, i, band(filt + pred, 0xFF));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sum of absolute values (for filter heuristic)
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn sum_abs(data: ptr[i32], len: i32) -> i32 {
+    let sum: i32 = 0;
+    for i: i32 in range(0, len) {
+        let v: i32 = ptr_read_u8(data, i);
+        // Treat as signed byte: if v > 127, it's actually negative in filter domain
+        if v > 127 {
+            sum = sum + (256 - v);
+        } else {
+            sum = sum + v;
+        }
+    }
+    return sum;
+}
+
+// ---------------------------------------------------------------------------
+// Pick best filter for a row (minimum sum of absolute filtered values)
+// ---------------------------------------------------------------------------
+fn pick_best_filter(row: ptr[i32], prev_row: ptr[i32], width_bytes: i32,
+                    scratch: ptr[i32]) -> i32 {
+    let best_filter: i32 = 0;
+    let best_sum: i32 = 2147483647;  // INT_MAX
+
+    // Try None
+    let sum_none: i32 = sum_abs(row, width_bytes);
+    if sum_none < best_sum {
+        best_sum = sum_none;
+        best_filter = FILTER_NONE();
+    }
+
+    // Try Sub
+    filter_sub(row, scratch, width_bytes);
+    let sum_sub: i32 = sum_abs(scratch, width_bytes);
+    if sum_sub < best_sum {
+        best_sum = sum_sub;
+        best_filter = FILTER_SUB();
+    }
+
+    // Try Up
+    filter_up(row, prev_row, scratch, width_bytes);
+    let sum_up: i32 = sum_abs(scratch, width_bytes);
+    if sum_up < best_sum {
+        best_sum = sum_up;
+        best_filter = FILTER_UP();
+    }
+
+    // Try Average
+    filter_average(row, prev_row, scratch, width_bytes);
+    let sum_avg: i32 = sum_abs(scratch, width_bytes);
+    if sum_avg < best_sum {
+        best_sum = sum_avg;
+        best_filter = FILTER_AVG();
+    }
+
+    // Try Paeth
+    filter_paeth(row, prev_row, scratch, width_bytes);
+    let sum_paeth: i32 = sum_abs(scratch, width_bytes);
+    if sum_paeth < best_sum {
+        best_sum = sum_paeth;
+        best_filter = FILTER_PAETH();
+    }
+
+    return best_filter;
+}
+
+// ---------------------------------------------------------------------------
+// Filter entire image (pick best filter per row)
+// ---------------------------------------------------------------------------
+fn filter_image(image: ptr[i32], width: i32, height: i32,
+                filtered: ptr[i32], scratch: ptr[i32], prev_row_buf: ptr[i32]) -> i32 {
+    let wb: i32 = width * BPP();
+    let total_filtered: i32 = 0;
+
+    // Initialize prev_row to zeros (virtual row above first row)
+    for i: i32 in range(0, wb) {
+        ptr_write_u8(prev_row_buf, i, 0);
+    }
+
+    for y: i32 in range(0, height) {
+        let row_offset: i32 = y * wb;
+        let out_offset: i32 = y * (wb + 1);  // +1 for filter type byte
+
+        // Create a pointer-like offset reference to current row
+        // We'll read from image at row_offset + i
+        let best: i32 = 0;
+        let best_sum: i32 = 2147483647;
+
+        // Try None
+        let sum_none: i32 = 0;
+        for i: i32 in range(0, wb) {
+            let v: i32 = ptr_read_u8(image, row_offset + i);
+            if v > 127 {
+                sum_none = sum_none + 256 - v;
+            } else {
+                sum_none = sum_none + v;
+            }
+        }
+        if sum_none < best_sum {
+            best_sum = sum_none;
+            best = FILTER_NONE();
+        }
+
+        // Try Sub
+        for i: i32 in range(0, BPP()) {
+            ptr_write_u8(scratch, i, ptr_read_u8(image, row_offset + i));
+        }
+        for i: i32 in range(BPP(), wb) {
+            let orig: i32 = ptr_read_u8(image, row_offset + i);
+            let left: i32 = ptr_read_u8(image, row_offset + i - BPP());
+            ptr_write_u8(scratch, i, band(orig - left, 0xFF));
+        }
+        let sum_sub: i32 = sum_abs(scratch, wb);
+        if sum_sub < best_sum {
+            best_sum = sum_sub;
+            best = FILTER_SUB();
+        }
+
+        // Try Up
+        for i: i32 in range(0, wb) {
+            let orig: i32 = ptr_read_u8(image, row_offset + i);
+            let above: i32 = ptr_read_u8(prev_row_buf, i);
+            ptr_write_u8(scratch, i, band(orig - above, 0xFF));
+        }
+        let sum_up: i32 = sum_abs(scratch, wb);
+        if sum_up < best_sum {
+            best_sum = sum_up;
+            best = FILTER_UP();
+        }
+
+        // Try Paeth
+        for i: i32 in range(0, BPP()) {
+            let orig: i32 = ptr_read_u8(image, row_offset + i);
+            let above: i32 = ptr_read_u8(prev_row_buf, i);
+            let pred: i32 = paeth_predictor(0, above, 0);
+            ptr_write_u8(scratch, i, band(orig - pred, 0xFF));
+        }
+        for i: i32 in range(BPP(), wb) {
+            let orig: i32 = ptr_read_u8(image, row_offset + i);
+            let left: i32 = ptr_read_u8(image, row_offset + i - BPP());
+            let above: i32 = ptr_read_u8(prev_row_buf, i);
+            let upper_left: i32 = ptr_read_u8(prev_row_buf, i - BPP());
+            let pred: i32 = paeth_predictor(left, above, upper_left);
+            ptr_write_u8(scratch, i, band(orig - pred, 0xFF));
+        }
+        let sum_paeth: i32 = sum_abs(scratch, wb);
+        if sum_paeth < best_sum {
+            best_sum = sum_paeth;
+            best = FILTER_PAETH();
+        }
+
+        // Write filter type byte
+        ptr_write_u8(filtered, out_offset, best);
+
+        // Write filtered row using the best filter
+        if best == FILTER_NONE() {
+            for i: i32 in range(0, wb) {
+                ptr_write_u8(filtered, out_offset + 1 + i, ptr_read_u8(image, row_offset + i));
+            }
+        } else if best == FILTER_SUB() {
+            for i: i32 in range(0, BPP()) {
+                ptr_write_u8(filtered, out_offset + 1 + i, ptr_read_u8(image, row_offset + i));
+            }
+            for i: i32 in range(BPP(), wb) {
+                let orig: i32 = ptr_read_u8(image, row_offset + i);
+                let left: i32 = ptr_read_u8(image, row_offset + i - BPP());
+                ptr_write_u8(filtered, out_offset + 1 + i, band(orig - left, 0xFF));
+            }
+        } else if best == FILTER_UP() {
+            for i: i32 in range(0, wb) {
+                let orig: i32 = ptr_read_u8(image, row_offset + i);
+                let above: i32 = ptr_read_u8(prev_row_buf, i);
+                ptr_write_u8(filtered, out_offset + 1 + i, band(orig - above, 0xFF));
+            }
+        } else {
+            // Paeth
+            for i: i32 in range(0, BPP()) {
+                let orig: i32 = ptr_read_u8(image, row_offset + i);
+                let above: i32 = ptr_read_u8(prev_row_buf, i);
+                let pred: i32 = paeth_predictor(0, above, 0);
+                ptr_write_u8(filtered, out_offset + 1 + i, band(orig - pred, 0xFF));
+            }
+            for i: i32 in range(BPP(), wb) {
+                let orig: i32 = ptr_read_u8(image, row_offset + i);
+                let left: i32 = ptr_read_u8(image, row_offset + i - BPP());
+                let above: i32 = ptr_read_u8(prev_row_buf, i);
+                let upper_left: i32 = ptr_read_u8(prev_row_buf, i - BPP());
+                let pred: i32 = paeth_predictor(left, above, upper_left);
+                ptr_write_u8(filtered, out_offset + 1 + i, band(orig - pred, 0xFF));
+            }
+        }
+
+        // Save current row as prev_row for next iteration
+        for i: i32 in range(0, wb) {
+            ptr_write_u8(prev_row_buf, i, ptr_read_u8(image, row_offset + i));
+        }
+
+        total_filtered = total_filtered + wb + 1;
+    }
+
+    return total_filtered;
+}
+
+// ---------------------------------------------------------------------------
+// Test: filter/unfilter round-trip
+// ---------------------------------------------------------------------------
+fn test_filters() -> i32 {
+    print("--- Test: PNG filter round-trip ---\n");
+
+    let wb: i32 = 32;  // 8 pixels * 4 bytes
+    let row: ptr[i32] = heap_alloc(wb, 1);
+    let prev_row: ptr[i32] = heap_alloc(wb, 1);
+    let filtered: ptr[i32] = heap_alloc(wb, 1);
+    let restored: ptr[i32] = heap_alloc(wb, 1);
+
+    // Fill with test data
+    for i: i32 in range(0, wb) {
+        ptr_write_u8(row, i, band(i *% 37 + 100, 255));
+        ptr_write_u8(prev_row, i, band(i *% 53 + 50, 255));
+    }
+
+    let pass: i32 = 1;
+
+    // Test Sub filter
+    filter_sub(row, filtered, wb);
+    unfilter_sub(filtered, restored, wb);
+    for i: i32 in range(0, wb) {
+        if ptr_read_u8(row, i) != ptr_read_u8(restored, i) {
+            print("FAIL: Sub round-trip at byte ");
+            print_i32(i);
+            print("\n");
+            pass = 0;
+            break;
+        }
+    }
+    if pass == 1 {
+        print("PASS: Sub filter round-trip\n");
+    }
+
+    // Test Up filter
+    filter_up(row, prev_row, filtered, wb);
+    unfilter_up(filtered, prev_row, restored, wb);
+    let pass_up: i32 = 1;
+    for i: i32 in range(0, wb) {
+        if ptr_read_u8(row, i) != ptr_read_u8(restored, i) {
+            print("FAIL: Up round-trip at byte ");
+            print_i32(i);
+            print("\n");
+            pass_up = 0;
+            break;
+        }
+    }
+    if pass_up == 1 {
+        print("PASS: Up filter round-trip\n");
+    } else {
+        pass = 0;
+    }
+
+    // Test Average filter
+    filter_average(row, prev_row, filtered, wb);
+    unfilter_average(filtered, prev_row, restored, wb);
+    let pass_avg: i32 = 1;
+    for i: i32 in range(0, wb) {
+        if ptr_read_u8(row, i) != ptr_read_u8(restored, i) {
+            print("FAIL: Average round-trip at byte ");
+            print_i32(i);
+            print("\n");
+            pass_avg = 0;
+            break;
+        }
+    }
+    if pass_avg == 1 {
+        print("PASS: Average filter round-trip\n");
+    } else {
+        pass = 0;
+    }
+
+    // Test Paeth filter
+    filter_paeth(row, prev_row, filtered, wb);
+    unfilter_paeth(filtered, prev_row, restored, wb);
+    let pass_paeth: i32 = 1;
+    for i: i32 in range(0, wb) {
+        if ptr_read_u8(row, i) != ptr_read_u8(restored, i) {
+            print("FAIL: Paeth round-trip at byte ");
+            print_i32(i);
+            print("\n");
+            pass_paeth = 0;
+            break;
+        }
+    }
+    if pass_paeth == 1 {
+        print("PASS: Paeth filter round-trip\n");
+    } else {
+        pass = 0;
+    }
+
+    heap_free(row);
+    heap_free(prev_row);
+    heap_free(filtered);
+    heap_free(restored);
+    return pass;
+}
+
+// ---------------------------------------------------------------------------
+// Test: CRC32 correctness (basic and slice-by-4)
+// ---------------------------------------------------------------------------
+fn test_crc32() -> i32 {
+    print("--- Test: CRC32 (basic + slice-by-4) ---\n");
+
+    let table: ptr[i32] = heap_alloc(256, 4);
+    build_crc32_table(table);
+
+    let tables_sb4: ptr[i32] = heap_alloc(1024, 4);
+    build_crc32_tables_sb4(tables_sb4);
+
+    // "123456789" -> CRC32 = 0xCBF43926 = -873187034
+    let test_data: ptr[i32] = heap_alloc(9, 1);
+    ptr_write_u8(test_data, 0, 49);
+    ptr_write_u8(test_data, 1, 50);
+    ptr_write_u8(test_data, 2, 51);
+    ptr_write_u8(test_data, 3, 52);
+    ptr_write_u8(test_data, 4, 53);
+    ptr_write_u8(test_data, 5, 54);
+    ptr_write_u8(test_data, 6, 55);
+    ptr_write_u8(test_data, 7, 56);
+    ptr_write_u8(test_data, 8, 57);
+
+    let expected: i32 = 0 - 873187034;
+
+    let result_basic: i32 = crc32_basic(test_data, 9, table);
+    let result_sb4: i32 = crc32_sb4(test_data, 9, tables_sb4);
+
+    let pass: i32 = 1;
+    if result_basic != expected {
+        print("FAIL: CRC32 basic = ");
+        print_i32(result_basic);
+        print(", expected ");
+        print_i32(expected);
+        print("\n");
+        pass = 0;
+    } else {
+        print("PASS: CRC32 basic correct\n");
+    }
+
+    if result_sb4 != expected {
+        print("FAIL: CRC32 slice-by-4 = ");
+        print_i32(result_sb4);
+        print(", expected ");
+        print_i32(expected);
+        print("\n");
+        pass = 0;
+    } else {
+        print("PASS: CRC32 slice-by-4 correct\n");
+    }
+
+    // Test with larger data to exercise the 4-byte loop
+    let large_len: i32 = 256;
+    let large_data: ptr[i32] = heap_alloc(large_len, 1);
+    for i: i32 in range(0, large_len) {
+        ptr_write_u8(large_data, i, band(i, 0xFF));
+    }
+    let large_basic: i32 = crc32_basic(large_data, large_len, table);
+    let large_sb4: i32 = crc32_sb4(large_data, large_len, tables_sb4);
+    if large_basic != large_sb4 {
+        print("FAIL: CRC32 large data mismatch (basic=");
+        print_i32(large_basic);
+        print(", sb4=");
+        print_i32(large_sb4);
+        print(")\n");
+        pass = 0;
+    } else {
+        print("PASS: CRC32 large data basic == slice-by-4\n");
+    }
+
+    heap_free(table);
+    heap_free(tables_sb4);
+    heap_free(test_data);
+    heap_free(large_data);
+    return pass;
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: filter throughput on 1024x1024 image
+// ---------------------------------------------------------------------------
+fn bench_filter() {
+    print("\n--- Benchmark: PNG filter 1024x1024 RGBA ---\n");
+
+    let width: i32 = 1024;
+    let height: i32 = 1024;
+    let wb: i32 = width * BPP();
+    let img_size: i32 = wb * height;
+
+    let image: ptr[i32] = heap_alloc(img_size, 1);
+    // Fill with gradient pattern
+    for y: i32 in range(0, height) {
+        for x: i32 in range(0, width) {
+            let offset: i32 = (y * width + x) * BPP();
+            ptr_write_u8(image, offset, band(x, 0xFF));       // R
+            ptr_write_u8(image, offset + 1, band(y, 0xFF));   // G
+            ptr_write_u8(image, offset + 2, band(x + y, 0xFF)); // B
+            ptr_write_u8(image, offset + 3, 255);              // A
+        }
+    }
+
+    let filtered_size: i32 = (wb + 1) * height;
+    let filtered: ptr[i32] = heap_alloc(filtered_size, 1);
+    let scratch: ptr[i32] = heap_alloc(wb, 1);
+    let prev_buf: ptr[i32] = heap_alloc(wb, 1);
+
+    let iterations: i32 = 20;
+    let checksum: i32 = 0;
+
+    let t0: i64 = clock_ns();
+    for iter: i32 in range(0, iterations) {
+        let filt_len: i32 = filter_image(image, width, height, filtered, scratch, prev_buf);
+        checksum = checksum +% filt_len;
+    }
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        let total_mb: i64 = (widen(iterations) * widen(img_size)) / 1048576;
+        let throughput: i64 = (total_mb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(throughput);
+        print(" MB/s\n");
+    }
+
+    heap_free(image);
+    heap_free(filtered);
+    heap_free(scratch);
+    heap_free(prev_buf);
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: CRC32 throughput (basic vs slice-by-4)
+// ---------------------------------------------------------------------------
+fn bench_crc32() {
+    print("\n--- Benchmark: CRC32 (basic vs slice-by-4) ---\n");
+
+    let tables_sb4: ptr[i32] = heap_alloc(1024, 4);
+    build_crc32_tables_sb4(tables_sb4);
+
+    let data_len: i32 = 4096;
+    let data: ptr[i32] = heap_alloc(data_len, 1);
+    for i: i32 in range(0, data_len) {
+        ptr_write_u8(data, i, band(i *% 37 + 13, 255));
+    }
+
+    let iterations: i32 = 200000;
+
+    // Benchmark basic CRC32
+    let checksum_basic: i32 = 0;
+    let t0: i64 = clock_ns();
+    for iter: i32 in range(0, iterations) {
+        checksum_basic = checksum_basic +% crc32_basic(data, data_len, tables_sb4);
+    }
+    let t1: i64 = clock_ns();
+    let ms_basic: i64 = (t1 - t0) / 1000000;
+
+    print("Basic CRC32: ");
+    print_i64(ms_basic);
+    print(" ms");
+    if ms_basic > 0 {
+        let mb_basic: i64 = (widen(iterations) * widen(data_len) * 1000) / (ms_basic * 1048576);
+        print(" (");
+        print_i64(mb_basic);
+        print(" MB/s)");
+    }
+    print("\n");
+
+    // Benchmark slice-by-4 CRC32
+    let checksum_sb4: i32 = 0;
+    let t2: i64 = clock_ns();
+    for iter: i32 in range(0, iterations) {
+        checksum_sb4 = checksum_sb4 +% crc32_sb4(data, data_len, tables_sb4);
+    }
+    let t3: i64 = clock_ns();
+    let ms_sb4: i64 = (t3 - t2) / 1000000;
+
+    print("Slice-by-4:  ");
+    print_i64(ms_sb4);
+    print(" ms");
+    if ms_sb4 > 0 {
+        let mb_sb4: i64 = (widen(iterations) * widen(data_len) * 1000) / (ms_sb4 * 1048576);
+        print(" (");
+        print_i64(mb_sb4);
+        print(" MB/s)");
+    }
+    print("\n");
+
+    print("Checksum basic (prevent DCE): ");
+    print_i32(checksum_basic);
+    print("\n");
+    print("Checksum sb4 (prevent DCE): ");
+    print_i32(checksum_sb4);
+    print("\n");
+
+    heap_free(tables_sb4);
+    heap_free(data);
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+fn main() -> i32 {
+    print("=== fpng Core: PNG Filters + Fast CRC32 ===\n\n");
+
+    let pass1: i32 = test_filters();
+    let pass2: i32 = test_crc32();
+
+    if pass1 == 1 and pass2 == 1 {
+        print("\nAll tests passed.\n");
+    } else {
+        print("\nSome tests FAILED.\n");
+        return 1;
+    }
+
+    bench_filter();
+    bench_crc32();
+
+    print("\n=== fpng complete ===\n");
+    return 0;
+}

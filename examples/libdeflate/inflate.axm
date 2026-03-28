@@ -1,0 +1,576 @@
+@module inflate;
+@intent("libdeflate-style fast DEFLATE inflator: bit reader, Huffman decoder, LZ77 match copy");
+
+// =============================================================================
+// Fast DEFLATE Inflate -- libdeflate core algorithm port
+// =============================================================================
+//
+// Core components:
+//   1. Bit reader: read N bits from a compressed byte stream
+//   2. Huffman decoder: table-based O(1) symbol lookup (up to 9-bit codes)
+//   3. LZ77 match copy: copy from decoded output window
+//   4. Fixed Huffman block decoder (type 01)
+//
+// RFC 1951 DEFLATE format:
+//   - Block header: BFINAL(1 bit) + BTYPE(2 bits)
+//   - BTYPE=01: fixed Huffman codes (predefined tables)
+//   - BTYPE=10: dynamic Huffman codes (code lengths in stream)
+//   - Literal/length + distance codes -> LZ77 decode
+//
+// Translation notes:
+//   - No structs: bit reader state passed as ptr (buf_pos, bit_buf, bits_left)
+//   - Huffman table: array_const_i32 for fixed code tables
+//   - All ops on i32 with wrapping arithmetic where needed
+//   - lshr for unsigned right shift
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+@const fn MAX_BITS() -> i32 { return 15; }
+@const fn HUFFMAN_TABLE_SIZE() -> i32 { return 512; }  // 2^9 for fast 9-bit lookup
+@const fn FAST_BITS() -> i32 { return 9; }
+@const fn FAST_MASK() -> i32 { return 511; }            // (1 << 9) - 1
+@const fn WINDOW_SIZE() -> i32 { return 32768; }       // 2^15
+
+// ---------------------------------------------------------------------------
+// Bit reader state layout (5 i32s):
+//   [0] = byte position in input
+//   [1] = bit buffer (up to 32 bits)
+//   [2] = number of valid bits in buffer
+//   [3] = input length (bytes)
+//   [4] = unused
+// ---------------------------------------------------------------------------
+
+@inline(always)
+fn br_init(state: ptr[i32], input_len: i32) {
+    ptr_write_i32(state, 0, 0);      // byte_pos
+    ptr_write_i32(state, 1, 0);      // bit_buf
+    ptr_write_i32(state, 2, 0);      // bits_left
+    ptr_write_i32(state, 3, input_len);
+}
+
+// Refill bit buffer from input stream (ensure at least 16 bits available)
+@inline(always)
+fn br_refill(state: ptr[i32], input: ptr[i32]) {
+    let bits_left: i32 = ptr_read_i32(state, 2);
+    let byte_pos: i32 = ptr_read_i32(state, 0);
+    let bit_buf: i32 = ptr_read_i32(state, 1);
+    let input_len: i32 = ptr_read_i32(state, 3);
+
+    while bits_left <= 24 {
+        if byte_pos < input_len {
+            let byte_val: i32 = ptr_read_u8(input, byte_pos);
+            bit_buf = bor(bit_buf, shl(byte_val, bits_left));
+            byte_pos = byte_pos + 1;
+            bits_left = bits_left + 8;
+        } else {
+            bits_left = bits_left + 8;  // pad with zeros
+        }
+    }
+
+    ptr_write_i32(state, 0, byte_pos);
+    ptr_write_i32(state, 1, bit_buf);
+    ptr_write_i32(state, 2, bits_left);
+}
+
+// Read N bits from the bit buffer (N <= 16)
+@inline(always)
+fn br_read(state: ptr[i32], input: ptr[i32], n: i32) -> i32 {
+    br_refill(state, input);
+    let bit_buf: i32 = ptr_read_i32(state, 1);
+    let result: i32 = band(bit_buf, (shl(1, n)) - 1);
+    ptr_write_i32(state, 1, lshr(bit_buf, n));
+    ptr_write_i32(state, 2, ptr_read_i32(state, 2) - n);
+    return result;
+}
+
+// Peek N bits without consuming
+@pure @inline(always)
+fn br_peek(state: ptr[i32], n: i32) -> i32 {
+    let bit_buf: i32 = ptr_read_i32(state, 1);
+    return band(bit_buf, (shl(1, n)) - 1);
+}
+
+// Consume N bits
+@inline(always)
+fn br_consume(state: ptr[i32], n: i32) {
+    let bit_buf: i32 = ptr_read_i32(state, 1);
+    ptr_write_i32(state, 1, lshr(bit_buf, n));
+    ptr_write_i32(state, 2, ptr_read_i32(state, 2) - n);
+}
+
+// ---------------------------------------------------------------------------
+// Build fixed Huffman decode table (RFC 1951 Section 3.2.6)
+// ---------------------------------------------------------------------------
+// Fixed literal/length codes:
+//   0-143:   8-bit codes  (00110000 - 10111111)
+//   144-255: 9-bit codes  (110010000 - 111111111)
+//   256-279: 7-bit codes  (0000000 - 0010111)
+//   280-287: 8-bit codes  (11000000 - 11000111)
+//
+// Table format: table[reversed_code & FAST_MASK] = (symbol << 4) | code_length
+// ---------------------------------------------------------------------------
+
+@inline(always)
+fn reverse_bits(val: i32, nbits: i32) -> i32 {
+    let result: i32 = 0;
+    let v: i32 = val;
+    for i: i32 in range(0, nbits) {
+        result = shl(result, 1);
+        result = bor(result, band(v, 1));
+        v = lshr(v, 1);
+    }
+    return result;
+}
+
+fn build_fixed_lit_table(table: ptr[i32]) {
+    // Clear table
+    for i: i32 in range(0, HUFFMAN_TABLE_SIZE()) {
+        ptr_write_i32(table, i, 0);
+    }
+
+    // 0-143: 8-bit codes starting at 0x30 (48)
+    // For 8-bit codes in a 9-bit table, fill 2 entries (bit 8 = 0 or 1)
+    for sym: i32 in range(0, 144) {
+        let code: i32 = 48 + sym;  // 0x30 + sym
+        let rev: i32 = reverse_bits(code, 8);
+        let idx0: i32 = band(rev, FAST_MASK());
+        let idx1: i32 = band(bor(rev, shl(1, 8)), FAST_MASK());
+        ptr_write_i32(table, idx0, bor(shl(sym, 4), 8));
+        ptr_write_i32(table, idx1, bor(shl(sym, 4), 8));
+    }
+
+    // 144-255: 9-bit codes starting at 0x190 (400)
+    for sym: i32 in range(144, 256) {
+        let code: i32 = 400 + (sym - 144);
+        let rev: i32 = reverse_bits(code, 9);
+        let idx: i32 = band(rev, FAST_MASK());
+        ptr_write_i32(table, idx, bor(shl(sym, 4), 9));
+    }
+
+    // 256-279: 7-bit codes starting at 0x00
+    for sym: i32 in range(256, 280) {
+        let code: i32 = sym - 256;
+        let rev: i32 = reverse_bits(code, 7);
+        // For 7-bit codes, fill multiple 9-bit table entries
+        let rev9: i32 = rev;
+        let step: i32 = 0;
+        while step < 4 {
+            let idx: i32 = band(bor(rev9, shl(step, 7)), FAST_MASK());
+            ptr_write_i32(table, idx, bor(shl(sym, 4), 7));
+            step = step + 1;
+        }
+    }
+
+    // 280-287: 8-bit codes starting at 0xC0 (192)
+    for sym: i32 in range(280, 288) {
+        let code: i32 = 192 + (sym - 280);
+        let rev: i32 = reverse_bits(code, 8);
+        // For 8-bit codes, fill 2 table entries (9-bit table)
+        let idx0: i32 = band(rev, FAST_MASK());
+        let idx1: i32 = band(bor(rev, shl(1, 8)), FAST_MASK());
+        ptr_write_i32(table, idx0, bor(shl(sym, 4), 8));
+        ptr_write_i32(table, idx1, bor(shl(sym, 4), 8));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fixed distance table: all 5-bit codes (0-29)
+// ---------------------------------------------------------------------------
+fn build_fixed_dist_table(table: ptr[i32]) {
+    for i: i32 in range(0, HUFFMAN_TABLE_SIZE()) {
+        ptr_write_i32(table, i, 0);
+    }
+    for sym: i32 in range(0, 30) {
+        let rev: i32 = reverse_bits(sym, 5);
+        // 5-bit codes, fill 16 entries in 9-bit table
+        let step: i32 = 0;
+        while step < 16 {
+            let idx: i32 = band(bor(rev, shl(step, 5)), FAST_MASK());
+            ptr_write_i32(table, idx, bor(shl(sym, 4), 5));
+            step = step + 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Length extra bits table (RFC 1951)
+// ---------------------------------------------------------------------------
+@pure
+fn get_length_base() -> ptr[i32] {
+    return array_const_i32(
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13,
+        15, 17, 19, 23, 27, 31, 35, 43, 51, 59,
+        67, 83, 99, 115, 131, 163, 195, 227, 258, 0
+    );
+}
+
+@pure
+fn get_length_extra() -> ptr[i32] {
+    return array_const_i32(
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1,
+        1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
+        4, 4, 4, 4, 5, 5, 5, 5, 0, 0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Distance extra bits table (RFC 1951)
+// ---------------------------------------------------------------------------
+@pure
+fn get_dist_base() -> ptr[i32] {
+    return array_const_i32(
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25,
+        33, 49, 65, 97, 129, 193, 257, 385, 513, 769,
+        1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577
+    );
+}
+
+@pure
+fn get_dist_extra() -> ptr[i32] {
+    return array_const_i32(
+        0, 0, 0, 0, 1, 1, 2, 2, 3, 3,
+        4, 4, 5, 5, 6, 6, 7, 7, 8, 8,
+        9, 9, 10, 10, 11, 11, 12, 12, 13, 13
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Decode one symbol from Huffman table
+// ---------------------------------------------------------------------------
+@inline(always)
+fn decode_symbol(state: ptr[i32], input: ptr[i32], table: ptr[i32]) -> i32 {
+    br_refill(state, input);
+    let bits: i32 = br_peek(state, FAST_BITS());
+    let entry: i32 = ptr_read_i32(table, band(bits, FAST_MASK()));
+    let code_len: i32 = band(entry, 15);
+    let sym: i32 = lshr(entry, 4);
+    br_consume(state, code_len);
+    return sym;
+}
+
+// ---------------------------------------------------------------------------
+// Inflate a fixed Huffman block (BTYPE=01)
+// Returns number of bytes written to output
+// ---------------------------------------------------------------------------
+fn inflate_fixed_block(input: ptr[i32], input_len: i32,
+                       output: ptr[i32], max_output: i32,
+                       br_state: ptr[i32],
+                       lit_table: ptr[i32], dist_table: ptr[i32]) -> i32 {
+    let out_pos: i32 = 0;
+
+    let len_base: ptr[i32] = get_length_base();
+    let len_extra: ptr[i32] = get_length_extra();
+    let d_base: ptr[i32] = get_dist_base();
+    let d_extra: ptr[i32] = get_dist_extra();
+
+    let done: i32 = 0;
+    while done == 0 {
+        let sym: i32 = decode_symbol(br_state, input, lit_table);
+
+        if sym < 256 {
+            // Literal byte
+            if out_pos < max_output {
+                ptr_write_u8(output, out_pos, sym);
+                out_pos = out_pos + 1;
+            }
+        } else {
+            if sym == 256 {
+                // End of block
+                done = 1;
+            } else {
+                // Length/distance pair
+                let len_idx: i32 = sym - 257;
+                let length: i32 = ptr_read_i32(len_base, len_idx);
+                let extra: i32 = ptr_read_i32(len_extra, len_idx);
+                if extra > 0 {
+                    length = length + br_read(br_state, input, extra);
+                }
+
+                // Decode distance
+                let dist_sym: i32 = decode_symbol(br_state, input, dist_table);
+                let distance: i32 = ptr_read_i32(d_base, dist_sym);
+                let dextra: i32 = ptr_read_i32(d_extra, dist_sym);
+                if dextra > 0 {
+                    distance = distance + br_read(br_state, input, dextra);
+                }
+
+                // Copy match from output window
+                let src: i32 = out_pos - distance;
+                for j: i32 in range(0, length) {
+                    if out_pos < max_output {
+                        let byte_val: i32 = ptr_read_u8(output, src + j);
+                        ptr_write_u8(output, out_pos, byte_val);
+                        out_pos = out_pos + 1;
+                    }
+                }
+            }
+        }
+    }
+
+    return out_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Top-level inflate: read block headers and dispatch
+// ---------------------------------------------------------------------------
+fn inflate(input: ptr[i32], input_len: i32,
+           output: ptr[i32], max_output: i32) -> i32 {
+    let br_state: ptr[i32] = heap_alloc(5, 4);
+    br_init(br_state, input_len);
+
+    // Build fixed Huffman tables
+    let lit_table: ptr[i32] = heap_alloc(HUFFMAN_TABLE_SIZE(), 4);
+    let dist_table: ptr[i32] = heap_alloc(HUFFMAN_TABLE_SIZE(), 4);
+    build_fixed_lit_table(lit_table);
+    build_fixed_dist_table(dist_table);
+
+    let total_out: i32 = 0;
+    let last_block: i32 = 0;
+
+    while last_block == 0 {
+        // Read block header
+        last_block = br_read(br_state, input, 1);
+        let btype: i32 = br_read(br_state, input, 2);
+
+        if btype == 0 {
+            // Uncompressed block: align to byte boundary
+            ptr_write_i32(br_state, 1, 0);
+            ptr_write_i32(br_state, 2, 0);
+            let len_lo: i32 = br_read(br_state, input, 8);
+            let len_hi: i32 = br_read(br_state, input, 8);
+            let block_len: i32 = bor(len_lo, shl(len_hi, 8));
+            // Skip NLEN (complement)
+            br_read(br_state, input, 16);
+            // Copy raw bytes
+            let byte_pos: i32 = ptr_read_i32(br_state, 0);
+            for j: i32 in range(0, block_len) {
+                if total_out < max_output {
+                    ptr_write_u8(output, total_out, ptr_read_u8(input, byte_pos + j));
+                    total_out = total_out + 1;
+                }
+            }
+            ptr_write_i32(br_state, 0, byte_pos + block_len);
+        } else {
+            if btype == 1 {
+                // Fixed Huffman
+                let n: i32 = inflate_fixed_block(input, input_len, output, max_output,
+                                                  br_state, lit_table, dist_table);
+                total_out = total_out + n;
+            }
+            // btype==2 (dynamic) would go here; omitted for brevity
+        }
+    }
+
+    heap_free(br_state);
+    heap_free(lit_table);
+    heap_free(dist_table);
+    return total_out;
+}
+
+// ---------------------------------------------------------------------------
+// Simple DEFLATE compressor (fixed Huffman, for test data generation)
+// Returns compressed size
+// ---------------------------------------------------------------------------
+fn deflate_fixed(input: ptr[i32], input_len: i32,
+                 output: ptr[i32], max_output: i32) -> i32 {
+    // Write BFINAL=1, BTYPE=01 (fixed Huffman) as 3 bits: 011 = 3
+    let out_pos: i32 = 0;
+    let bit_buf: i32 = 0;
+    let bits_used: i32 = 0;
+
+    // Emit bits helper: accumulate and flush bytes
+    // We encode as literal-only (no LZ77 matches) for simplicity
+    bit_buf = 3;  // BFINAL=1, BTYPE=01
+    bits_used = 3;
+
+    // Encode each byte as a literal
+    for i: i32 in range(0, input_len) {
+        let byte_val: i32 = ptr_read_u8(input, i);
+        let code: i32 = 0;
+        let code_len: i32 = 0;
+
+        if byte_val < 144 {
+            // 8-bit code: 0x30 + byte_val
+            code = 48 + byte_val;
+            code_len = 8;
+        } else {
+            // 9-bit code: 0x190 + (byte_val - 144)
+            code = 400 + (byte_val - 144);
+            code_len = 9;
+        }
+
+        // Reverse bits for DEFLATE bit order (LSB first)
+        let rev: i32 = reverse_bits(code, code_len);
+        bit_buf = bor(bit_buf, shl(rev, bits_used));
+        bits_used = bits_used + code_len;
+
+        // Flush complete bytes
+        while bits_used >= 8 {
+            if out_pos < max_output {
+                ptr_write_u8(output, out_pos, band(bit_buf, 255));
+                out_pos = out_pos + 1;
+            }
+            bit_buf = lshr(bit_buf, 8);
+            bits_used = bits_used - 8;
+        }
+    }
+
+    // End of block: symbol 256 = 7-bit code 0 (reversed: 0)
+    let eob: i32 = reverse_bits(0, 7);
+    bit_buf = bor(bit_buf, shl(eob, bits_used));
+    bits_used = bits_used + 7;
+
+    // Flush remaining bits
+    while bits_used > 0 {
+        if out_pos < max_output {
+            ptr_write_u8(output, out_pos, band(bit_buf, 255));
+            out_pos = out_pos + 1;
+        }
+        bit_buf = lshr(bit_buf, 8);
+        bits_used = bits_used - 8;
+    }
+
+    return out_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Main: test + benchmark
+// ---------------------------------------------------------------------------
+fn main() -> i32 {
+    // Test data: "Hello, World! Hello, World!" (27 bytes)
+    let test_len: i32 = 27;
+    let test_data: ptr[i32] = heap_alloc(test_len, 1);
+    // H=72, e=101, l=108, l=108, o=111, ,=44, ' '=32, W=87, o=111, r=114, l=108, d=100, !=33
+    // ' '=32, H=72, e=101, l=108, l=108, o=111, ,=44, ' '=32, W=87, o=111, r=114, l=108, d=100, !=33
+    ptr_write_u8(test_data, 0, 72);
+    ptr_write_u8(test_data, 1, 101);
+    ptr_write_u8(test_data, 2, 108);
+    ptr_write_u8(test_data, 3, 108);
+    ptr_write_u8(test_data, 4, 111);
+    ptr_write_u8(test_data, 5, 44);
+    ptr_write_u8(test_data, 6, 32);
+    ptr_write_u8(test_data, 7, 87);
+    ptr_write_u8(test_data, 8, 111);
+    ptr_write_u8(test_data, 9, 114);
+    ptr_write_u8(test_data, 10, 108);
+    ptr_write_u8(test_data, 11, 100);
+    ptr_write_u8(test_data, 12, 33);
+    ptr_write_u8(test_data, 13, 32);
+    ptr_write_u8(test_data, 14, 72);
+    ptr_write_u8(test_data, 15, 101);
+    ptr_write_u8(test_data, 16, 108);
+    ptr_write_u8(test_data, 17, 108);
+    ptr_write_u8(test_data, 18, 111);
+    ptr_write_u8(test_data, 19, 44);
+    ptr_write_u8(test_data, 20, 32);
+    ptr_write_u8(test_data, 21, 87);
+    ptr_write_u8(test_data, 22, 111);
+    ptr_write_u8(test_data, 23, 114);
+    ptr_write_u8(test_data, 24, 108);
+    ptr_write_u8(test_data, 25, 100);
+    ptr_write_u8(test_data, 26, 33);
+
+    // Compress
+    let compressed: ptr[i32] = heap_alloc(256, 1);
+    let comp_len: i32 = deflate_fixed(test_data, test_len, compressed, 256);
+    print("Compressed ");
+    print_i32(test_len);
+    print(" bytes -> ");
+    print_i32(comp_len);
+    print(" bytes\n");
+
+    // Decompress
+    let decompressed: ptr[i32] = heap_alloc(256, 1);
+    let decomp_len: i32 = inflate(compressed, comp_len, decompressed, 256);
+    print("Decompressed -> ");
+    print_i32(decomp_len);
+    print(" bytes\n");
+
+    // Verify round-trip
+    let pass: i32 = 1;
+    if decomp_len != test_len {
+        pass = 0;
+        print("FAIL: length mismatch\n");
+    } else {
+        for i: i32 in range(0, test_len) {
+            if ptr_read_u8(decompressed, i) != ptr_read_u8(test_data, i) {
+                pass = 0;
+            }
+        }
+    }
+
+    if pass == 1 {
+        print("PASS: round-trip verified\n");
+    } else {
+        print("FAIL: round-trip mismatch\n");
+        // Print first few bytes for debugging
+        print("Expected: ");
+        for i: i32 in range(0, test_len) {
+            print_i32(ptr_read_u8(test_data, i));
+            print(" ");
+        }
+        print("\n");
+        print("Got:      ");
+        for i: i32 in range(0, decomp_len) {
+            print_i32(ptr_read_u8(decompressed, i));
+            print(" ");
+        }
+        print("\n");
+    }
+
+    // Benchmark: inflate throughput
+    // Create larger test data (1024 bytes of pattern)
+    let big_len: i32 = 1024;
+    let big_data: ptr[i32] = heap_alloc(big_len, 1);
+    for i: i32 in range(0, big_len) {
+        ptr_write_u8(big_data, i, band(i *% 7 +% 13, 255));
+    }
+
+    let big_comp: ptr[i32] = heap_alloc(2048, 1);
+    let big_comp_len: i32 = deflate_fixed(big_data, big_len, big_comp, 2048);
+    print("Big test: ");
+    print_i32(big_len);
+    print(" bytes -> ");
+    print_i32(big_comp_len);
+    print(" compressed bytes\n");
+
+    let big_decomp: ptr[i32] = heap_alloc(2048, 1);
+
+    let iterations: i32 = 100000;
+    let checksum: i32 = 0;
+    let start: i64 = clock_ns();
+    for i: i32 in range(0, iterations) {
+        let n: i32 = inflate(big_comp, big_comp_len, big_decomp, 2048);
+        checksum = checksum +% n;
+    }
+    let end: i64 = clock_ns();
+    let elapsed_ns: i64 = end -% start;
+
+    print("Benchmark: ");
+    print_i32(iterations);
+    print(" inflate operations\n");
+    print("Elapsed (ns): ");
+    print_i64(elapsed_ns);
+    print("\n");
+    print("Checksum: ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ns > 0 {
+        let total_bytes: i64 = widen(iterations) *% widen(big_len);
+        let throughput_mbps: i64 = (total_bytes *% 1000) / elapsed_ns;
+        print("Throughput: ~");
+        print_i64(throughput_mbps);
+        print(" MB/s\n");
+    }
+
+    heap_free(test_data);
+    heap_free(compressed);
+    heap_free(decompressed);
+    heap_free(big_data);
+    heap_free(big_comp);
+    heap_free(big_decomp);
+    return 0;
+}

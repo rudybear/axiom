@@ -1,0 +1,738 @@
+@module lodepng;
+@intent("PNG decode core: CRC32 + Adler32 + fixed-Huffman inflate, ported from lodepng");
+
+// =============================================================================
+// lodepng core -- Inflate (fixed Huffman) + CRC32 + Adler32
+// =============================================================================
+//
+// PNG decoding hot paths:
+//   1. CRC32: 256-entry lookup table, processes one byte at a time
+//   2. Adler32: rolling checksum used by zlib/deflate
+//   3. Inflate: decompress deflate stream (fixed Huffman codes only)
+//
+// Fixed Huffman codes (RFC 1951 section 3.2.6):
+//   Lit 0-143:   8-bit codes 0x30-0xBF (00110000 to 10111111)
+//   Lit 144-255: 9-bit codes 0x190-0x1FF (110010000 to 111111111)
+//   Lit 256:     7-bit code  0x00 (0000000) -- end of block
+//   Lit 257-279: 7-bit codes 0x01-0x17 (0000001 to 0010111)
+//   Lit 280-287: 8-bit codes 0xC0-0xC7 (11000000 to 11000111)
+//
+// GAP: No u32 type; use i32 with wrapping ops for CRC.
+// GAP: No global mutable arrays; CRC table built at runtime.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// CRC32 polynomial (as signed i32, 0xEDB88320 = -306674912)
+// ---------------------------------------------------------------------------
+@const fn CRC32_POLY() -> i32 { return 0 - 306674912; }
+
+// ---------------------------------------------------------------------------
+// Build CRC32 lookup table (256 entries)
+// ---------------------------------------------------------------------------
+fn build_crc32_table(table: ptr[i32]) {
+    for i: i32 in range(0, 256) {
+        let crc: i32 = i;
+        for j: i32 in range(0, 8) {
+            if band(crc, 1) == 1 {
+                crc = bxor(lshr(crc, 1), CRC32_POLY());
+            } else {
+                crc = lshr(crc, 1);
+            }
+        }
+        ptr_write_i32(table, i, crc);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CRC32: compute CRC of byte buffer
+// ---------------------------------------------------------------------------
+@inline(always)
+fn crc32(data: ptr[i32], len: i32, table: ptr[i32]) -> i32 {
+    // CRC32 starts with 0xFFFFFFFF = -1 as signed i32
+    let crc: i32 = 0 - 1;  // 0xFFFFFFFF
+    for i: i32 in range(0, len) {
+        let byte_val: i32 = ptr_read_u8(data, i);
+        let idx: i32 = band(bxor(crc, byte_val), 0xFF);
+        crc = bxor(lshr(crc, 8), ptr_read_i32(table, idx));
+    }
+    return bxor(crc, 0 - 1);  // final XOR with 0xFFFFFFFF
+}
+
+// ---------------------------------------------------------------------------
+// Adler32: compute Adler-32 checksum
+// ---------------------------------------------------------------------------
+@const fn ADLER_MOD() -> i32 { return 65521; }
+
+@inline(always)
+fn adler32(data: ptr[i32], len: i32) -> i32 {
+    let a: i32 = 1;
+    let b: i32 = 0;
+    for i: i32 in range(0, len) {
+        a = (a + ptr_read_u8(data, i)) % ADLER_MOD();
+        b = (b + a) % ADLER_MOD();
+    }
+    return bor(shl(b, 16), a);
+}
+
+// Optimized Adler32 with deferred modulo (process in blocks of 5552)
+@inline(always)
+fn adler32_fast(data: ptr[i32], len: i32) -> i32 {
+    let a: i32 = 1;
+    let b: i32 = 0;
+    let pos: i32 = 0;
+    let block_size: i32 = 5552;  // largest n where 255*n*(n+1)/2 + 255*n < 2^31
+
+    while pos < len {
+        let remaining: i32 = len - pos;
+        let chunk: i32 = block_size;
+        if remaining < block_size {
+            chunk = remaining;
+        }
+        for i: i32 in range(0, chunk) {
+            a = a + ptr_read_u8(data, pos + i);
+            b = b + a;
+        }
+        a = a % ADLER_MOD();
+        b = b % ADLER_MOD();
+        pos = pos + chunk;
+    }
+    return bor(shl(b, 16), a);
+}
+
+// ---------------------------------------------------------------------------
+// Deflate: fixed Huffman code tables
+// ---------------------------------------------------------------------------
+// We build decode tables mapping bit patterns -> literal/length/distance values.
+// For fixed codes, the mapping is deterministic per RFC 1951.
+
+// Read bits from a byte buffer (LSB first, as per deflate)
+@inline(always)
+fn read_bits(data: ptr[i32], bit_pos: i32, num_bits: i32) -> i32 {
+    let result: i32 = 0;
+    for i: i32 in range(0, num_bits) {
+        let byte_idx: i32 = lshr(bit_pos + i, 3);
+        let bit_idx: i32 = band(bit_pos + i, 7);
+        let bit: i32 = band(lshr(ptr_read_u8(data, byte_idx), bit_idx), 1);
+        result = bor(result, shl(bit, i));
+    }
+    return result;
+}
+
+// Reverse bits (for Huffman codes which are MSB-first in deflate)
+@pure @inline(always)
+fn reverse_bits(val: i32, num_bits: i32) -> i32 {
+    let result: i32 = 0;
+    let v: i32 = val;
+    for i: i32 in range(0, num_bits) {
+        result = shl(result, 1);
+        result = bor(result, band(v, 1));
+        v = lshr(v, 1);
+    }
+    return result;
+}
+
+// Decode one fixed Huffman literal/length symbol
+// Returns: symbol in low 16 bits, bits consumed in high 16 bits
+@inline(always)
+fn decode_fixed_litlen(data: ptr[i32], bit_pos: i32) -> i32 {
+    // Try 7 bits first (codes 256-279: length codes, and end-of-block 256)
+    let bits7: i32 = read_bits(data, bit_pos, 7);
+    let code7: i32 = reverse_bits(bits7, 7);
+
+    // End of block: code 0000000 reversed = 0
+    if code7 == 0 {
+        // Symbol 256 (end of block)
+        return bor(256, shl(7, 16));
+    }
+    if code7 >= 1 and code7 <= 23 {
+        // Symbols 257-279 (length codes)
+        return bor(256 + code7, shl(7, 16));
+    }
+
+    // Try 8 bits (lit 0-143 or lit 280-287)
+    let bits8: i32 = read_bits(data, bit_pos, 8);
+    let code8: i32 = reverse_bits(bits8, 8);
+
+    if code8 >= 0x30 and code8 <= 0xBF {
+        // Literal 0-143
+        return bor(code8 - 0x30, shl(8, 16));
+    }
+    if code8 >= 0xC0 and code8 <= 0xC7 {
+        // Literal 280-287 (length codes)
+        return bor(280 + code8 - 0xC0, shl(8, 16));
+    }
+
+    // Try 9 bits (lit 144-255)
+    let bits9: i32 = read_bits(data, bit_pos, 9);
+    let code9: i32 = reverse_bits(bits9, 9);
+
+    if code9 >= 0x190 and code9 <= 0x1FF {
+        // Literal 144-255
+        return bor(144 + code9 - 0x190, shl(9, 16));
+    }
+
+    // Invalid code -- return end of block as fallback
+    return bor(256, shl(7, 16));
+}
+
+// Length base values for codes 257-285 (stored in heap)
+fn build_length_table(base: ptr[i32], extra: ptr[i32]) {
+    // Code 257-264: lengths 3-10, 0 extra bits
+    ptr_write_i32(base, 0, 3);   ptr_write_i32(extra, 0, 0);
+    ptr_write_i32(base, 1, 4);   ptr_write_i32(extra, 1, 0);
+    ptr_write_i32(base, 2, 5);   ptr_write_i32(extra, 2, 0);
+    ptr_write_i32(base, 3, 6);   ptr_write_i32(extra, 3, 0);
+    ptr_write_i32(base, 4, 7);   ptr_write_i32(extra, 4, 0);
+    ptr_write_i32(base, 5, 8);   ptr_write_i32(extra, 5, 0);
+    ptr_write_i32(base, 6, 9);   ptr_write_i32(extra, 6, 0);
+    ptr_write_i32(base, 7, 10);  ptr_write_i32(extra, 7, 0);
+    // Code 265-268: extra 1 bit
+    ptr_write_i32(base, 8, 11);  ptr_write_i32(extra, 8, 1);
+    ptr_write_i32(base, 9, 13);  ptr_write_i32(extra, 9, 1);
+    ptr_write_i32(base, 10, 15); ptr_write_i32(extra, 10, 1);
+    ptr_write_i32(base, 11, 17); ptr_write_i32(extra, 11, 1);
+    // Code 269-272: extra 2 bits
+    ptr_write_i32(base, 12, 19); ptr_write_i32(extra, 12, 2);
+    ptr_write_i32(base, 13, 23); ptr_write_i32(extra, 13, 2);
+    ptr_write_i32(base, 14, 27); ptr_write_i32(extra, 14, 2);
+    ptr_write_i32(base, 15, 31); ptr_write_i32(extra, 15, 2);
+    // Code 273-276: extra 3 bits
+    ptr_write_i32(base, 16, 35); ptr_write_i32(extra, 16, 3);
+    ptr_write_i32(base, 17, 43); ptr_write_i32(extra, 17, 3);
+    ptr_write_i32(base, 18, 51); ptr_write_i32(extra, 18, 3);
+    ptr_write_i32(base, 19, 59); ptr_write_i32(extra, 19, 3);
+    // Code 277-280: extra 4 bits
+    ptr_write_i32(base, 20, 67);  ptr_write_i32(extra, 20, 4);
+    ptr_write_i32(base, 21, 83);  ptr_write_i32(extra, 21, 4);
+    ptr_write_i32(base, 22, 99);  ptr_write_i32(extra, 22, 4);
+    ptr_write_i32(base, 23, 115); ptr_write_i32(extra, 23, 4);
+    // Code 281-284: extra 5 bits
+    ptr_write_i32(base, 24, 131); ptr_write_i32(extra, 24, 5);
+    ptr_write_i32(base, 25, 163); ptr_write_i32(extra, 25, 5);
+    ptr_write_i32(base, 26, 195); ptr_write_i32(extra, 26, 5);
+    ptr_write_i32(base, 27, 227); ptr_write_i32(extra, 27, 5);
+    // Code 285: length 258, 0 extra
+    ptr_write_i32(base, 28, 258); ptr_write_i32(extra, 28, 0);
+}
+
+// Distance base values for codes 0-29
+fn build_distance_table(base: ptr[i32], extra: ptr[i32]) {
+    ptr_write_i32(base, 0, 1);     ptr_write_i32(extra, 0, 0);
+    ptr_write_i32(base, 1, 2);     ptr_write_i32(extra, 1, 0);
+    ptr_write_i32(base, 2, 3);     ptr_write_i32(extra, 2, 0);
+    ptr_write_i32(base, 3, 4);     ptr_write_i32(extra, 3, 0);
+    ptr_write_i32(base, 4, 5);     ptr_write_i32(extra, 4, 1);
+    ptr_write_i32(base, 5, 7);     ptr_write_i32(extra, 5, 1);
+    ptr_write_i32(base, 6, 9);     ptr_write_i32(extra, 6, 2);
+    ptr_write_i32(base, 7, 13);    ptr_write_i32(extra, 7, 2);
+    ptr_write_i32(base, 8, 17);    ptr_write_i32(extra, 8, 3);
+    ptr_write_i32(base, 9, 25);    ptr_write_i32(extra, 9, 3);
+    ptr_write_i32(base, 10, 33);   ptr_write_i32(extra, 10, 4);
+    ptr_write_i32(base, 11, 49);   ptr_write_i32(extra, 11, 4);
+    ptr_write_i32(base, 12, 65);   ptr_write_i32(extra, 12, 5);
+    ptr_write_i32(base, 13, 97);   ptr_write_i32(extra, 13, 5);
+    ptr_write_i32(base, 14, 129);  ptr_write_i32(extra, 14, 6);
+    ptr_write_i32(base, 15, 193);  ptr_write_i32(extra, 15, 6);
+    ptr_write_i32(base, 16, 257);  ptr_write_i32(extra, 16, 7);
+    ptr_write_i32(base, 17, 385);  ptr_write_i32(extra, 17, 7);
+    ptr_write_i32(base, 18, 513);  ptr_write_i32(extra, 18, 8);
+    ptr_write_i32(base, 19, 769);  ptr_write_i32(extra, 19, 8);
+    ptr_write_i32(base, 20, 1025); ptr_write_i32(extra, 20, 9);
+    ptr_write_i32(base, 21, 1537); ptr_write_i32(extra, 21, 9);
+    ptr_write_i32(base, 22, 2049); ptr_write_i32(extra, 22, 10);
+    ptr_write_i32(base, 23, 3073); ptr_write_i32(extra, 23, 10);
+    ptr_write_i32(base, 24, 4097); ptr_write_i32(extra, 24, 11);
+    ptr_write_i32(base, 25, 6145); ptr_write_i32(extra, 25, 11);
+    ptr_write_i32(base, 26, 8193); ptr_write_i32(extra, 26, 12);
+    ptr_write_i32(base, 27, 12289); ptr_write_i32(extra, 27, 12);
+    ptr_write_i32(base, 28, 16385); ptr_write_i32(extra, 28, 13);
+    ptr_write_i32(base, 29, 24577); ptr_write_i32(extra, 29, 13);
+}
+
+// ---------------------------------------------------------------------------
+// Inflate: decompress a fixed-Huffman deflate block
+// ---------------------------------------------------------------------------
+// src: compressed data (after zlib header)
+// src_len: compressed data length in bytes
+// dst: output buffer
+// dst_max: output buffer size
+// Returns: decompressed size, or 0 on error
+//
+fn inflate_fixed(src: ptr[i32], src_bit_start: i32, dst: ptr[i32], dst_max: i32,
+                 len_base: ptr[i32], len_extra: ptr[i32],
+                 dist_base: ptr[i32], dist_extra: ptr[i32]) -> i32 {
+    let bit_pos: i32 = src_bit_start;
+    let out_pos: i32 = 0;
+
+    while out_pos < dst_max {
+        let result: i32 = decode_fixed_litlen(src, bit_pos);
+        let sym: i32 = band(result, 0xFFFF);
+        bit_pos = bit_pos + lshr(result, 16);
+
+        if sym < 256 {
+            // Literal byte
+            ptr_write_u8(dst, out_pos, sym);
+            out_pos = out_pos + 1;
+        } else if sym == 256 {
+            // End of block
+            break;
+        } else {
+            // Length/distance pair
+            let len_idx: i32 = sym - 257;
+            if len_idx < 0 or len_idx > 28 {
+                return 0;  // invalid
+            }
+            let length: i32 = ptr_read_i32(len_base, len_idx);
+            let len_eb: i32 = ptr_read_i32(len_extra, len_idx);
+            if len_eb > 0 {
+                length = length + read_bits(src, bit_pos, len_eb);
+                bit_pos = bit_pos + len_eb;
+            }
+
+            // Distance: fixed codes are 5-bit, codes 0-31
+            let dist_code: i32 = reverse_bits(read_bits(src, bit_pos, 5), 5);
+            bit_pos = bit_pos + 5;
+            if dist_code > 29 {
+                return 0;  // invalid
+            }
+            let distance: i32 = ptr_read_i32(dist_base, dist_code);
+            let dist_eb: i32 = ptr_read_i32(dist_extra, dist_code);
+            if dist_eb > 0 {
+                distance = distance + read_bits(src, bit_pos, dist_eb);
+                bit_pos = bit_pos + dist_eb;
+            }
+
+            // Copy from back-reference
+            let src_pos: i32 = out_pos - distance;
+            if src_pos < 0 {
+                return 0;  // invalid
+            }
+            for i: i32 in range(0, length) {
+                if out_pos >= dst_max {
+                    return 0;
+                }
+                ptr_write_u8(dst, out_pos, ptr_read_u8(dst, src_pos + i));
+                out_pos = out_pos + 1;
+            }
+        }
+    }
+    return out_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Deflate: encode with fixed Huffman codes (simplified encoder for testing)
+// ---------------------------------------------------------------------------
+// We write bits LSB-first into a byte buffer.
+
+fn write_bits(dst: ptr[i32], bit_pos: i32, val: i32, num_bits: i32) -> i32 {
+    for i: i32 in range(0, num_bits) {
+        let byte_idx: i32 = lshr(bit_pos + i, 3);
+        let bit_idx: i32 = band(bit_pos + i, 7);
+        let bit: i32 = band(lshr(val, i), 1);
+        if bit_idx == 0 {
+            ptr_write_u8(dst, byte_idx, 0);
+        }
+        let cur: i32 = ptr_read_u8(dst, byte_idx);
+        ptr_write_u8(dst, byte_idx, bor(cur, shl(bit, bit_idx)));
+    }
+    return bit_pos + num_bits;
+}
+
+// Write a fixed Huffman literal (RFC 1951 section 3.2.6)
+@inline(always)
+fn write_fixed_literal(dst: ptr[i32], bit_pos: i32, lit: i32) -> i32 {
+    if lit <= 143 {
+        // 8-bit code: 0x30 + lit, reversed
+        let code: i32 = reverse_bits(0x30 + lit, 8);
+        return write_bits(dst, bit_pos, code, 8);
+    } else if lit <= 255 {
+        // 9-bit code: 0x190 + (lit - 144), reversed
+        let code: i32 = reverse_bits(0x190 + lit - 144, 9);
+        return write_bits(dst, bit_pos, code, 9);
+    } else if lit == 256 {
+        // 7-bit code: 0, reversed = 0
+        let code: i32 = reverse_bits(0, 7);
+        return write_bits(dst, bit_pos, code, 7);
+    }
+    return bit_pos;
+}
+
+// Simple deflate encoder: literals only (no LZ77 matching, for test round-trip)
+fn deflate_fixed_literals(src: ptr[i32], src_len: i32,
+                          dst: ptr[i32], dst_max_bits: i32) -> i32 {
+    let bit_pos: i32 = 0;
+
+    // Block header: BFINAL=1, BTYPE=01 (fixed Huffman)
+    bit_pos = write_bits(dst, bit_pos, 1, 1);  // BFINAL
+    bit_pos = write_bits(dst, bit_pos, 1, 2);  // BTYPE=01 (fixed)
+
+    // Encode each byte as a literal
+    for i: i32 in range(0, src_len) {
+        let byte_val: i32 = ptr_read_u8(src, i);
+        bit_pos = write_fixed_literal(dst, bit_pos, byte_val);
+    }
+
+    // End of block (symbol 256)
+    bit_pos = write_fixed_literal(dst, bit_pos, 256);
+
+    return bit_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Test: CRC32
+// ---------------------------------------------------------------------------
+fn test_crc32() -> i32 {
+    print("--- Test: CRC32 ---\n");
+
+    let table: ptr[i32] = heap_alloc(256, 4);
+    build_crc32_table(table);
+
+    // "123456789" -> CRC32 = 0xCBF43926
+    let test_data: ptr[i32] = heap_alloc(9, 1);
+    ptr_write_u8(test_data, 0, 49);  // '1'
+    ptr_write_u8(test_data, 1, 50);  // '2'
+    ptr_write_u8(test_data, 2, 51);  // '3'
+    ptr_write_u8(test_data, 3, 52);  // '4'
+    ptr_write_u8(test_data, 4, 53);  // '5'
+    ptr_write_u8(test_data, 5, 54);  // '6'
+    ptr_write_u8(test_data, 6, 55);  // '7'
+    ptr_write_u8(test_data, 7, 56);  // '8'
+    ptr_write_u8(test_data, 8, 57);  // '9'
+
+    let result: i32 = crc32(test_data, 9, table);
+    // 0xCBF43926 as signed i32 = -873187034
+    let expected: i32 = 0 - 873187034;
+
+    let pass: i32 = 1;
+    if result != expected {
+        print("FAIL: CRC32(\"123456789\") = ");
+        print_i32(result);
+        print(", expected ");
+        print_i32(expected);
+        print("\n");
+        pass = 0;
+    } else {
+        print("PASS: CRC32(\"123456789\") correct\n");
+    }
+
+    heap_free(table);
+    heap_free(test_data);
+    return pass;
+}
+
+// ---------------------------------------------------------------------------
+// Test: Adler32
+// ---------------------------------------------------------------------------
+fn test_adler32() -> i32 {
+    print("--- Test: Adler32 ---\n");
+
+    // "Wikipedia" -> Adler32 = 0x11E60398 = 300286872
+    let test_data: ptr[i32] = heap_alloc(9, 1);
+    ptr_write_u8(test_data, 0, 87);   // 'W'
+    ptr_write_u8(test_data, 1, 105);  // 'i'
+    ptr_write_u8(test_data, 2, 107);  // 'k'
+    ptr_write_u8(test_data, 3, 105);  // 'i'
+    ptr_write_u8(test_data, 4, 112);  // 'p'
+    ptr_write_u8(test_data, 5, 101);  // 'e'
+    ptr_write_u8(test_data, 6, 100);  // 'd'
+    ptr_write_u8(test_data, 7, 105);  // 'i'
+    ptr_write_u8(test_data, 8, 97);   // 'a'
+
+    let result: i32 = adler32(test_data, 9);
+    let expected: i32 = 300286872;
+
+    let pass: i32 = 1;
+    if result != expected {
+        print("FAIL: Adler32(\"Wikipedia\") = ");
+        print_i32(result);
+        print(", expected ");
+        print_i32(expected);
+        print("\n");
+        pass = 0;
+    } else {
+        print("PASS: Adler32(\"Wikipedia\") correct\n");
+    }
+
+    // Also test fast version
+    let result_fast: i32 = adler32_fast(test_data, 9);
+    if result_fast != expected {
+        print("FAIL: Adler32_fast mismatch\n");
+        pass = 0;
+    } else {
+        print("PASS: Adler32_fast matches\n");
+    }
+
+    heap_free(test_data);
+    return pass;
+}
+
+// ---------------------------------------------------------------------------
+// Test: Inflate round-trip (deflate with fixed codes, then inflate)
+// ---------------------------------------------------------------------------
+fn test_inflate() -> i32 {
+    print("--- Test: Inflate round-trip ---\n");
+
+    // Test data: "Hello, World! Hello, World!"
+    let src_len: i32 = 28;
+    let src: ptr[i32] = heap_alloc(src_len, 1);
+    ptr_write_u8(src, 0, 72);   // H
+    ptr_write_u8(src, 1, 101);  // e
+    ptr_write_u8(src, 2, 108);  // l
+    ptr_write_u8(src, 3, 108);  // l
+    ptr_write_u8(src, 4, 111);  // o
+    ptr_write_u8(src, 5, 44);   // ,
+    ptr_write_u8(src, 6, 32);   // space
+    ptr_write_u8(src, 7, 87);   // W
+    ptr_write_u8(src, 8, 111);  // o
+    ptr_write_u8(src, 9, 114);  // r
+    ptr_write_u8(src, 10, 108); // l
+    ptr_write_u8(src, 11, 100); // d
+    ptr_write_u8(src, 12, 33);  // !
+    ptr_write_u8(src, 13, 32);  // space
+    ptr_write_u8(src, 14, 72);  // H
+    ptr_write_u8(src, 15, 101); // e
+    ptr_write_u8(src, 16, 108); // l
+    ptr_write_u8(src, 17, 108); // l
+    ptr_write_u8(src, 18, 111); // o
+    ptr_write_u8(src, 19, 44);  // ,
+    ptr_write_u8(src, 20, 32);  // space
+    ptr_write_u8(src, 21, 87);  // W
+    ptr_write_u8(src, 22, 111); // o
+    ptr_write_u8(src, 23, 114); // r
+    ptr_write_u8(src, 24, 108); // l
+    ptr_write_u8(src, 25, 100); // d
+    ptr_write_u8(src, 26, 33);  // !
+    ptr_write_u8(src, 27, 10);  // newline
+
+    // Deflate (literals only)
+    let comp_max: i32 = src_len * 2 + 16;
+    let comp: ptr[i32] = heap_alloc_zeroed(comp_max, 1);
+    let comp_bits: i32 = deflate_fixed_literals(src, src_len, comp, comp_max * 8);
+    let comp_bytes: i32 = (comp_bits + 7) / 8;
+
+    print("Original: ");
+    print_i32(src_len);
+    print(" bytes, Compressed: ");
+    print_i32(comp_bytes);
+    print(" bytes (");
+    print_i32(comp_bits);
+    print(" bits)\n");
+
+    // Build length/distance tables
+    let len_base: ptr[i32] = heap_alloc(29, 4);
+    let len_extra: ptr[i32] = heap_alloc(29, 4);
+    let dist_base: ptr[i32] = heap_alloc(30, 4);
+    let dist_extra: ptr[i32] = heap_alloc(30, 4);
+    build_length_table(len_base, len_extra);
+    build_distance_table(dist_base, dist_extra);
+
+    // Inflate
+    let decomp: ptr[i32] = heap_alloc(src_len + 64, 1);
+    // Skip block header (3 bits: BFINAL + BTYPE)
+    let decomp_len: i32 = inflate_fixed(comp, 3, decomp, src_len + 64,
+                                         len_base, len_extra, dist_base, dist_extra);
+
+    let pass: i32 = 1;
+    if decomp_len != src_len {
+        print("FAIL: Decompressed size = ");
+        print_i32(decomp_len);
+        print(", expected ");
+        print_i32(src_len);
+        print("\n");
+        pass = 0;
+    } else {
+        // Verify byte-by-byte
+        for i: i32 in range(0, src_len) {
+            if ptr_read_u8(src, i) != ptr_read_u8(decomp, i) {
+                print("FAIL: Mismatch at byte ");
+                print_i32(i);
+                print("\n");
+                pass = 0;
+                break;
+            }
+        }
+        if pass == 1 {
+            print("PASS: Inflate round-trip verified\n");
+        }
+    }
+
+    heap_free(src);
+    heap_free(comp);
+    heap_free(decomp);
+    heap_free(len_base);
+    heap_free(len_extra);
+    heap_free(dist_base);
+    heap_free(dist_extra);
+    return pass;
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: CRC32
+// ---------------------------------------------------------------------------
+fn bench_crc32() {
+    print("\n--- Benchmark: CRC32 ---\n");
+
+    let table: ptr[i32] = heap_alloc(256, 4);
+    build_crc32_table(table);
+
+    let data_len: i32 = 4096;
+    let data: ptr[i32] = heap_alloc(data_len, 1);
+    for i: i32 in range(0, data_len) {
+        ptr_write_u8(data, i, band(i *% 37 + 13, 255));
+    }
+
+    let iterations: i32 = 200000;
+    let checksum: i32 = 0;
+
+    let t0: i64 = clock_ns();
+    for iter: i32 in range(0, iterations) {
+        checksum = checksum +% crc32(data, data_len, table);
+    }
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        let total_mb: i64 = (widen(iterations) * widen(data_len)) / 1048576;
+        let throughput: i64 = (total_mb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(throughput);
+        print(" MB/s\n");
+    }
+
+    heap_free(table);
+    heap_free(data);
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: Adler32
+// ---------------------------------------------------------------------------
+fn bench_adler32() {
+    print("\n--- Benchmark: Adler32 ---\n");
+
+    let data_len: i32 = 4096;
+    let data: ptr[i32] = heap_alloc(data_len, 1);
+    for i: i32 in range(0, data_len) {
+        ptr_write_u8(data, i, band(i *% 37 + 13, 255));
+    }
+
+    let iterations: i32 = 200000;
+    let checksum: i32 = 0;
+
+    let t0: i64 = clock_ns();
+    for iter: i32 in range(0, iterations) {
+        checksum = checksum +% adler32_fast(data, data_len);
+    }
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        let total_mb: i64 = (widen(iterations) * widen(data_len)) / 1048576;
+        let throughput: i64 = (total_mb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(throughput);
+        print(" MB/s\n");
+    }
+
+    heap_free(data);
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark: Inflate
+// ---------------------------------------------------------------------------
+fn bench_inflate() {
+    print("\n--- Benchmark: Inflate 4KB x 50K ---\n");
+
+    let src_len: i32 = 4096;
+    let src: ptr[i32] = heap_alloc(src_len, 1);
+    for i: i32 in range(0, src_len) {
+        ptr_write_u8(src, i, band(i *% 37 + 13, 255));
+    }
+
+    // Build length/distance tables
+    let len_base: ptr[i32] = heap_alloc(29, 4);
+    let len_extra: ptr[i32] = heap_alloc(29, 4);
+    let dist_base: ptr[i32] = heap_alloc(30, 4);
+    let dist_extra: ptr[i32] = heap_alloc(30, 4);
+    build_length_table(len_base, len_extra);
+    build_distance_table(dist_base, dist_extra);
+
+    // Compress once
+    let comp_max: i32 = src_len * 2 + 16;
+    let comp: ptr[i32] = heap_alloc_zeroed(comp_max, 1);
+    let comp_bits: i32 = deflate_fixed_literals(src, src_len, comp, comp_max * 8);
+
+    let decomp: ptr[i32] = heap_alloc(src_len + 64, 1);
+    let iterations: i32 = 50000;
+    let checksum: i32 = 0;
+
+    let t0: i64 = clock_ns();
+    for iter: i32 in range(0, iterations) {
+        let dlen: i32 = inflate_fixed(comp, 3, decomp, src_len + 64,
+                                       len_base, len_extra, dist_base, dist_extra);
+        checksum = checksum +% dlen;
+    }
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        let total_mb: i64 = (widen(iterations) * widen(src_len)) / 1048576;
+        let throughput: i64 = (total_mb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(throughput);
+        print(" MB/s\n");
+    }
+
+    heap_free(src);
+    heap_free(comp);
+    heap_free(decomp);
+    heap_free(len_base);
+    heap_free(len_extra);
+    heap_free(dist_base);
+    heap_free(dist_extra);
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+fn main() -> i32 {
+    print("=== lodepng Core: CRC32 + Adler32 + Inflate ===\n\n");
+
+    let pass1: i32 = test_crc32();
+    let pass2: i32 = test_adler32();
+    let pass3: i32 = test_inflate();
+
+    if pass1 == 1 and pass2 == 1 and pass3 == 1 {
+        print("\nAll tests passed.\n");
+    } else {
+        print("\nSome tests FAILED.\n");
+        return 1;
+    }
+
+    bench_crc32();
+    bench_adler32();
+    bench_inflate();
+
+    print("\n=== lodepng complete ===\n");
+    return 0;
+}

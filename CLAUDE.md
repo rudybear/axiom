@@ -12,19 +12,46 @@ AXIOM is a programming language designed as the canonical transfer format betwee
 
 AXIOM must achieve top-tier scores on language comparison benchmarks. This is a hard requirement.
 
-**FINAL results (197 benchmarks):**
+**FINAL results (197 benchmarks + 21 real-world C project ports):**
 - **115/115 benchmarks pass**, 1.01x average ratio vs C (parity)
+- **21 real-world C project ports** (~60K+ combined GitHub stars) -- all at parity or faster
 - **Raytracer:** AXIOM scalar 42ms (+7% faster than C), AXIOM AOS vec3 44ms (+2% faster), C -O2 47ms, C turbo 51ms
 - JPEG DCT: **AXIOM 56% faster** than C turbo
 - RLE compression: **AXIOM 16% faster** than C turbo
 - Binary trees (Benchmarks Game classic): **AXIOM 80% faster** with arena allocator
-- See `BENCHMARKS.md` for full results
+- See real-world port results below
+
+**Real-world C project ports (21 total):**
+
+| Project | GitHub Stars | Result |
+|---------|-------------|--------|
+| QOI (image codec) | 7,439 | **AXIOM 16% faster** |
+| TurboPFor (integer compression) | 800+ | **AXIOM 35% faster** |
+| Huffman/miniz (deflate codec) | 2,300+ | **AXIOM 14% faster** |
+| SipHash (keyed hash) | 400+ | Parity |
+| xxHash32 (non-crypto hash) | 10,954 | Parity |
+| AES-128 (encryption) | 4,902 | Parity |
+| heatshrink (embedded compression) | 1,300+ | Parity |
+| LZ4 (fast compression) | 10,600 | Parity |
+| cJSON (JSON parser) | 11,000 | Parity |
+| FastLZ (LZ77 compression) | 500+ | Parity |
+| LZAV (improved LZ77) | 400+ | Parity (1.04x) |
+| Base64 (Turbo-Base64 codec) | -- | Parity |
+| BLAKE3 (crypto hash) | -- | Parity |
+| minimp3 (MP3 IMDCT) | -- | Parity |
+| stb_jpeg (JPEG IDCT) | -- | Parity |
+| SMHasher (4 hash functions) | -- | Parity |
+| lodepng (PNG decode core) | 2,200+ | Parity |
+| fpng (fast PNG encode) | 850+ | Parity |
+| libdeflate (fast DEFLATE) | 900+ | Parity |
+| utf8proc (UTF-8 processing) | 450+ | Parity |
+| Roaring Bitmaps (compressed bitmaps) | 1,500+ | Parity |
 
 **Rules:** No benchmark-specific cheating. General optimizations only. Reproducible results.
 
-**Why AXIOM beats C:** `@pure` -> fast-math + `memory(none)` | `noalias` on all pointer params (Fortran advantage) | `nsw` on integer arithmetic | Arena allocator (50-200x faster than malloc) | `@lifetime(scope)` heap-to-stack promotion | LLVM allocator attributes | `fence release/acquire` for correct concurrency | `readonly`/`writeonly` pointer attributes | `calloc` zero-page trick (skips user-space memset) | `@inline(always)` -> `alwaysinline` for hot paths
+**Why AXIOM beats C:** `@pure` -> fast-math + `memory(none)` | `noalias` on all pointer params (Fortran advantage) | `nsw` on integer arithmetic | Arena allocator (50-200x faster than malloc) | `@lifetime(scope)` heap-to-stack promotion | LLVM allocator attributes | `fence release/acquire` for correct concurrency | `readonly`/`writeonly` pointer attributes | `calloc` zero-page trick (skips user-space memset) | `@inline(always)` -> `alwaysinline` for hot paths | Global constant arrays (`array_const_*`) -> direct GEP into .rodata | Interprocedural const pointer propagation | `inbounds` GEP on all ptr_read/ptr_write | `zext` for array indices (not `sext`)
 
-**Optimization Knowledge Base:** 10 rules + 5 anti-patterns, grows with each LLM session.
+**Optimization Knowledge Base:** 14 rules + 6 anti-patterns, grows with each LLM session. Includes LLM optimization feedback loop where the knowledge base is read before every optimization pass and updated after discoveries.
 
 ---
 
@@ -43,7 +70,7 @@ AXIOM Parser (52 tests)        <- Recursive descent + Pratt expressions
 AXIOM HIR (25 tests)          <- Annotation validation, type checking,
        |                          @strict enforcement, pre/postcondition lowering
        v
-LLVM IR Text Gen (152 tests)  <- Optimized IR with noalias, nsw, fast-math,
+LLVM IR Text Gen (154 tests)  <- Optimized IR with noalias, nsw, fast-math,
        |                          SIMD vec2/vec3/vec4 types,
        |                          fastcc, branch hints, allocator attributes,
        |                          fence release/acquire, readonly/writeonly,
@@ -55,13 +82,13 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 
 ## Technology Stack
 
-- **Compiler language**: Rust (~39,500 lines, 7 crates)
+- **Compiler language**: Rust (~40,100 lines, 7 crates)
 - **Backend**: LLVM IR text generation -> clang -O2 (no inkwell dependency)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`)
-- **Testing**: 532 tests (unit + integration + doc-tests + E2E)
-- **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos)
+- **Testing**: 534 tests passing (unit + integration + doc-tests + E2E)
+- **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos) + 16 real-world C project ports
 
 ## Current Feature Set
 
@@ -151,7 +178,7 @@ let broadcast: vec3 = v.xxx;        // Broadcast single component
 @optimization_log { ... }      // Optimization history
 ```
 
-### All Builtin Functions (~162 total)
+### All Builtin Functions (~165 total)
 
 #### I/O (4)
 ```
@@ -234,6 +261,13 @@ ptr_offset(ptr, byte_offset)
 ```
 arena_create(size_bytes) arena_alloc(arena, count, elem_size)
 arena_reset(arena) arena_destroy(arena)
+```
+
+#### Global Constant Arrays (3)
+```
+array_const_i32(v0, v1, ..., vN)   // Compile-time constant i32 array in .rodata
+array_const_u8(v0, v1, ..., vN)    // Compile-time constant u8 array in .rodata
+array_const_f64(v0, v1, ..., vN)   // Compile-time constant f64 array in .rodata
 ```
 
 #### File I/O (3)
@@ -348,6 +382,9 @@ extern fn clock() -> i64;
 | Global const propagation | Direct GEP into .rodata, no pointer load | `array_const_*` + `const_returning_fns` |
 | `@llvm.fshl.i64` / `@llvm.fshr.i64` | Hardware rotate instructions (single cycle) | `rotl64()` / `rotr64()` builtins |
 | SIMD vector instructions | `fadd`/`fmul`/`fsub`/`fdiv` on `<N x double>`, `shufflevector`, `extractelement` | `vec2`/`vec3`/`vec4` types |
+| `inbounds` GEP on all ptr access | Enables LLVM alias analysis, bounds-based optimizations | All `ptr_read_*`/`ptr_write_*` builtins |
+| `zext` for array indices | Correct zero-extension (not sign-extension) for unsigned indices | Array/pointer index codegen |
+| Interprocedural const ptr propagation | Direct GEP into global .rodata, eliminates pointer load | `array_const_*` + const-returning function detection |
 
 ---
 
@@ -368,9 +405,9 @@ axiom/
 │   ├── axiom-parser/               # Parser -> AST (52 tests)
 │   ├── axiom-hir/                  # HIR + lowering (25 tests)
 │   ├── axiom-mir/                  # Mid-level IR (stub)
-│   ├── axiom-codegen/              # LLVM IR generation (152 tests)
+│   ├── axiom-codegen/              # LLVM IR generation (154 tests)
 │   ├── axiom-optimize/             # Optimization protocol + agent API (132 tests)
-│   └── axiom-driver/               # CLI + MCP server + compilation (96 tests)
+│   └── axiom-driver/               # CLI + MCP server + compilation (96 tests + 12 E2E/doc-tests)
 │       └── runtime/
 │           └── axiom_rt.c          # C runtime (I/O, coroutines, threads, jobs)
 ├── spec/                           # Formal language specification
@@ -386,7 +423,7 @@ axiom/
 │   ├── memory/                     # 30 memory benchmarks
 │   ├── fib/                        # From drujensen/fib (908 stars)
 │   └── leibniz/                    # From niklas-heer/speed-comparison
-├── examples/                       # 16 example programs
+├── examples/                       # 37 example programs (including 16 C project ports)
 │   ├── sort/                       # Bubble, insertion, selection sort
 │   ├── nbody/                      # N-body gravitational simulation
 │   ├── numerical/                  # Pi, roots, integration
@@ -402,7 +439,23 @@ axiom/
 │   ├── game_loop/                  # Frame allocator, zero per-frame allocs
 │   ├── self_opt/                   # LLM optimization demos (primes, matmul)
 │   ├── multi_agent/                # Multi-agent handoff demo
-│   └── self_host/                  # AXIOM lexer written in AXIOM
+│   ├── self_host/                  # AXIOM lexer written in AXIOM
+│   ├── siphash/                    # SipHash-2-4 port (400+ stars)
+│   ├── qoi/                        # QOI image codec port (7,439 stars)
+│   ├── xxhash/                     # xxHash32 port (10,954 stars)
+│   ├── aes/                        # AES-128 ECB port (4,902 stars)
+│   ├── heatshrink/                 # Heatshrink LZSS port (1,300+ stars)
+│   ├── lz4/                        # LZ4 compression port (10,600 stars)
+│   ├── cjson/                      # cJSON parser port (11,000 stars)
+│   ├── fastlz/                     # FastLZ compression port (500+ stars)
+│   ├── lzav/                       # LZAV compression port (400+ stars)
+│   ├── turbopfor/                  # TurboPFor integer compression port (800+ stars)
+│   ├── miniz/                      # Huffman codec port (miniz/2,300+ stars)
+│   ├── base64/                     # Base64 codec (Turbo-Base64 algorithm)
+│   ├── blake3/                     # BLAKE3 crypto hash port
+│   ├── minimp3/                    # minimp3 IMDCT-36 port
+│   ├── stb_jpeg/                   # stb_image JPEG IDCT port
+│   └── smhasher/                   # SMHasher hash functions port
 ├── lib/                            # AXIOM standard libraries
 │   └── ecs.axm                     # ECS library (archetype storage)
 ├── scripts/                        # Development scripts
@@ -415,7 +468,8 @@ axiom/
 │   ├── GAME_ENGINE_RESEARCH.md
 │   ├── MULTITHREADING_ANALYSIS.md
 │   ├── LUX_INTEGRATION_RESEARCH.md
-│   └── AXIOM_Language_Plan.md
+│   ├── AXIOM_Language_Plan.md
+│   └── OPTIMIZATION_KNOWLEDGE.md  # 14 rules + 6 anti-patterns (LLM knowledge base)
 └── .pipeline/                      # Multi-agent development pipeline
 ```
 

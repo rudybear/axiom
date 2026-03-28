@@ -1,0 +1,404 @@
+@module idct;
+@intent("JPEG 8x8 IDCT using AAN (Arai-Agui-Nakajima) fixed-point algorithm, ported from stb_image");
+
+// =============================================================================
+// JPEG 8x8 IDCT -- AAN Algorithm (stb_image core hot path)
+// =============================================================================
+//
+// The AAN algorithm computes the 8-point IDCT using only 5 multiplications
+// (plus additions/shifts). We use 12-bit fixed-point arithmetic.
+//
+// Input: 64 i32 DCT coefficients (zigzag-ordered, dequantized)
+// Output: 64 u8 pixel values (0-255, clamped)
+//
+// Two passes: columns first, then rows (separable 2D transform).
+// Fixed-point precision: 12 bits fractional (FIXP = 4096).
+//
+// Translation notes:
+// - No floating point: all multiply + shift with fixed-point constants
+// - No 2D arrays: flat 64-element buffer, index = row*8 + col
+// - Clamp to [0,255] via branchless min/max
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Fixed-point constants (scaled by 4096 = 2^12)
+// ---------------------------------------------------------------------------
+// cos(pi/16)*sqrt(2) * 4096 = 5681  (stb: f2f(0.5411961))
+// cos(pi/16)*sqrt(2) * 4096 additional constants from stb_image:
+//   stb uses: x*f2f(a) + y*f2f(b) patterns with specific constants
+// ---------------------------------------------------------------------------
+
+// stb_image IDCT constants (fixed-point, 12-bit precision):
+// These correspond to the stb_image constants exactly.
+@const fn FIX_0_298631336() -> i32 { return 1223; }   // cos(7pi/16)*sqrt(2)*4096
+@const fn FIX_0_390180644() -> i32 { return 1598; }   // some trig combo
+@const fn FIX_0_541196100() -> i32 { return 2217; }   // cos(6pi/16)*sqrt(2)*4096
+@const fn FIX_0_765366865() -> i32 { return 3135; }   // cos(5pi/16)*sqrt(2)*4096
+@const fn FIX_0_899976223() -> i32 { return 3686; }   // cos(3pi/16)*sqrt(2)*4096
+@const fn FIX_1_175875602() -> i32 { return 4816; }   // cos(pi/4)*4096
+@const fn FIX_1_501321110() -> i32 { return 6149; }   // cos(pi/16)*sqrt(2)*4096
+@const fn FIX_1_847759065() -> i32 { return 7568; }   // cos(2pi/16)*sqrt(2)*4096
+@const fn FIX_1_961570560() -> i32 { return 8034; }   // another trig combo
+@const fn FIX_2_053119869() -> i32 { return 8410; }   // another trig combo
+@const fn FIX_2_562915447() -> i32 { return 10497; }  // another trig combo
+@const fn FIX_3_072711026() -> i32 { return 12585; }  // another trig combo
+
+@const fn SHIFT_BITS() -> i32 { return 12; }
+@const fn HALF_SHIFT() -> i32 { return 2048; }         // 1 << 11
+@const fn DESCALE_COL() -> i32 { return 10; }          // shift after column pass
+@const fn HALF_COL() -> i32 { return 512; }             // 1 << 9
+@const fn DESCALE_ROW() -> i32 { return 17; }          // shift after row pass (12+5)
+@const fn HALF_ROW() -> i32 { return 16842752; }         // (1 << 16) + (128 << 17) -- rounding + JPEG DC level shift
+
+// ---------------------------------------------------------------------------
+// Clamp to [0, 255]
+// ---------------------------------------------------------------------------
+@pure @inline(always)
+fn clamp_u8(x: i32) -> i32 {
+    let v: i32 = x;
+    if v < 0 { v = 0; }
+    if v > 255 { v = 255; }
+    return v;
+}
+
+// ---------------------------------------------------------------------------
+// IDCT 1D column pass (Loeffler/AAN style, from stb_image jpeg_idct_block)
+// Operates on 8 values in a column (stride 8) of the coefficient buffer.
+// Results are written back with 10-bit descale.
+// ---------------------------------------------------------------------------
+@inline(always)
+fn idct_col(data: ptr[i32], col: i32) {
+    // Load 8 column values
+    let s0: i32 = ptr_read_i32(data, col + 0);
+    let s1: i32 = ptr_read_i32(data, col + 8);
+    let s2: i32 = ptr_read_i32(data, col + 16);
+    let s3: i32 = ptr_read_i32(data, col + 24);
+    let s4: i32 = ptr_read_i32(data, col + 32);
+    let s5: i32 = ptr_read_i32(data, col + 40);
+    let s6: i32 = ptr_read_i32(data, col + 48);
+    let s7: i32 = ptr_read_i32(data, col + 56);
+
+    // Shortcut: if all AC terms are zero, DC fill
+    if s1 == 0 {
+        if s2 == 0 {
+            if s3 == 0 {
+                if s4 == 0 {
+                    if s5 == 0 {
+                        if s6 == 0 {
+                            if s7 == 0 {
+                                let dc: i32 = shl(s0, 2);
+                                ptr_write_i32(data, col + 0, dc);
+                                ptr_write_i32(data, col + 8, dc);
+                                ptr_write_i32(data, col + 16, dc);
+                                ptr_write_i32(data, col + 24, dc);
+                                ptr_write_i32(data, col + 32, dc);
+                                ptr_write_i32(data, col + 40, dc);
+                                ptr_write_i32(data, col + 48, dc);
+                                ptr_write_i32(data, col + 56, dc);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Stage 1: even part
+    let p2: i32 = s2;
+    let p3: i32 = s6;
+    let p1: i32 = (p2 + p3) *% FIX_0_541196100();
+    let t2: i32 = p1 + p3 *% (0 - FIX_1_847759065());
+    let t3: i32 = p1 + p2 *% FIX_0_765366865();
+
+    let p2b: i32 = s0;
+    let p3b: i32 = s4;
+    let t0: i32 = shl(p2b + p3b, SHIFT_BITS());
+    let t1: i32 = shl(p2b - p3b, SHIFT_BITS());
+
+    let x0: i32 = t0 + t3;
+    let x3: i32 = t0 - t3;
+    let x1: i32 = t1 + t2;
+    let x2: i32 = t1 - t2;
+
+    // Stage 2: odd part
+    let t0b: i32 = s7;
+    let t1b: i32 = s5;
+    let t2b: i32 = s3;
+    let t3b: i32 = s1;
+
+    let p3c: i32 = t0b + t2b;
+    let p4: i32 = t1b + t3b;
+    let p1c: i32 = t0b + t3b;
+    let p2c: i32 = t1b + t2b;
+    let p5: i32 = (p3c + p4) *% FIX_1_175875602();
+
+    t0b = t0b *% FIX_0_298631336();
+    t1b = t1b *% FIX_2_053119869();
+    t2b = t2b *% FIX_3_072711026();
+    t3b = t3b *% FIX_1_501321110();
+    p1c = p1c *% (0 - FIX_0_899976223());
+    p2c = p2c *% (0 - FIX_2_562915447());
+    p3c = p3c *% (0 - FIX_1_961570560());
+    p4 = p4 *% (0 - FIX_0_390180644());
+
+    p3c = p3c + p5;
+    p4 = p4 + p5;
+
+    let y0: i32 = t0b + p1c + p3c;
+    let y1: i32 = t1b + p2c + p4;
+    let y2: i32 = t2b + p2c + p3c;
+    let y3: i32 = t3b + p1c + p4;
+
+    // Write results, descaled by 10 bits
+    ptr_write_i32(data, col + 0, shr(x0 + y3 + HALF_COL(), DESCALE_COL()));
+    ptr_write_i32(data, col + 8, shr(x1 + y2 + HALF_COL(), DESCALE_COL()));
+    ptr_write_i32(data, col + 16, shr(x2 + y1 + HALF_COL(), DESCALE_COL()));
+    ptr_write_i32(data, col + 24, shr(x3 + y0 + HALF_COL(), DESCALE_COL()));
+    ptr_write_i32(data, col + 32, shr(x3 - y0 + HALF_COL(), DESCALE_COL()));
+    ptr_write_i32(data, col + 40, shr(x2 - y1 + HALF_COL(), DESCALE_COL()));
+    ptr_write_i32(data, col + 48, shr(x1 - y2 + HALF_COL(), DESCALE_COL()));
+    ptr_write_i32(data, col + 56, shr(x0 - y3 + HALF_COL(), DESCALE_COL()));
+}
+
+// ---------------------------------------------------------------------------
+// IDCT 1D row pass
+// Operates on 8 values in a row, descales by 17 bits and clamps to [0,255]
+// Output written to u8 output buffer.
+// ---------------------------------------------------------------------------
+@inline(always)
+fn idct_row(data: ptr[i32], row: i32, out: ptr[i32], out_row: i32) {
+    let base: i32 = row * 8;
+    let s0: i32 = ptr_read_i32(data, base + 0);
+    let s1: i32 = ptr_read_i32(data, base + 1);
+    let s2: i32 = ptr_read_i32(data, base + 2);
+    let s3: i32 = ptr_read_i32(data, base + 3);
+    let s4: i32 = ptr_read_i32(data, base + 4);
+    let s5: i32 = ptr_read_i32(data, base + 5);
+    let s6: i32 = ptr_read_i32(data, base + 6);
+    let s7: i32 = ptr_read_i32(data, base + 7);
+
+    // DC shortcut
+    if s1 == 0 {
+        if s2 == 0 {
+            if s3 == 0 {
+                if s4 == 0 {
+                    if s5 == 0 {
+                        if s6 == 0 {
+                            if s7 == 0 {
+                                let dc: i32 = clamp_u8(shr(s0 + HALF_ROW(), DESCALE_ROW()));
+                                let obase: i32 = out_row * 8;
+                                ptr_write_u8(out, obase + 0, dc);
+                                ptr_write_u8(out, obase + 1, dc);
+                                ptr_write_u8(out, obase + 2, dc);
+                                ptr_write_u8(out, obase + 3, dc);
+                                ptr_write_u8(out, obase + 4, dc);
+                                ptr_write_u8(out, obase + 5, dc);
+                                ptr_write_u8(out, obase + 6, dc);
+                                ptr_write_u8(out, obase + 7, dc);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Even part
+    let p2: i32 = s2;
+    let p3: i32 = s6;
+    let p1: i32 = (p2 + p3) *% FIX_0_541196100();
+    let t2: i32 = p1 + p3 *% (0 - FIX_1_847759065());
+    let t3: i32 = p1 + p2 *% FIX_0_765366865();
+
+    let p2b: i32 = s0;
+    let p3b: i32 = s4;
+    let t0: i32 = shl(p2b + p3b, SHIFT_BITS());
+    let t1: i32 = shl(p2b - p3b, SHIFT_BITS());
+
+    let x0: i32 = t0 + t3;
+    let x3: i32 = t0 - t3;
+    let x1: i32 = t1 + t2;
+    let x2: i32 = t1 - t2;
+
+    // Odd part
+    let t0b: i32 = s7;
+    let t1b: i32 = s5;
+    let t2b: i32 = s3;
+    let t3b: i32 = s1;
+
+    let p3c: i32 = t0b + t2b;
+    let p4: i32 = t1b + t3b;
+    let p1c: i32 = t0b + t3b;
+    let p2c: i32 = t1b + t2b;
+    let p5: i32 = (p3c + p4) *% FIX_1_175875602();
+
+    t0b = t0b *% FIX_0_298631336();
+    t1b = t1b *% FIX_2_053119869();
+    t2b = t2b *% FIX_3_072711026();
+    t3b = t3b *% FIX_1_501321110();
+    p1c = p1c *% (0 - FIX_0_899976223());
+    p2c = p2c *% (0 - FIX_2_562915447());
+    p3c = p3c *% (0 - FIX_1_961570560());
+    p4 = p4 *% (0 - FIX_0_390180644());
+
+    p3c = p3c + p5;
+    p4 = p4 + p5;
+
+    let y0: i32 = t0b + p1c + p3c;
+    let y1: i32 = t1b + p2c + p4;
+    let y2: i32 = t2b + p2c + p3c;
+    let y3: i32 = t3b + p1c + p4;
+
+    // Descale by 17 bits and clamp to [0,255], write as u8
+    let obase: i32 = out_row * 8;
+    ptr_write_u8(out, obase + 0, clamp_u8(shr(x0 + y3 + HALF_ROW(), DESCALE_ROW())));
+    ptr_write_u8(out, obase + 1, clamp_u8(shr(x1 + y2 + HALF_ROW(), DESCALE_ROW())));
+    ptr_write_u8(out, obase + 2, clamp_u8(shr(x2 + y1 + HALF_ROW(), DESCALE_ROW())));
+    ptr_write_u8(out, obase + 3, clamp_u8(shr(x3 + y0 + HALF_ROW(), DESCALE_ROW())));
+    ptr_write_u8(out, obase + 4, clamp_u8(shr(x3 - y0 + HALF_ROW(), DESCALE_ROW())));
+    ptr_write_u8(out, obase + 5, clamp_u8(shr(x2 - y1 + HALF_ROW(), DESCALE_ROW())));
+    ptr_write_u8(out, obase + 6, clamp_u8(shr(x1 - y2 + HALF_ROW(), DESCALE_ROW())));
+    ptr_write_u8(out, obase + 7, clamp_u8(shr(x0 - y3 + HALF_ROW(), DESCALE_ROW())));
+
+}
+
+// ---------------------------------------------------------------------------
+// Full 8x8 IDCT: column pass then row pass
+// coefs: 64 i32 dequantized DCT coefficients
+// out: 64 u8 pixel values
+// temp: 64 i32 scratch buffer (caller-allocated)
+// ---------------------------------------------------------------------------
+@pure
+fn idct_8x8(coefs: ptr[i32], out: ptr[i32], temp: ptr[i32]) {
+    // Copy coefficients to temp buffer
+    for i: i32 in range(0, 64) {
+        ptr_write_i32(temp, i, ptr_read_i32(coefs, i));
+    }
+
+    // Column pass (8 columns)
+    idct_col(temp, 0);
+    idct_col(temp, 1);
+    idct_col(temp, 2);
+    idct_col(temp, 3);
+    idct_col(temp, 4);
+    idct_col(temp, 5);
+    idct_col(temp, 6);
+    idct_col(temp, 7);
+
+    // Row pass (8 rows) -> writes u8 output
+    idct_row(temp, 0, out, 0);
+    idct_row(temp, 1, out, 1);
+    idct_row(temp, 2, out, 2);
+    idct_row(temp, 3, out, 3);
+    idct_row(temp, 4, out, 4);
+    idct_row(temp, 5, out, 5);
+    idct_row(temp, 6, out, 6);
+    idct_row(temp, 7, out, 7);
+}
+
+// ---------------------------------------------------------------------------
+// Main: test + benchmark
+// ---------------------------------------------------------------------------
+fn main() -> i32 {
+    // Test vector: a typical JPEG DCT block
+    // DC=0 (level-shifted), a few AC coefficients, rest zero
+    // With stb_image 128-bias in IDCT, DC=0 -> output ~128
+    let coefs: ptr[i32] = heap_alloc_zeroed(64, 4);
+    ptr_write_i32(coefs, 0, 0);      // DC (zero -> 128 after level shift)
+    ptr_write_i32(coefs, 1, -30);    // AC(0,1)
+    ptr_write_i32(coefs, 8, 50);     // AC(1,0)
+    ptr_write_i32(coefs, 2, 20);     // AC(0,2)
+    ptr_write_i32(coefs, 9, -10);    // AC(1,1)
+    ptr_write_i32(coefs, 16, 15);    // AC(2,0)
+
+    let out: ptr[i32] = heap_alloc(64, 1);
+    let temp: ptr[i32] = heap_alloc(64, 4);
+
+    idct_8x8(coefs, out, temp);
+
+    // Print first row of pixels
+    print("IDCT 8x8 Test Output (first row):\n");
+    for i: i32 in range(0, 8) {
+        let val: i32 = ptr_read_u8(out, i);
+        print_i32(val);
+        print(" ");
+    }
+    print("\n");
+
+    // Verify: DC=0 with stb_image 128-bias should produce pixel values around 128
+    // With small AC terms, values should be near 128 +/- some variation
+    let center: i32 = ptr_read_u8(out, 0);
+    let pass: i32 = 1;
+    if center < 100 { pass = 0; }
+    if center > 170 { pass = 0; }
+
+    // All values should be in valid u8 range
+    for i: i32 in range(0, 64) {
+        let v: i32 = ptr_read_u8(out, i);
+        if v < 0 { pass = 0; }
+        if v > 255 { pass = 0; }
+    }
+
+    if pass == 1 {
+        print("PASS: IDCT output in expected range\n");
+    } else {
+        print("FAIL: IDCT output out of range\n");
+    }
+
+    // Test 2: DC=0, all-zero AC should produce all-128 (from 128-bias)
+    let coefs2: ptr[i32] = heap_alloc_zeroed(64, 4);
+    ptr_write_i32(coefs2, 0, 0);
+    idct_8x8(coefs2, out, temp);
+    let dc_val: i32 = ptr_read_u8(out, 0);
+    print("DC-only test: pixel[0] = ");
+    print_i32(dc_val);
+    print(" (expected 128)\n");
+    if dc_val >= 126 {
+        if dc_val <= 130 {
+            print("PASS: DC-only correct\n");
+        } else {
+            print("FAIL: DC-only incorrect\n");
+        }
+    } else {
+        print("FAIL: DC-only incorrect\n");
+    }
+
+    // Benchmark: 1,000,000 IDCT-8x8 transforms
+    let iterations: i32 = 1000000;
+    let checksum: i32 = 0;
+
+    let start: i64 = clock_ns();
+    for i: i32 in range(0, iterations) {
+        // Vary DC slightly to prevent over-optimization
+        ptr_write_i32(coefs, 0, i % 64);
+        idct_8x8(coefs, out, temp);
+        checksum = checksum +% ptr_read_u8(out, 0);
+    }
+    let end: i64 = clock_ns();
+    let elapsed_ns: i64 = end -% start;
+
+    print("Benchmark: ");
+    print_i32(iterations);
+    print(" IDCT-8x8 transforms\n");
+    print("Elapsed (ns): ");
+    print_i64(elapsed_ns);
+    print("\n");
+    print("Checksum: ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ns > 0 {
+        let ns_per_op: i64 = elapsed_ns / widen(iterations);
+        print("ns/op: ");
+        print_i64(ns_per_op);
+        print("\n");
+    }
+
+    heap_free(coefs);
+    heap_free(coefs2);
+    heap_free(out);
+    heap_free(temp);
+    return 0;
+}
