@@ -4305,6 +4305,8 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "ptr_read_i16" => return emit_builtin_ptr_read_i16(ctx, args),
             "ptr_read_u8" => return emit_builtin_ptr_read_u8(ctx, args),
             "ptr_offset" => return emit_builtin_ptr_offset(ctx, args),
+            "ptr_to_i64" => return emit_builtin_ptr_to_i64(ctx, args),
+            "i64_to_ptr" => return emit_builtin_i64_to_ptr(ctx, args),
             "arena_create" => return emit_builtin_arena_create(ctx, args),
             "arena_alloc" => return emit_builtin_arena_alloc(ctx, args),
             "arena_reset" => return emit_builtin_arena_reset(ctx, args),
@@ -8137,6 +8139,36 @@ fn emit_builtin_ptr_offset(
         reg: result,
         ty: "ptr".to_string(),
     }
+}
+
+/// Emit built-in `ptr_to_i64(p: ptr) -> i64` — cast pointer to integer.
+fn emit_builtin_ptr_to_i64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "ptr_to_i64() requires 1 argument".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue { reg: "0".to_string(), ty: "i64".to_string() };
+    }
+    let p = emit_expr(ctx, &args[0], Some("ptr"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = ptrtoint ptr {} to i64", p.reg));
+    LlvmValue { reg: result, ty: "i64".to_string() }
+}
+
+/// Emit built-in `i64_to_ptr(n: i64) -> ptr` — cast integer to pointer.
+fn emit_builtin_i64_to_ptr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "i64_to_ptr() requires 1 argument".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue { reg: "null".to_string(), ty: "ptr".to_string() };
+    }
+    let n = emit_expr(ctx, &args[0], Some("i64"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = inttoptr i64 {} to ptr", n.reg));
+    LlvmValue { reg: result, ty: "ptr".to_string() }
 }
 
 /// Emit built-in `f32_to_f64(x: f32) -> f64`.
