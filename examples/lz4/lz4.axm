@@ -1,0 +1,584 @@
+@module lz4;
+@intent("LZ4 compression/decompression core algorithm ported from C, with verification and benchmark");
+
+// =============================================================================
+// LZ4 -- Fast byte-aligned LZ77 compression
+// =============================================================================
+//
+// Core algorithm: hash-based LZ77 with byte-aligned output format.
+//   1. Hash table (4096 entries) maps 4-byte sequences to positions
+//   2. For each position: hash 4 bytes, check for match at hash entry
+//      if match: emit literal run + match (offset, length)
+//      else: advance and store in hash table
+//   3. Output format:
+//      token byte = (literal_len:4 | match_len:4)
+//      + literal bytes
+//      + offset (2 bytes, little-endian)
+//      + optional extended lengths (255-byte run-length encoding)
+//
+// GAP: AXIOM has no u32 type. We use i32 with wrapping ops (*%, +%).
+// GAP: No memcpy/memmove. We copy byte-by-byte.
+// GAP: No global mutable state. Hash table is allocated per call.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+@const fn HASH_TABLE_SIZE() -> i32 { return 4096; }
+@const fn HASH_LOG() -> i32 { return 12; }
+@const fn MIN_MATCH() -> i32 { return 4; }
+@const fn ML_BITS() -> i32 { return 4; }
+@const fn ML_MASK() -> i32 { return 15; }
+@const fn RUN_BITS() -> i32 { return 4; }
+@const fn RUN_MASK() -> i32 { return 15; }
+// LZ4 uses 2654435761 as hash multiplier; as signed i32 = -1640531535
+@const fn HASH_MULT() -> i32 { return 0 - 1640531535; }
+
+// ---------------------------------------------------------------------------
+// Helper: read 4 bytes as a 32-bit value (little-endian)
+// ---------------------------------------------------------------------------
+
+@pure @inline(always)
+fn read32_le(data: ptr[i32], byte_offset: i32) -> i32 {
+    let b0: i32 = ptr_read_u8(data, byte_offset);
+    let b1: i32 = ptr_read_u8(data, byte_offset + 1);
+    let b2: i32 = ptr_read_u8(data, byte_offset + 2);
+    let b3: i32 = ptr_read_u8(data, byte_offset + 3);
+    return bor(bor(b0, shl(b1, 8)), bor(shl(b2, 16), shl(b3, 24)));
+}
+
+// ---------------------------------------------------------------------------
+// Helper: write 16-bit little-endian offset
+// ---------------------------------------------------------------------------
+
+@inline(always)
+fn write16_le(dst: ptr[i32], pos: i32, val: i32) {
+    ptr_write_u8(dst, pos, band(val, 255));
+    ptr_write_u8(dst, pos + 1, band(lshr(val, 8), 255));
+}
+
+// ---------------------------------------------------------------------------
+// Helper: read 16-bit little-endian offset
+// ---------------------------------------------------------------------------
+
+@pure @inline(always)
+fn read16_le(src: ptr[i32], pos: i32) -> i32 {
+    let b0: i32 = ptr_read_u8(src, pos);
+    let b1: i32 = ptr_read_u8(src, pos + 1);
+    return bor(b0, shl(b1, 8));
+}
+
+// ---------------------------------------------------------------------------
+// Hash function: hash 4 bytes at position
+// ---------------------------------------------------------------------------
+
+@pure @inline(always)
+fn lz4_hash(val: i32) -> i32 {
+    // (val * 2654435761) >> (32 - 12) = >> 20
+    // We use wrapping multiply then logical shift right
+    return band(lshr(val *% HASH_MULT(), 20), 4095);
+}
+
+// ---------------------------------------------------------------------------
+// Write extended length (run-length encoded with 255-byte chunks)
+// ---------------------------------------------------------------------------
+
+fn write_extended_length(dst: ptr[i32], pos: i32, length: i32) -> i32 {
+    let rem: i32 = length;
+    let p: i32 = pos;
+    while rem >= 255 {
+        ptr_write_u8(dst, p, 255);
+        p = p + 1;
+        rem = rem - 255;
+    }
+    ptr_write_u8(dst, p, rem);
+    p = p + 1;
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// LZ4 Compress
+// ---------------------------------------------------------------------------
+// Returns compressed size in bytes, or 0 on failure.
+
+fn lz4_compress(src: ptr[i32], src_len: i32,
+                dst: ptr[i32], dst_max: i32) -> i32 {
+    if src_len < 1 {
+        return 0;
+    }
+
+    // Allocate hash table (4096 entries * 4 bytes)
+    let hash_table: ptr[i32] = heap_alloc(HASH_TABLE_SIZE(), 4);
+    // Initialize hash table to 0
+    for i: i32 in range(0, HASH_TABLE_SIZE()) {
+        ptr_write_i32(hash_table, i, 0);
+    }
+
+    let src_pos: i32 = 0;
+    let dst_pos: i32 = 0;
+    let anchor: i32 = 0;  // start of current literal run
+    let src_end: i32 = src_len;
+    let match_limit: i32 = src_len - 5;  // need at least 5 bytes for a match attempt
+
+    // Skip first byte -- need at least 4 bytes to hash
+    if src_len < MIN_MATCH() {
+        // Too small to compress; emit everything as literals
+        let lit_len: i32 = src_len;
+        let token: i32 = 0;
+        if lit_len >= RUN_MASK() {
+            token = shl(RUN_MASK(), ML_BITS());
+            ptr_write_u8(dst, dst_pos, token);
+            dst_pos = dst_pos + 1;
+            dst_pos = write_extended_length(dst, dst_pos, lit_len - RUN_MASK());
+        } else {
+            token = shl(lit_len, ML_BITS());
+            ptr_write_u8(dst, dst_pos, token);
+            dst_pos = dst_pos + 1;
+        }
+        // Copy literals
+        for i: i32 in range(0, lit_len) {
+            ptr_write_u8(dst, dst_pos, ptr_read_u8(src, anchor + i));
+            dst_pos = dst_pos + 1;
+        }
+        heap_free(hash_table);
+        return dst_pos;
+    }
+
+    src_pos = 0;
+
+    // Main compression loop
+    while src_pos <= match_limit {
+        // Read 4 bytes and hash
+        let cur_val: i32 = read32_le(src, src_pos);
+        let h: i32 = lz4_hash(cur_val);
+        let ref_pos: i32 = ptr_read_i32(hash_table, h);
+
+        // Update hash table
+        ptr_write_i32(hash_table, h, src_pos);
+
+        // Check match: must be within 65535 bytes and values must match
+        let offset: i32 = src_pos - ref_pos;
+        if ref_pos > 0 and offset > 0 and offset < 65536 and src_pos > ref_pos {
+            let ref_val: i32 = read32_le(src, ref_pos);
+            if cur_val == ref_val {
+                // Found a match! Extend it.
+                let match_len: i32 = MIN_MATCH();
+                let max_extend: i32 = src_end - src_pos - MIN_MATCH();
+                while match_len < max_extend {
+                    if ptr_read_u8(src, ref_pos + match_len) != ptr_read_u8(src, src_pos + match_len) {
+                        break;
+                    }
+                    match_len = match_len + 1;
+                }
+
+                // Emit literal run
+                let lit_len: i32 = src_pos - anchor;
+                let ml_code: i32 = match_len - MIN_MATCH();
+
+                // Token byte: (literal_len:4 | match_len:4)
+                let token_lit: i32 = lit_len;
+                if token_lit > RUN_MASK() {
+                    token_lit = RUN_MASK();
+                }
+                let token_ml: i32 = ml_code;
+                if token_ml > ML_MASK() {
+                    token_ml = ML_MASK();
+                }
+                let token: i32 = bor(shl(token_lit, ML_BITS()), token_ml);
+
+                // Check output space
+                if dst_pos + 1 + lit_len + 2 + 4 > dst_max {
+                    heap_free(hash_table);
+                    return 0;
+                }
+
+                ptr_write_u8(dst, dst_pos, token);
+                dst_pos = dst_pos + 1;
+
+                // Write extended literal length
+                if lit_len >= RUN_MASK() {
+                    dst_pos = write_extended_length(dst, dst_pos, lit_len - RUN_MASK());
+                }
+
+                // Copy literal bytes
+                for i: i32 in range(0, lit_len) {
+                    ptr_write_u8(dst, dst_pos, ptr_read_u8(src, anchor + i));
+                    dst_pos = dst_pos + 1;
+                }
+
+                // Write match offset (little-endian, 2 bytes)
+                write16_le(dst, dst_pos, offset);
+                dst_pos = dst_pos + 2;
+
+                // Write extended match length
+                if ml_code >= ML_MASK() {
+                    dst_pos = write_extended_length(dst, dst_pos, ml_code - ML_MASK());
+                }
+
+                // Advance past the match
+                src_pos = src_pos + match_len;
+                anchor = src_pos;
+
+                // Hash the positions we skipped
+                if src_pos <= match_limit {
+                    let skip_val: i32 = read32_le(src, src_pos);
+                    let skip_h: i32 = lz4_hash(skip_val);
+                    ptr_write_i32(hash_table, skip_h, src_pos);
+                }
+
+                continue;
+            }
+        }
+
+        src_pos = src_pos + 1;
+    }
+
+    // Emit final literals (everything from anchor to end)
+    let last_lit_len: i32 = src_end - anchor;
+    if last_lit_len > 0 {
+        let token_lit2: i32 = last_lit_len;
+        if token_lit2 > RUN_MASK() {
+            token_lit2 = RUN_MASK();
+        }
+        let token2: i32 = shl(token_lit2, ML_BITS());
+        ptr_write_u8(dst, dst_pos, token2);
+        dst_pos = dst_pos + 1;
+
+        if last_lit_len >= RUN_MASK() {
+            dst_pos = write_extended_length(dst, dst_pos, last_lit_len - RUN_MASK());
+        }
+
+        for i: i32 in range(0, last_lit_len) {
+            ptr_write_u8(dst, dst_pos, ptr_read_u8(src, anchor + i));
+            dst_pos = dst_pos + 1;
+        }
+    }
+
+    heap_free(hash_table);
+    return dst_pos;
+}
+
+// ---------------------------------------------------------------------------
+// LZ4 Decompress
+// ---------------------------------------------------------------------------
+// Returns decompressed size in bytes, or 0 on failure.
+
+fn lz4_decompress(src: ptr[i32], src_len: i32,
+                  dst: ptr[i32], dst_max: i32) -> i32 {
+    let src_pos: i32 = 0;
+    let dst_pos: i32 = 0;
+
+    while src_pos < src_len {
+        // Read token byte
+        let token: i32 = ptr_read_u8(src, src_pos);
+        src_pos = src_pos + 1;
+
+        // Decode literal length (high 4 bits)
+        let lit_len: i32 = lshr(token, ML_BITS());
+        if lit_len == RUN_MASK() {
+            // Extended length
+            let extra: i32 = 255;
+            while extra == 255 {
+                if src_pos >= src_len {
+                    return 0;
+                }
+                extra = ptr_read_u8(src, src_pos);
+                src_pos = src_pos + 1;
+                lit_len = lit_len + extra;
+            }
+        }
+
+        // Copy literals
+        if dst_pos + lit_len > dst_max {
+            return 0;
+        }
+        for i: i32 in range(0, lit_len) {
+            ptr_write_u8(dst, dst_pos + i, ptr_read_u8(src, src_pos + i));
+        }
+        src_pos = src_pos + lit_len;
+        dst_pos = dst_pos + lit_len;
+
+        // Check if we've consumed all source (last sequence has no match)
+        if src_pos >= src_len {
+            break;
+        }
+
+        // Read match offset (2 bytes, little-endian)
+        if src_pos + 2 > src_len {
+            return 0;
+        }
+        let match_offset: i32 = read16_le(src, src_pos);
+        src_pos = src_pos + 2;
+        if match_offset == 0 {
+            return 0;
+        }
+
+        // Decode match length (low 4 bits + MIN_MATCH)
+        let match_len: i32 = band(token, ML_MASK()) + MIN_MATCH();
+        if band(token, ML_MASK()) == ML_MASK() {
+            // Extended match length
+            let extra2: i32 = 255;
+            while extra2 == 255 {
+                if src_pos >= src_len {
+                    return 0;
+                }
+                extra2 = ptr_read_u8(src, src_pos);
+                src_pos = src_pos + 1;
+                match_len = match_len + extra2;
+            }
+        }
+
+        // Copy match (byte-by-byte for overlapping support)
+        let match_src: i32 = dst_pos - match_offset;
+        if match_src < 0 {
+            return 0;
+        }
+        if dst_pos + match_len > dst_max {
+            return 0;
+        }
+        for i: i32 in range(0, match_len) {
+            ptr_write_u8(dst, dst_pos + i, ptr_read_u8(dst, match_src + i));
+        }
+        dst_pos = dst_pos + match_len;
+    }
+
+    return dst_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Verify: compare two byte buffers
+// ---------------------------------------------------------------------------
+
+@pure
+fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
+    for i: i32 in range(0, len) {
+        if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Test data: fill with repeating pattern (compressible)
+// ---------------------------------------------------------------------------
+
+fn fill_repeating(buf: ptr[i32], len: i32) {
+    // "ABCDEFGH" repeating -- 8-byte cycle with 4-byte matches
+    for i: i32 in range(0, len) {
+        let c: i32 = band(i, 7) + 65;
+        ptr_write_u8(buf, i, c);
+    }
+}
+
+// Fill with semi-random but compressible data
+fn fill_mixed(buf: ptr[i32], len: i32) {
+    for i: i32 in range(0, len) {
+        let section: i32 = i / 64;
+        if section % 2 == 0 {
+            // Repeating pattern -- compresses well
+            ptr_write_u8(buf, i, band(i % 8 + 65, 255));
+        } else {
+            // Pseudo-random -- less compressible
+            ptr_write_u8(buf, i, band(i *% 37 + 13, 255));
+        }
+    }
+}
+
+// Fill with English-like text (highly compressible)
+fn fill_text_like(buf: ptr[i32], len: i32) {
+    // Simulate English text with common bigrams repeating
+    // "the quick brown fox jumps over the lazy dog " repeated
+    let pattern_len: i32 = 44;
+    // t=116 h=104 e=101 _=32 q=113 u=117 i=105 c=99 k=107 _=32
+    // b=98 r=114 o=111 w=119 n=110 _=32 f=102 o=111 x=120 _=32
+    // j=106 u=117 m=109 p=112 s=115 _=32 o=111 v=118 e=101 r=114
+    // _=32 t=116 h=104 e=101 _=32 l=108 a=97 z=122 y=121 _=32
+    // d=100 o=111 g=103 _=32
+    let pat: ptr[i32] = heap_alloc(pattern_len, 1);
+    ptr_write_u8(pat, 0, 116); ptr_write_u8(pat, 1, 104); ptr_write_u8(pat, 2, 101); ptr_write_u8(pat, 3, 32);
+    ptr_write_u8(pat, 4, 113); ptr_write_u8(pat, 5, 117); ptr_write_u8(pat, 6, 105); ptr_write_u8(pat, 7, 99);
+    ptr_write_u8(pat, 8, 107); ptr_write_u8(pat, 9, 32); ptr_write_u8(pat, 10, 98); ptr_write_u8(pat, 11, 114);
+    ptr_write_u8(pat, 12, 111); ptr_write_u8(pat, 13, 119); ptr_write_u8(pat, 14, 110); ptr_write_u8(pat, 15, 32);
+    ptr_write_u8(pat, 16, 102); ptr_write_u8(pat, 17, 111); ptr_write_u8(pat, 18, 120); ptr_write_u8(pat, 19, 32);
+    ptr_write_u8(pat, 20, 106); ptr_write_u8(pat, 21, 117); ptr_write_u8(pat, 22, 109); ptr_write_u8(pat, 23, 112);
+    ptr_write_u8(pat, 24, 115); ptr_write_u8(pat, 25, 32); ptr_write_u8(pat, 26, 111); ptr_write_u8(pat, 27, 118);
+    ptr_write_u8(pat, 28, 101); ptr_write_u8(pat, 29, 114); ptr_write_u8(pat, 30, 32); ptr_write_u8(pat, 31, 116);
+    ptr_write_u8(pat, 32, 104); ptr_write_u8(pat, 33, 101); ptr_write_u8(pat, 34, 32); ptr_write_u8(pat, 35, 108);
+    ptr_write_u8(pat, 36, 97); ptr_write_u8(pat, 37, 122); ptr_write_u8(pat, 38, 121); ptr_write_u8(pat, 39, 32);
+    ptr_write_u8(pat, 40, 100); ptr_write_u8(pat, 41, 111); ptr_write_u8(pat, 42, 103); ptr_write_u8(pat, 43, 32);
+    for i: i32 in range(0, len) {
+        ptr_write_u8(buf, i, ptr_read_u8(pat, i % pattern_len));
+    }
+    heap_free(pat);
+}
+
+// ---------------------------------------------------------------------------
+// Main: verify round-trip, then benchmark
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    print("=== LZ4 Compression Port ===\n");
+
+    // --- Test 1: Repeating pattern ---
+    let test_len: i32 = 1024;
+    let src_buf: ptr[i32] = heap_alloc(test_len, 1);
+    fill_repeating(src_buf, test_len);
+
+    let comp_max: i32 = test_len + test_len / 4 + 16;
+    let comp_buf: ptr[i32] = heap_alloc(comp_max, 1);
+    let decomp_buf: ptr[i32] = heap_alloc(test_len + 64, 1);
+
+    print("\n--- Test 1: Repeating pattern (1024 bytes) ---\n");
+    let comp_size: i32 = lz4_compress(src_buf, test_len, comp_buf, comp_max);
+    print("Original: ");
+    print_i32(test_len);
+    print(" bytes\n");
+    print("Compressed: ");
+    print_i32(comp_size);
+    print(" bytes\n");
+
+    if comp_size > 0 {
+        let ratio: i32 = (comp_size * 100) / test_len;
+        print("Ratio: ");
+        print_i32(ratio);
+        print("%\n");
+
+        let decomp_size: i32 = lz4_decompress(comp_buf, comp_size, decomp_buf, test_len + 64);
+        print("Decompressed: ");
+        print_i32(decomp_size);
+        print(" bytes\n");
+
+        if decomp_size == test_len and buffers_equal(src_buf, decomp_buf, test_len) == 1 {
+            print("PASS: Round-trip verified\n");
+        } else {
+            print("FAIL: Round-trip mismatch\n");
+        }
+    } else {
+        print("FAIL: Compression returned 0\n");
+    }
+
+    heap_free(src_buf);
+    heap_free(comp_buf);
+    heap_free(decomp_buf);
+
+    // --- Test 2: Mixed data ---
+    let test_len2: i32 = 2048;
+    let src_buf2: ptr[i32] = heap_alloc(test_len2, 1);
+    fill_mixed(src_buf2, test_len2);
+
+    let comp_max2: i32 = test_len2 + test_len2 / 4 + 16;
+    let comp_buf2: ptr[i32] = heap_alloc(comp_max2, 1);
+    let decomp_buf2: ptr[i32] = heap_alloc(test_len2 + 64, 1);
+
+    print("\n--- Test 2: Mixed data (2048 bytes) ---\n");
+    let comp_size2: i32 = lz4_compress(src_buf2, test_len2, comp_buf2, comp_max2);
+    print("Original: ");
+    print_i32(test_len2);
+    print(" bytes\n");
+    print("Compressed: ");
+    print_i32(comp_size2);
+    print(" bytes\n");
+
+    if comp_size2 > 0 {
+        let ratio2: i32 = (comp_size2 * 100) / test_len2;
+        print("Ratio: ");
+        print_i32(ratio2);
+        print("%\n");
+
+        let decomp_size2: i32 = lz4_decompress(comp_buf2, comp_size2, decomp_buf2, test_len2 + 64);
+        if decomp_size2 == test_len2 and buffers_equal(src_buf2, decomp_buf2, test_len2) == 1 {
+            print("PASS: Round-trip verified\n");
+        } else {
+            print("FAIL: Round-trip mismatch\n");
+        }
+    }
+
+    heap_free(src_buf2);
+    heap_free(comp_buf2);
+    heap_free(decomp_buf2);
+
+    // --- Test 3: Text-like data ---
+    let test_len3: i32 = 4096;
+    let src_buf3: ptr[i32] = heap_alloc(test_len3, 1);
+    fill_text_like(src_buf3, test_len3);
+
+    let comp_max3: i32 = test_len3 + test_len3 / 4 + 16;
+    let comp_buf3: ptr[i32] = heap_alloc(comp_max3, 1);
+    let decomp_buf3: ptr[i32] = heap_alloc(test_len3 + 64, 1);
+
+    print("\n--- Test 3: Text-like data (4096 bytes) ---\n");
+    let comp_size3: i32 = lz4_compress(src_buf3, test_len3, comp_buf3, comp_max3);
+    print("Original: ");
+    print_i32(test_len3);
+    print(" bytes\n");
+    print("Compressed: ");
+    print_i32(comp_size3);
+    print(" bytes\n");
+
+    if comp_size3 > 0 {
+        let ratio3: i32 = (comp_size3 * 100) / test_len3;
+        print("Ratio: ");
+        print_i32(ratio3);
+        print("%\n");
+
+        let decomp_size3: i32 = lz4_decompress(comp_buf3, comp_size3, decomp_buf3, test_len3 + 64);
+        if decomp_size3 == test_len3 and buffers_equal(src_buf3, decomp_buf3, test_len3) == 1 {
+            print("PASS: Round-trip verified\n");
+        } else {
+            print("FAIL: Round-trip mismatch\n");
+        }
+    }
+
+    heap_free(src_buf3);
+    heap_free(comp_buf3);
+    heap_free(decomp_buf3);
+
+    // --- Benchmark: compress + decompress 4KB text x 50K iterations ---
+    let bench_len: i32 = 4096;
+    let bench_src: ptr[i32] = heap_alloc(bench_len, 1);
+    fill_text_like(bench_src, bench_len);
+
+    let bench_comp_max: i32 = bench_len + bench_len / 4 + 16;
+    let bench_comp: ptr[i32] = heap_alloc(bench_comp_max, 1);
+    let bench_decomp: ptr[i32] = heap_alloc(bench_len + 64, 1);
+
+    let iterations: i32 = 50000;
+    print("\n--- Benchmark: 4KB text x 50K compress+decompress ---\n");
+
+    let t0: i64 = clock_ns();
+    let checksum: i32 = 0;
+
+    for iter: i32 in range(0, iterations) {
+        let csz: i32 = lz4_compress(bench_src, bench_len, bench_comp, bench_comp_max);
+        let dsz: i32 = lz4_decompress(bench_comp, csz, bench_decomp, bench_len + 64);
+        checksum = checksum +% csz +% dsz;
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        // Total data = iterations * bench_len * 2 (compress + decompress)
+        let total_mb: i64 = (widen(iterations) * widen(bench_len) * 2) / 1048576;
+        let throughput: i64 = (total_mb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(throughput);
+        print(" MB/s\n");
+    }
+
+    heap_free(bench_src);
+    heap_free(bench_comp);
+    heap_free(bench_decomp);
+
+    print("\n=== LZ4 complete ===\n");
+    return 0;
+}

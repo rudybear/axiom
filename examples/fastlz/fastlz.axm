@@ -1,0 +1,536 @@
+@module fastlz;
+@intent("FastLZ compression/decompression core algorithm ported from C, with verification and benchmark");
+
+// =============================================================================
+// FastLZ -- Fast byte-aligned LZ77 compression (Level 1)
+// =============================================================================
+//
+// Core algorithm: hash-based LZ77 with simple tag-byte encoding.
+//   1. Hash table (8192 entries) maps 3-byte sequences to positions
+//   2. For each position: hash 3 bytes, check for match at hash entry
+//      if match length >= 3: emit backref, else: emit literal
+//   3. Output format (Level 1):
+//      - Literal run:  tag byte = (run_len - 1), then literal bytes
+//        (run_len 1..32 encoded as 0..31 in bits 5..7 are 0)
+//      - Back-reference: tag byte encodes (match_len - 2) and high bits
+//        of distance, plus a second byte for low 8 bits of distance
+//        For longer matches: multi-byte encoding
+//
+// Simplified encoding used here (cleaner than original FastLZ):
+//   Literal run: first byte = 0x00 | (run_len - 1) if run_len <= 32
+//   Backref:     first byte = 0x20 | ((match_len - 3) << 5) ... (simplified)
+//
+// Actually: we use the real FastLZ Level 1 format:
+//   Byte 0, bits 7-5: opcode
+//     000 = literal run, bits 4-0 = run_length - 1 (1..32 literals follow)
+//     other = backref:
+//       bits 7-5 = match_length - 2 (range 0..6, so length 2..8)
+//       if bits 7-5 = 7 (all ones), next byte extends match length
+//       bits 4-0 + (next_byte << 5) = distance - 1 (13 bits, max 8191)
+//
+// GAP: No unsigned types. We use i32 with band/lshr for unsigned semantics.
+// GAP: No global state. Hash table allocated per call.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+@const fn HASH_SIZE() -> i32 { return 8192; }
+@const fn HASH_MASK() -> i32 { return 8191; }
+@const fn MAX_DISTANCE() -> i32 { return 8191; }
+@const fn MAX_FARDISTANCE() -> i32 { return 65535; }
+@const fn MIN_MATCH() -> i32 { return 3; }
+@const fn MAX_SHORT_MATCH() -> i32 { return 8; }
+@const fn MAX_LIT_RUN() -> i32 { return 32; }
+@const fn MAX_MATCH() -> i32 { return 264; }
+
+// ---------------------------------------------------------------------------
+// Hash function: hash 3 bytes at position
+// ---------------------------------------------------------------------------
+
+@pure @inline(always)
+fn fastlz_hash(b0: i32, b1: i32, b2: i32) -> i32 {
+    // Simple hash: (b0 * 17 ^ b1 * 31 ^ b2) & HASH_MASK
+    let h: i32 = (b0 *% 2654435761) +% (b1 *% 340573321) +% (b2 *% 1262308561);
+    return band(lshr(h, 19), HASH_MASK());
+}
+
+// ---------------------------------------------------------------------------
+// Helper: read 3-byte hash value at position
+// ---------------------------------------------------------------------------
+
+@pure @inline(always)
+fn hash_at(src: ptr[i32], pos: i32) -> i32 {
+    let b0: i32 = ptr_read_u8(src, pos);
+    let b1: i32 = ptr_read_u8(src, pos + 1);
+    let b2: i32 = ptr_read_u8(src, pos + 2);
+    return fastlz_hash(b0, b1, b2);
+}
+
+// ---------------------------------------------------------------------------
+// Emit a literal run to output buffer
+// Returns new output position
+// ---------------------------------------------------------------------------
+
+fn emit_literals(src: ptr[i32], src_start: i32, count: i32,
+                 dst: ptr[i32], dst_pos: i32) -> i32 {
+    let remaining: i32 = count;
+    let src_pos: i32 = src_start;
+    let p: i32 = dst_pos;
+
+    while remaining > 0 {
+        let run: i32 = remaining;
+        if run > MAX_LIT_RUN() {
+            run = MAX_LIT_RUN();
+        }
+
+        // Literal tag: bits 7-5 = 000, bits 4-0 = run_length - 1
+        ptr_write_u8(dst, p, run - 1);
+        p = p + 1;
+
+        // Copy literal bytes
+        for i: i32 in range(0, run) {
+            ptr_write_u8(dst, p, ptr_read_u8(src, src_pos));
+            p = p + 1;
+            src_pos = src_pos + 1;
+        }
+
+        remaining = remaining - run;
+    }
+
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// Emit a back-reference
+// Returns new output position
+// ---------------------------------------------------------------------------
+
+fn emit_backref(dst: ptr[i32], dst_pos: i32, distance: i32, match_len: i32) -> i32 {
+    let p: i32 = dst_pos;
+    let dist: i32 = distance - 1; // 0-based distance
+
+    if match_len <= MAX_SHORT_MATCH() {
+        // Short match: length 3..8, encoded as (length-2) in bits 7-5
+        let len_code: i32 = match_len - 2; // 1..6
+        let dist_hi: i32 = lshr(dist, 8); // high 5 bits of distance
+        let dist_lo: i32 = band(dist, 255); // low 8 bits
+
+        // Tag byte: (len_code << 5) | dist_hi
+        ptr_write_u8(dst, p, bor(shl(len_code, 5), dist_hi));
+        p = p + 1;
+        // Distance low byte
+        ptr_write_u8(dst, p, dist_lo);
+        p = p + 1;
+    } else {
+        // Long match: len_code = 7 (all ones in bits 7-5), then extended byte
+        let dist_hi: i32 = lshr(dist, 8);
+        let dist_lo: i32 = band(dist, 255);
+
+        // Tag byte: (7 << 5) | dist_hi = 0xE0 | dist_hi
+        ptr_write_u8(dst, p, bor(shl(7, 5), dist_hi));
+        p = p + 1;
+
+        // Extended match length: match_len - 9 (since 7+2=9 is the base for extended)
+        let ext_len: i32 = match_len - 9;
+        // Encode in 255-byte chunks
+        while ext_len >= 255 {
+            ptr_write_u8(dst, p, 255);
+            p = p + 1;
+            ext_len = ext_len - 255;
+        }
+        ptr_write_u8(dst, p, ext_len);
+        p = p + 1;
+
+        // Distance low byte
+        ptr_write_u8(dst, p, dist_lo);
+        p = p + 1;
+    }
+
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// FastLZ Compress (Level 1)
+// ---------------------------------------------------------------------------
+// Returns compressed size, or 0 on failure.
+
+fn fastlz_compress(src: ptr[i32], src_len: i32,
+                   dst: ptr[i32], dst_max: i32) -> i32 {
+    if src_len < 4 {
+        // Too small -- emit as literals
+        if src_len == 0 { return 0; }
+        return emit_literals(src, 0, src_len, dst, 0);
+    }
+
+    // Allocate hash table
+    let htab: ptr[i32] = heap_alloc(HASH_SIZE(), 4);
+    for i: i32 in range(0, HASH_SIZE()) {
+        ptr_write_i32(htab, i, 0);
+    }
+
+    let src_pos: i32 = 0;
+    let dst_pos: i32 = 0;
+    let anchor: i32 = 0; // start of current unmatched literal run
+
+    // Main loop: try to find matches
+    while src_pos < src_len - 2 {
+        // Hash current 3 bytes
+        let h: i32 = hash_at(src, src_pos);
+        let ref_pos: i32 = ptr_read_i32(htab, h);
+        ptr_write_i32(htab, h, src_pos);
+
+        // Check for match
+        let dist: i32 = src_pos - ref_pos;
+        if ref_pos > 0 and dist > 0 and dist <= MAX_DISTANCE() and src_pos > ref_pos {
+            // Verify that at least 3 bytes match
+            if ptr_read_u8(src, ref_pos) == ptr_read_u8(src, src_pos) and
+               ptr_read_u8(src, ref_pos + 1) == ptr_read_u8(src, src_pos + 1) and
+               ptr_read_u8(src, ref_pos + 2) == ptr_read_u8(src, src_pos + 2) {
+
+                // Extend match
+                let match_len: i32 = MIN_MATCH();
+                let max_ext: i32 = src_len - src_pos;
+                if max_ext > MAX_MATCH() {
+                    max_ext = MAX_MATCH();
+                }
+                while match_len < max_ext {
+                    if ptr_read_u8(src, ref_pos + match_len) != ptr_read_u8(src, src_pos + match_len) {
+                        break;
+                    }
+                    match_len = match_len + 1;
+                }
+
+                // Emit pending literals
+                let lit_count: i32 = src_pos - anchor;
+                if lit_count > 0 {
+                    dst_pos = emit_literals(src, anchor, lit_count, dst, dst_pos);
+                }
+
+                // Emit backref
+                dst_pos = emit_backref(dst, dst_pos, dist, match_len);
+
+                // Advance
+                src_pos = src_pos + match_len;
+                anchor = src_pos;
+
+                // Update hash for next position
+                if src_pos < src_len - 2 {
+                    let h2: i32 = hash_at(src, src_pos);
+                    ptr_write_i32(htab, h2, src_pos);
+                }
+
+                continue;
+            }
+        }
+
+        src_pos = src_pos + 1;
+    }
+
+    // Emit remaining literals
+    let final_lits: i32 = src_len - anchor;
+    if final_lits > 0 {
+        dst_pos = emit_literals(src, anchor, final_lits, dst, dst_pos);
+    }
+
+    heap_free(htab);
+    return dst_pos;
+}
+
+// ---------------------------------------------------------------------------
+// FastLZ Decompress (Level 1)
+// ---------------------------------------------------------------------------
+// Returns decompressed size, or 0 on failure.
+
+fn fastlz_decompress(src: ptr[i32], src_len: i32,
+                     dst: ptr[i32], dst_max: i32) -> i32 {
+    let src_pos: i32 = 0;
+    let dst_pos: i32 = 0;
+
+    while src_pos < src_len {
+        let tag: i32 = ptr_read_u8(src, src_pos);
+        src_pos = src_pos + 1;
+
+        // Check opcode: bits 7-5
+        let opcode: i32 = lshr(tag, 5);
+
+        if opcode == 0 {
+            // Literal run: bits 4-0 = run_length - 1
+            let run_len: i32 = band(tag, 31) + 1;
+
+            // Bounds check
+            if src_pos + run_len > src_len or dst_pos + run_len > dst_max {
+                return 0;
+            }
+
+            for i: i32 in range(0, run_len) {
+                ptr_write_u8(dst, dst_pos + i, ptr_read_u8(src, src_pos + i));
+            }
+            src_pos = src_pos + run_len;
+            dst_pos = dst_pos + run_len;
+        } else {
+            // Back-reference
+            let match_len: i32 = 0;
+            let dist_hi: i32 = band(tag, 31); // bits 4-0
+
+            if opcode == 7 {
+                // Long match: read extended length bytes
+                match_len = 9; // base: 7 + 2
+                let ext: i32 = 255;
+                while ext == 255 {
+                    if src_pos >= src_len { return 0; }
+                    ext = ptr_read_u8(src, src_pos);
+                    src_pos = src_pos + 1;
+                    match_len = match_len + ext;
+                }
+            } else {
+                // Short match: length = opcode + 2
+                match_len = opcode + 2;
+            }
+
+            // Read distance low byte
+            if src_pos >= src_len { return 0; }
+            let dist_lo: i32 = ptr_read_u8(src, src_pos);
+            src_pos = src_pos + 1;
+
+            let distance: i32 = bor(shl(dist_hi, 8), dist_lo) + 1;
+
+            // Copy match (byte-by-byte for overlapping support)
+            let match_src: i32 = dst_pos - distance;
+            if match_src < 0 or dst_pos + match_len > dst_max {
+                return 0;
+            }
+
+            for i: i32 in range(0, match_len) {
+                ptr_write_u8(dst, dst_pos + i, ptr_read_u8(dst, match_src + i));
+            }
+            dst_pos = dst_pos + match_len;
+        }
+    }
+
+    return dst_pos;
+}
+
+// ---------------------------------------------------------------------------
+// Verify: compare buffers
+// ---------------------------------------------------------------------------
+
+@pure
+fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
+    for i: i32 in range(0, len) {
+        if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Test data generators
+// ---------------------------------------------------------------------------
+
+fn fill_repeating(buf: ptr[i32], len: i32) {
+    // "ABCABCABC..." -- 3-byte repeat, very compressible
+    for i: i32 in range(0, len) {
+        ptr_write_u8(buf, i, band(i % 3 + 65, 255));
+    }
+}
+
+fn fill_mixed(buf: ptr[i32], len: i32) {
+    for i: i32 in range(0, len) {
+        let section: i32 = i / 64;
+        if section % 2 == 0 {
+            ptr_write_u8(buf, i, band(i % 6 + 65, 255));
+        } else {
+            ptr_write_u8(buf, i, band(i *% 31 + 17, 255));
+        }
+    }
+}
+
+fn fill_text(buf: ptr[i32], len: i32) {
+    // "hello world hello world ..." -- 12-byte repeat
+    let pattern_len: i32 = 12;
+    let pat: ptr[i32] = heap_alloc(pattern_len, 1);
+    ptr_write_u8(pat, 0, 104);  // h
+    ptr_write_u8(pat, 1, 101);  // e
+    ptr_write_u8(pat, 2, 108);  // l
+    ptr_write_u8(pat, 3, 108);  // l
+    ptr_write_u8(pat, 4, 111);  // o
+    ptr_write_u8(pat, 5, 32);   // space
+    ptr_write_u8(pat, 6, 119);  // w
+    ptr_write_u8(pat, 7, 111);  // o
+    ptr_write_u8(pat, 8, 114);  // r
+    ptr_write_u8(pat, 9, 108);  // l
+    ptr_write_u8(pat, 10, 100); // d
+    ptr_write_u8(pat, 11, 32);  // space
+    for i: i32 in range(0, len) {
+        ptr_write_u8(buf, i, ptr_read_u8(pat, i % pattern_len));
+    }
+    heap_free(pat);
+}
+
+// ---------------------------------------------------------------------------
+// Run one compress/decompress test
+// ---------------------------------------------------------------------------
+
+fn run_test(name_char: i32, src: ptr[i32], src_len: i32) -> i32 {
+    let comp_max: i32 = src_len + src_len / 4 + 64;
+    let comp_buf: ptr[i32] = heap_alloc(comp_max, 1);
+    let decomp_buf: ptr[i32] = heap_alloc(src_len + 64, 1);
+
+    let comp_size: i32 = fastlz_compress(src, src_len, comp_buf, comp_max);
+    print("Original: ");
+    print_i32(src_len);
+    print(" bytes, Compressed: ");
+    print_i32(comp_size);
+    print(" bytes");
+
+    let pass: i32 = 0;
+
+    if comp_size > 0 {
+        let ratio: i32 = (comp_size * 100) / src_len;
+        print(" (");
+        print_i32(ratio);
+        print("%)\n");
+
+        let decomp_size: i32 = fastlz_decompress(comp_buf, comp_size, decomp_buf, src_len + 64);
+
+        if decomp_size == src_len and buffers_equal(src, decomp_buf, src_len) == 1 {
+            print("PASS: Round-trip verified\n");
+            pass = 1;
+        } else {
+            print("FAIL: Round-trip mismatch (decompressed ");
+            print_i32(decomp_size);
+            print(" bytes)\n");
+            // Debug: show first few bytes
+            if decomp_size > 0 {
+                let show: i32 = 8;
+                if show > src_len { show = src_len; }
+                print("  Expected: ");
+                for i: i32 in range(0, show) {
+                    print_i32(ptr_read_u8(src, i));
+                    print(" ");
+                }
+                print("\n  Got:      ");
+                for i: i32 in range(0, show) {
+                    if i < decomp_size {
+                        print_i32(ptr_read_u8(decomp_buf, i));
+                    } else {
+                        print("?");
+                    }
+                    print(" ");
+                }
+                print("\n");
+            }
+        }
+    } else {
+        print("\nFAIL: Compression returned 0\n");
+    }
+
+    heap_free(comp_buf);
+    heap_free(decomp_buf);
+    return pass;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    print("=== FastLZ Compression Port ===\n");
+
+    let pass_count: i32 = 0;
+    let test_count: i32 = 0;
+
+    // --- Test 1: Repeating pattern ---
+    print("\n--- Test 1: Repeating pattern (1024 bytes) ---\n");
+    let t1_len: i32 = 1024;
+    let t1_buf: ptr[i32] = heap_alloc(t1_len, 1);
+    fill_repeating(t1_buf, t1_len);
+    pass_count = pass_count + run_test(49, t1_buf, t1_len);
+    test_count = test_count + 1;
+    heap_free(t1_buf);
+
+    // --- Test 2: Mixed data ---
+    print("\n--- Test 2: Mixed data (2048 bytes) ---\n");
+    let t2_len: i32 = 2048;
+    let t2_buf: ptr[i32] = heap_alloc(t2_len, 1);
+    fill_mixed(t2_buf, t2_len);
+    pass_count = pass_count + run_test(50, t2_buf, t2_len);
+    test_count = test_count + 1;
+    heap_free(t2_buf);
+
+    // --- Test 3: Text-like data ---
+    print("\n--- Test 3: Text-like data (4096 bytes) ---\n");
+    let t3_len: i32 = 4096;
+    let t3_buf: ptr[i32] = heap_alloc(t3_len, 1);
+    fill_text(t3_buf, t3_len);
+    pass_count = pass_count + run_test(51, t3_buf, t3_len);
+    test_count = test_count + 1;
+    heap_free(t3_buf);
+
+    // --- Test 4: Small data (16 bytes) ---
+    print("\n--- Test 4: Small data (16 bytes) ---\n");
+    let t4_len: i32 = 16;
+    let t4_buf: ptr[i32] = heap_alloc(t4_len, 1);
+    for i: i32 in range(0, t4_len) {
+        ptr_write_u8(t4_buf, i, band(i + 48, 255));
+    }
+    pass_count = pass_count + run_test(52, t4_buf, t4_len);
+    test_count = test_count + 1;
+    heap_free(t4_buf);
+
+    // Summary
+    print("\n--- Summary: ");
+    print_i32(pass_count);
+    print("/");
+    print_i32(test_count);
+    print(" tests passed ---\n");
+
+    // --- Benchmark: compress+decompress 4KB text x 50K ---
+    let bench_len: i32 = 4096;
+    let bench_src: ptr[i32] = heap_alloc(bench_len, 1);
+    fill_text(bench_src, bench_len);
+
+    let bench_comp_max: i32 = bench_len + bench_len / 4 + 64;
+    let bench_comp: ptr[i32] = heap_alloc(bench_comp_max, 1);
+    let bench_decomp: ptr[i32] = heap_alloc(bench_len + 64, 1);
+
+    let iterations: i32 = 50000;
+    print("\n--- Benchmark: 4KB text x 50K compress+decompress ---\n");
+
+    let t0: i64 = clock_ns();
+    let checksum: i32 = 0;
+
+    for iter: i32 in range(0, iterations) {
+        let csz: i32 = fastlz_compress(bench_src, bench_len, bench_comp, bench_comp_max);
+        let dsz: i32 = fastlz_decompress(bench_comp, csz, bench_decomp, bench_len + 64);
+        checksum = checksum +% csz +% dsz;
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Checksum (prevent DCE): ");
+    print_i32(checksum);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        let total_mb: i64 = (widen(iterations) * widen(bench_len) * 2) / 1048576;
+        let throughput: i64 = (total_mb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(throughput);
+        print(" MB/s\n");
+    }
+
+    heap_free(bench_src);
+    heap_free(bench_comp);
+    heap_free(bench_decomp);
+
+    print("\n=== FastLZ complete ===\n");
+    return 0;
+}

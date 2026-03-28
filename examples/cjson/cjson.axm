@@ -1,0 +1,835 @@
+@module cjson;
+@intent("cJSON-style recursive descent JSON parser ported from C, with verification and benchmark");
+
+// =============================================================================
+// cJSON Parser Core -- Recursive descent JSON parser
+// =============================================================================
+//
+// Parses a JSON byte string and counts/checksums all values found.
+// Supports: objects, arrays, strings, numbers (integers and floats),
+//           booleans (true/false), null.
+//
+// Instead of building a tree (which requires unions/structs), we count
+// values by type and compute a checksum of all numeric values found.
+// This tests the core parsing logic: character dispatch, recursive descent,
+// string scanning, number parsing.
+//
+// The input is a byte buffer (ptr[i32] with u8 access), matching how cJSON
+// receives a const char* input.
+//
+// GAP: No union types. We count values instead of building a node tree.
+// GAP: No global error state. Error flag passed via state pointer.
+// GAP: No floating-point parsing. Numbers are parsed as integers only.
+// GAP: No string escapes (\n, \t, \uXXXX). Strings are scanned for length.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Character classification helpers
+// ---------------------------------------------------------------------------
+
+@pure @inline(always)
+fn is_whitespace(c: i32) -> i32 {
+    if c == 32 { return 1; }   // space
+    if c == 9 { return 1; }    // tab
+    if c == 10 { return 1; }   // newline
+    if c == 13 { return 1; }   // carriage return
+    return 0;
+}
+
+@pure @inline(always)
+fn is_digit(c: i32) -> i32 {
+    if c >= 48 and c <= 57 { return 1; }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Parser state stored in ptr[i32]:
+//   [0] = current position in input buffer
+//   [1] = object count
+//   [2] = array count
+//   [3] = string count
+//   [4] = number count
+//   [5] = boolean count (true + false)
+//   [6] = null count
+//   [7] = total value count
+//   [8] = error flag (0 = ok, 1 = error)
+//   [9] = number checksum (sum of all parsed integer values, wrapping)
+//   [10] = max nesting depth reached
+//   [11] = current nesting depth
+// ---------------------------------------------------------------------------
+
+@const fn ST_POS() -> i32 { return 0; }
+@const fn ST_OBJ() -> i32 { return 1; }
+@const fn ST_ARR() -> i32 { return 2; }
+@const fn ST_STR() -> i32 { return 3; }
+@const fn ST_NUM() -> i32 { return 4; }
+@const fn ST_BOOL() -> i32 { return 5; }
+@const fn ST_NULL() -> i32 { return 6; }
+@const fn ST_TOTAL() -> i32 { return 7; }
+@const fn ST_ERR() -> i32 { return 8; }
+@const fn ST_CKSUM() -> i32 { return 9; }
+@const fn ST_MAX_DEPTH() -> i32 { return 10; }
+@const fn ST_CUR_DEPTH() -> i32 { return 11; }
+@const fn STATE_SIZE() -> i32 { return 12; }
+
+// ---------------------------------------------------------------------------
+// Helper: increment a state counter
+// ---------------------------------------------------------------------------
+
+@inline(always)
+fn state_inc(state: ptr[i32], idx: i32) {
+    ptr_write_i32(state, idx, ptr_read_i32(state, idx) + 1);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: skip whitespace
+// ---------------------------------------------------------------------------
+
+fn skip_ws(json: ptr[i32], state: ptr[i32], len: i32) {
+    let pos: i32 = ptr_read_i32(state, ST_POS());
+    while pos < len and is_whitespace(ptr_read_u8(json, pos)) == 1 {
+        pos = pos + 1;
+    }
+    ptr_write_i32(state, ST_POS(), pos);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: peek current byte (returns -1 if at end)
+// ---------------------------------------------------------------------------
+
+@pure @inline(always)
+fn peek(json: ptr[i32], pos: i32, len: i32) -> i32 {
+    if pos >= len { return 0 - 1; }
+    return ptr_read_u8(json, pos);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: match a literal string (e.g., "true", "false", "null")
+// ---------------------------------------------------------------------------
+
+@pure
+fn match_keyword(json: ptr[i32], pos: i32, len: i32,
+                 c0: i32, c1: i32, c2: i32, c3: i32, klen: i32) -> i32 {
+    if pos + klen > len { return 0; }
+    if ptr_read_u8(json, pos) != c0 { return 0; }
+    if ptr_read_u8(json, pos + 1) != c1 { return 0; }
+    if ptr_read_u8(json, pos + 2) != c2 { return 0; }
+    if klen >= 4 {
+        if ptr_read_u8(json, pos + 3) != c3 { return 0; }
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Forward declaration note: AXIOM supports forward references for functions.
+// parse_value calls parse_object and parse_array, and vice versa.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Parse a JSON string value (skip to closing quote)
+// ---------------------------------------------------------------------------
+
+fn parse_string(json: ptr[i32], state: ptr[i32], len: i32) {
+    let pos: i32 = ptr_read_i32(state, ST_POS());
+    // Current char should be '"'
+    if pos >= len or ptr_read_u8(json, pos) != 34 {
+        ptr_write_i32(state, ST_ERR(), 1);
+        return;
+    }
+    pos = pos + 1; // skip opening quote
+
+    // Scan to closing quote, handling escaped characters
+    while pos < len {
+        let c: i32 = ptr_read_u8(json, pos);
+        if c == 34 {
+            // Closing quote
+            pos = pos + 1;
+            ptr_write_i32(state, ST_POS(), pos);
+            return;
+        }
+        if c == 92 {
+            // Backslash escape: skip next char
+            pos = pos + 2;
+        } else {
+            pos = pos + 1;
+        }
+    }
+
+    // Unterminated string
+    ptr_write_i32(state, ST_ERR(), 1);
+    ptr_write_i32(state, ST_POS(), pos);
+}
+
+// ---------------------------------------------------------------------------
+// Parse a JSON number (integer or float, but we only extract integer part)
+// ---------------------------------------------------------------------------
+
+fn parse_number(json: ptr[i32], state: ptr[i32], len: i32) {
+    let pos: i32 = ptr_read_i32(state, ST_POS());
+    let sign: i32 = 1;
+    let value: i32 = 0;
+
+    // Optional minus sign
+    if pos < len and ptr_read_u8(json, pos) == 45 {
+        sign = 0 - 1;
+        pos = pos + 1;
+    }
+
+    // Integer part
+    let has_digits: i32 = 0;
+    while pos < len and is_digit(ptr_read_u8(json, pos)) == 1 {
+        value = value * 10 + (ptr_read_u8(json, pos) - 48);
+        pos = pos + 1;
+        has_digits = 1;
+    }
+
+    if has_digits == 0 {
+        ptr_write_i32(state, ST_ERR(), 1);
+        ptr_write_i32(state, ST_POS(), pos);
+        return;
+    }
+
+    // Skip fractional part if present
+    if pos < len and ptr_read_u8(json, pos) == 46 {
+        pos = pos + 1;
+        while pos < len and is_digit(ptr_read_u8(json, pos)) == 1 {
+            pos = pos + 1;
+        }
+    }
+
+    // Skip exponent part if present (e/E followed by optional +/- and digits)
+    if pos < len {
+        let ec: i32 = ptr_read_u8(json, pos);
+        if ec == 101 or ec == 69 {
+            pos = pos + 1;
+            if pos < len {
+                let sc: i32 = ptr_read_u8(json, pos);
+                if sc == 43 or sc == 45 {
+                    pos = pos + 1;
+                }
+            }
+            while pos < len and is_digit(ptr_read_u8(json, pos)) == 1 {
+                pos = pos + 1;
+            }
+        }
+    }
+
+    // Update checksum with integer value
+    let final_val: i32 = value * sign;
+    let cksum: i32 = ptr_read_i32(state, ST_CKSUM());
+    ptr_write_i32(state, ST_CKSUM(), cksum +% final_val);
+
+    ptr_write_i32(state, ST_POS(), pos);
+}
+
+// ---------------------------------------------------------------------------
+// Parse a JSON object: { "key": value, ... }
+// ---------------------------------------------------------------------------
+
+fn parse_object(json: ptr[i32], state: ptr[i32], len: i32) {
+    let pos: i32 = ptr_read_i32(state, ST_POS());
+    if pos >= len or ptr_read_u8(json, pos) != 123 {
+        ptr_write_i32(state, ST_ERR(), 1);
+        return;
+    }
+    pos = pos + 1; // skip '{'
+    ptr_write_i32(state, ST_POS(), pos);
+
+    // Track nesting depth
+    let depth: i32 = ptr_read_i32(state, ST_CUR_DEPTH()) + 1;
+    ptr_write_i32(state, ST_CUR_DEPTH(), depth);
+    let max_depth: i32 = ptr_read_i32(state, ST_MAX_DEPTH());
+    if depth > max_depth {
+        ptr_write_i32(state, ST_MAX_DEPTH(), depth);
+    }
+
+    state_inc(state, ST_OBJ());
+    state_inc(state, ST_TOTAL());
+
+    skip_ws(json, state, len);
+    pos = ptr_read_i32(state, ST_POS());
+
+    // Empty object?
+    if pos < len and ptr_read_u8(json, pos) == 125 {
+        ptr_write_i32(state, ST_POS(), pos + 1);
+        ptr_write_i32(state, ST_CUR_DEPTH(), depth - 1);
+        return;
+    }
+
+    let done: i32 = 0;
+    while done == 0 and ptr_read_i32(state, ST_ERR()) == 0 {
+        skip_ws(json, state, len);
+
+        // Parse key (must be a string)
+        pos = ptr_read_i32(state, ST_POS());
+        if pos >= len or ptr_read_u8(json, pos) != 34 {
+            ptr_write_i32(state, ST_ERR(), 1);
+            done = 1;
+            continue;
+        }
+        parse_string(json, state, len);
+        // Key strings are not counted as values (matching cJSON behavior)
+
+        skip_ws(json, state, len);
+
+        // Expect ':'
+        pos = ptr_read_i32(state, ST_POS());
+        if pos >= len or ptr_read_u8(json, pos) != 58 {
+            ptr_write_i32(state, ST_ERR(), 1);
+            done = 1;
+            continue;
+        }
+        ptr_write_i32(state, ST_POS(), pos + 1);
+
+        // Parse value
+        skip_ws(json, state, len);
+        parse_value(json, state, len);
+
+        skip_ws(json, state, len);
+        pos = ptr_read_i32(state, ST_POS());
+
+        if pos >= len {
+            ptr_write_i32(state, ST_ERR(), 1);
+            done = 1;
+        } else if ptr_read_u8(json, pos) == 44 {
+            // Comma -> more members
+            ptr_write_i32(state, ST_POS(), pos + 1);
+        } else if ptr_read_u8(json, pos) == 125 {
+            // Closing brace
+            ptr_write_i32(state, ST_POS(), pos + 1);
+            done = 1;
+        } else {
+            ptr_write_i32(state, ST_ERR(), 1);
+            done = 1;
+        }
+    }
+
+    ptr_write_i32(state, ST_CUR_DEPTH(), depth - 1);
+}
+
+// ---------------------------------------------------------------------------
+// Parse a JSON array: [ value, ... ]
+// ---------------------------------------------------------------------------
+
+fn parse_array(json: ptr[i32], state: ptr[i32], len: i32) {
+    let pos: i32 = ptr_read_i32(state, ST_POS());
+    if pos >= len or ptr_read_u8(json, pos) != 91 {
+        ptr_write_i32(state, ST_ERR(), 1);
+        return;
+    }
+    pos = pos + 1; // skip '['
+    ptr_write_i32(state, ST_POS(), pos);
+
+    let depth: i32 = ptr_read_i32(state, ST_CUR_DEPTH()) + 1;
+    ptr_write_i32(state, ST_CUR_DEPTH(), depth);
+    let max_depth: i32 = ptr_read_i32(state, ST_MAX_DEPTH());
+    if depth > max_depth {
+        ptr_write_i32(state, ST_MAX_DEPTH(), depth);
+    }
+
+    state_inc(state, ST_ARR());
+    state_inc(state, ST_TOTAL());
+
+    skip_ws(json, state, len);
+    pos = ptr_read_i32(state, ST_POS());
+
+    // Empty array?
+    if pos < len and ptr_read_u8(json, pos) == 93 {
+        ptr_write_i32(state, ST_POS(), pos + 1);
+        ptr_write_i32(state, ST_CUR_DEPTH(), depth - 1);
+        return;
+    }
+
+    let done: i32 = 0;
+    while done == 0 and ptr_read_i32(state, ST_ERR()) == 0 {
+        skip_ws(json, state, len);
+        parse_value(json, state, len);
+
+        skip_ws(json, state, len);
+        pos = ptr_read_i32(state, ST_POS());
+
+        if pos >= len {
+            ptr_write_i32(state, ST_ERR(), 1);
+            done = 1;
+        } else if ptr_read_u8(json, pos) == 44 {
+            ptr_write_i32(state, ST_POS(), pos + 1);
+        } else if ptr_read_u8(json, pos) == 93 {
+            ptr_write_i32(state, ST_POS(), pos + 1);
+            done = 1;
+        } else {
+            ptr_write_i32(state, ST_ERR(), 1);
+            done = 1;
+        }
+    }
+
+    ptr_write_i32(state, ST_CUR_DEPTH(), depth - 1);
+}
+
+// ---------------------------------------------------------------------------
+// Parse a JSON value (dispatch on first character)
+// ---------------------------------------------------------------------------
+
+fn parse_value(json: ptr[i32], state: ptr[i32], len: i32) {
+    skip_ws(json, state, len);
+    let pos: i32 = ptr_read_i32(state, ST_POS());
+    if pos >= len {
+        ptr_write_i32(state, ST_ERR(), 1);
+        return;
+    }
+
+    let c: i32 = ptr_read_u8(json, pos);
+
+    // Object
+    if c == 123 {
+        parse_object(json, state, len);
+        return;
+    }
+
+    // Array
+    if c == 91 {
+        parse_array(json, state, len);
+        return;
+    }
+
+    // String
+    if c == 34 {
+        parse_string(json, state, len);
+        state_inc(state, ST_STR());
+        state_inc(state, ST_TOTAL());
+        return;
+    }
+
+    // Number: digit or minus sign
+    if is_digit(c) == 1 or c == 45 {
+        parse_number(json, state, len);
+        state_inc(state, ST_NUM());
+        state_inc(state, ST_TOTAL());
+        return;
+    }
+
+    // true
+    if c == 116 {
+        if match_keyword(json, pos, len, 116, 114, 117, 101, 4) == 1 {
+            ptr_write_i32(state, ST_POS(), pos + 4);
+            state_inc(state, ST_BOOL());
+            state_inc(state, ST_TOTAL());
+            return;
+        }
+    }
+
+    // false
+    if c == 102 {
+        if pos + 5 <= len {
+            if ptr_read_u8(json, pos + 1) == 97 and
+               ptr_read_u8(json, pos + 2) == 108 and
+               ptr_read_u8(json, pos + 3) == 115 and
+               ptr_read_u8(json, pos + 4) == 101 {
+                ptr_write_i32(state, ST_POS(), pos + 5);
+                state_inc(state, ST_BOOL());
+                state_inc(state, ST_TOTAL());
+                return;
+            }
+        }
+    }
+
+    // null
+    if c == 110 {
+        if match_keyword(json, pos, len, 110, 117, 108, 108, 4) == 1 {
+            ptr_write_i32(state, ST_POS(), pos + 4);
+            state_inc(state, ST_NULL());
+            state_inc(state, ST_TOTAL());
+            return;
+        }
+    }
+
+    // Unknown character
+    ptr_write_i32(state, ST_ERR(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Build test JSON as byte buffer
+// ---------------------------------------------------------------------------
+
+// Write a string literal byte-by-byte, returns new position
+fn write_str(buf: ptr[i32], pos: i32, s0: i32, s1: i32, s2: i32, s3: i32, s4: i32, s5: i32, slen: i32) -> i32 {
+    if slen >= 1 { ptr_write_u8(buf, pos, s0); pos = pos + 1; }
+    if slen >= 2 { ptr_write_u8(buf, pos, s1); pos = pos + 1; }
+    if slen >= 3 { ptr_write_u8(buf, pos, s2); pos = pos + 1; }
+    if slen >= 4 { ptr_write_u8(buf, pos, s3); pos = pos + 1; }
+    if slen >= 5 { ptr_write_u8(buf, pos, s4); pos = pos + 1; }
+    if slen >= 6 { ptr_write_u8(buf, pos, s5); pos = pos + 1; }
+    return pos;
+}
+
+// Build a complex JSON document as bytes
+// {"name":"AXIOM","version":42,"active":true,"tags":["fast","ai","llvm"],
+//  "config":{"opt_level":3,"debug":false},"data":null,"scores":[100,200,300]}
+fn build_test_json(buf: ptr[i32]) -> i32 {
+    let p: i32 = 0;
+    // {"name":"AXIOM","version":42,"active":true,"tags":["fast","ai","llvm"],
+    //  "config":{"opt_level":3,"debug":false},"data":null,"scores":[100,200,300]}
+    // We write char by char
+    // {
+    ptr_write_u8(buf, p, 123); p = p + 1;
+    // "name"
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 110); p = p + 1; // n
+    ptr_write_u8(buf, p, 97); p = p + 1;  // a
+    ptr_write_u8(buf, p, 109); p = p + 1; // m
+    ptr_write_u8(buf, p, 101); p = p + 1; // e
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    // :
+    ptr_write_u8(buf, p, 58); p = p + 1;
+    // "AXIOM"
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 65); p = p + 1;  // A
+    ptr_write_u8(buf, p, 88); p = p + 1;  // X
+    ptr_write_u8(buf, p, 73); p = p + 1;  // I
+    ptr_write_u8(buf, p, 79); p = p + 1;  // O
+    ptr_write_u8(buf, p, 77); p = p + 1;  // M
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    // ,
+    ptr_write_u8(buf, p, 44); p = p + 1;
+    // "version":42
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 118); p = p + 1; // v
+    ptr_write_u8(buf, p, 101); p = p + 1; // e
+    ptr_write_u8(buf, p, 114); p = p + 1; // r
+    ptr_write_u8(buf, p, 115); p = p + 1; // s
+    ptr_write_u8(buf, p, 105); p = p + 1; // i
+    ptr_write_u8(buf, p, 111); p = p + 1; // o
+    ptr_write_u8(buf, p, 110); p = p + 1; // n
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 58); p = p + 1;  // :
+    ptr_write_u8(buf, p, 52); p = p + 1;  // 4
+    ptr_write_u8(buf, p, 50); p = p + 1;  // 2
+    ptr_write_u8(buf, p, 44); p = p + 1;  // ,
+    // "active":true
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 97); p = p + 1;  // a
+    ptr_write_u8(buf, p, 99); p = p + 1;  // c
+    ptr_write_u8(buf, p, 116); p = p + 1; // t
+    ptr_write_u8(buf, p, 105); p = p + 1; // i
+    ptr_write_u8(buf, p, 118); p = p + 1; // v
+    ptr_write_u8(buf, p, 101); p = p + 1; // e
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 58); p = p + 1;  // :
+    ptr_write_u8(buf, p, 116); p = p + 1; // t
+    ptr_write_u8(buf, p, 114); p = p + 1; // r
+    ptr_write_u8(buf, p, 117); p = p + 1; // u
+    ptr_write_u8(buf, p, 101); p = p + 1; // e
+    ptr_write_u8(buf, p, 44); p = p + 1;  // ,
+    // "tags":["fast","ai","llvm"]
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 116); p = p + 1; // t
+    ptr_write_u8(buf, p, 97); p = p + 1;  // a
+    ptr_write_u8(buf, p, 103); p = p + 1; // g
+    ptr_write_u8(buf, p, 115); p = p + 1; // s
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 58); p = p + 1;  // :
+    ptr_write_u8(buf, p, 91); p = p + 1;  // [
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 102); p = p + 1; // f
+    ptr_write_u8(buf, p, 97); p = p + 1;  // a
+    ptr_write_u8(buf, p, 115); p = p + 1; // s
+    ptr_write_u8(buf, p, 116); p = p + 1; // t
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 44); p = p + 1;  // ,
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 97); p = p + 1;  // a
+    ptr_write_u8(buf, p, 105); p = p + 1; // i
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 44); p = p + 1;  // ,
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 108); p = p + 1; // l
+    ptr_write_u8(buf, p, 108); p = p + 1; // l
+    ptr_write_u8(buf, p, 118); p = p + 1; // v
+    ptr_write_u8(buf, p, 109); p = p + 1; // m
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 93); p = p + 1;  // ]
+    ptr_write_u8(buf, p, 44); p = p + 1;  // ,
+    // "config":{"opt_level":3,"debug":false}
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 99); p = p + 1;  // c
+    ptr_write_u8(buf, p, 111); p = p + 1; // o
+    ptr_write_u8(buf, p, 110); p = p + 1; // n
+    ptr_write_u8(buf, p, 102); p = p + 1; // f
+    ptr_write_u8(buf, p, 105); p = p + 1; // i
+    ptr_write_u8(buf, p, 103); p = p + 1; // g
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 58); p = p + 1;  // :
+    ptr_write_u8(buf, p, 123); p = p + 1; // {
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 111); p = p + 1; // o
+    ptr_write_u8(buf, p, 112); p = p + 1; // p
+    ptr_write_u8(buf, p, 116); p = p + 1; // t
+    ptr_write_u8(buf, p, 95); p = p + 1;  // _
+    ptr_write_u8(buf, p, 108); p = p + 1; // l
+    ptr_write_u8(buf, p, 101); p = p + 1; // e
+    ptr_write_u8(buf, p, 118); p = p + 1; // v
+    ptr_write_u8(buf, p, 101); p = p + 1; // e
+    ptr_write_u8(buf, p, 108); p = p + 1; // l
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 58); p = p + 1;  // :
+    ptr_write_u8(buf, p, 51); p = p + 1;  // 3
+    ptr_write_u8(buf, p, 44); p = p + 1;  // ,
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 100); p = p + 1; // d
+    ptr_write_u8(buf, p, 101); p = p + 1; // e
+    ptr_write_u8(buf, p, 98); p = p + 1;  // b
+    ptr_write_u8(buf, p, 117); p = p + 1; // u
+    ptr_write_u8(buf, p, 103); p = p + 1; // g
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 58); p = p + 1;  // :
+    ptr_write_u8(buf, p, 102); p = p + 1; // f
+    ptr_write_u8(buf, p, 97); p = p + 1;  // a
+    ptr_write_u8(buf, p, 108); p = p + 1; // l
+    ptr_write_u8(buf, p, 115); p = p + 1; // s
+    ptr_write_u8(buf, p, 101); p = p + 1; // e
+    ptr_write_u8(buf, p, 125); p = p + 1; // }
+    ptr_write_u8(buf, p, 44); p = p + 1;  // ,
+    // "data":null
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 100); p = p + 1; // d
+    ptr_write_u8(buf, p, 97); p = p + 1;  // a
+    ptr_write_u8(buf, p, 116); p = p + 1; // t
+    ptr_write_u8(buf, p, 97); p = p + 1;  // a
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 58); p = p + 1;  // :
+    ptr_write_u8(buf, p, 110); p = p + 1; // n
+    ptr_write_u8(buf, p, 117); p = p + 1; // u
+    ptr_write_u8(buf, p, 108); p = p + 1; // l
+    ptr_write_u8(buf, p, 108); p = p + 1; // l
+    ptr_write_u8(buf, p, 44); p = p + 1;  // ,
+    // "scores":[100,200,300]
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 115); p = p + 1; // s
+    ptr_write_u8(buf, p, 99); p = p + 1;  // c
+    ptr_write_u8(buf, p, 111); p = p + 1; // o
+    ptr_write_u8(buf, p, 114); p = p + 1; // r
+    ptr_write_u8(buf, p, 101); p = p + 1; // e
+    ptr_write_u8(buf, p, 115); p = p + 1; // s
+    ptr_write_u8(buf, p, 34); p = p + 1;
+    ptr_write_u8(buf, p, 58); p = p + 1;  // :
+    ptr_write_u8(buf, p, 91); p = p + 1;  // [
+    ptr_write_u8(buf, p, 49); p = p + 1;  // 1
+    ptr_write_u8(buf, p, 48); p = p + 1;  // 0
+    ptr_write_u8(buf, p, 48); p = p + 1;  // 0
+    ptr_write_u8(buf, p, 44); p = p + 1;  // ,
+    ptr_write_u8(buf, p, 50); p = p + 1;  // 2
+    ptr_write_u8(buf, p, 48); p = p + 1;  // 0
+    ptr_write_u8(buf, p, 48); p = p + 1;  // 0
+    ptr_write_u8(buf, p, 44); p = p + 1;  // ,
+    ptr_write_u8(buf, p, 51); p = p + 1;  // 3
+    ptr_write_u8(buf, p, 48); p = p + 1;  // 0
+    ptr_write_u8(buf, p, 48); p = p + 1;  // 0
+    ptr_write_u8(buf, p, 93); p = p + 1;  // ]
+    // }
+    ptr_write_u8(buf, p, 125); p = p + 1;
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// Build a larger repeated JSON for benchmarking
+// Repeats the test JSON multiple times inside an array: [doc, doc, ...]
+// ---------------------------------------------------------------------------
+
+fn build_bench_json(buf: ptr[i32], repeats: i32) -> i32 {
+    // Build one document first
+    let one_doc: ptr[i32] = heap_alloc(512, 1);
+    let one_len: i32 = build_test_json(one_doc);
+
+    let p: i32 = 0;
+    ptr_write_u8(buf, p, 91); p = p + 1; // [
+
+    for r: i32 in range(0, repeats) {
+        if r > 0 {
+            ptr_write_u8(buf, p, 44); p = p + 1; // ,
+        }
+        for i: i32 in range(0, one_len) {
+            ptr_write_u8(buf, p, ptr_read_u8(one_doc, i));
+            p = p + 1;
+        }
+    }
+
+    ptr_write_u8(buf, p, 93); p = p + 1; // ]
+
+    heap_free(one_doc);
+    return p;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> i32 {
+    print("=== cJSON Parser Port ===\n");
+
+    // --- Test 1: Parse a complex JSON document ---
+    let json_buf: ptr[i32] = heap_alloc(1024, 1);
+    let json_len: i32 = build_test_json(json_buf);
+
+    print("\n--- Test 1: Complex JSON document ---\n");
+    print("JSON length: ");
+    print_i32(json_len);
+    print(" bytes\n");
+
+    let state: ptr[i32] = heap_alloc(STATE_SIZE(), 4);
+    for i: i32 in range(0, STATE_SIZE()) {
+        ptr_write_i32(state, i, 0);
+    }
+
+    parse_value(json_buf, state, json_len);
+
+    let err: i32 = ptr_read_i32(state, ST_ERR());
+    if err == 0 {
+        print("Parse: OK\n");
+    } else {
+        print("Parse: ERROR\n");
+    }
+
+    print("Objects:  ");
+    print_i32(ptr_read_i32(state, ST_OBJ()));
+    print("\n");
+    print("Arrays:   ");
+    print_i32(ptr_read_i32(state, ST_ARR()));
+    print("\n");
+    print("Strings:  ");
+    print_i32(ptr_read_i32(state, ST_STR()));
+    print("\n");
+    print("Numbers:  ");
+    print_i32(ptr_read_i32(state, ST_NUM()));
+    print("\n");
+    print("Booleans: ");
+    print_i32(ptr_read_i32(state, ST_BOOL()));
+    print("\n");
+    print("Nulls:    ");
+    print_i32(ptr_read_i32(state, ST_NULL()));
+    print("\n");
+    print("Total:    ");
+    print_i32(ptr_read_i32(state, ST_TOTAL()));
+    print("\n");
+    print("Checksum: ");
+    print_i32(ptr_read_i32(state, ST_CKSUM()));
+    print("\n");
+    print("Max depth: ");
+    print_i32(ptr_read_i32(state, ST_MAX_DEPTH()));
+    print("\n");
+
+    // Expected: 2 objects, 2 arrays, 4 strings (AXIOM, fast, ai, llvm),
+    //           4 numbers (42, 3, 100, 200, 300), 2 booleans (true, false), 1 null
+    // Total values = 2 + 2 + 4 + 5 + 2 + 1 = 16
+    // Number checksum = 42 + 3 + 100 + 200 + 300 = 645
+    let total: i32 = ptr_read_i32(state, ST_TOTAL());
+    let cksum: i32 = ptr_read_i32(state, ST_CKSUM());
+    if err == 0 and total == 16 and cksum == 645 {
+        print("PASS: Correct parse (16 values, checksum 645)\n");
+    } else {
+        print("FAIL: Expected 16 values with checksum 645\n");
+    }
+
+    heap_free(state);
+    heap_free(json_buf);
+
+    // --- Test 2: Empty structures ---
+    print("\n--- Test 2: Edge cases ---\n");
+
+    // Test empty object: {}
+    let empty_obj: ptr[i32] = heap_alloc(8, 1);
+    ptr_write_u8(empty_obj, 0, 123); // {
+    ptr_write_u8(empty_obj, 1, 125); // }
+
+    let state2: ptr[i32] = heap_alloc(STATE_SIZE(), 4);
+    for i: i32 in range(0, STATE_SIZE()) {
+        ptr_write_i32(state2, i, 0);
+    }
+    parse_value(empty_obj, state2, 2);
+    if ptr_read_i32(state2, ST_ERR()) == 0 and ptr_read_i32(state2, ST_OBJ()) == 1 {
+        print("PASS: Empty object {}\n");
+    } else {
+        print("FAIL: Empty object\n");
+    }
+
+    // Test empty array: []
+    ptr_write_u8(empty_obj, 0, 91); // [
+    ptr_write_u8(empty_obj, 1, 93); // ]
+    for i: i32 in range(0, STATE_SIZE()) {
+        ptr_write_i32(state2, i, 0);
+    }
+    parse_value(empty_obj, state2, 2);
+    if ptr_read_i32(state2, ST_ERR()) == 0 and ptr_read_i32(state2, ST_ARR()) == 1 {
+        print("PASS: Empty array []\n");
+    } else {
+        print("FAIL: Empty array\n");
+    }
+
+    // Test negative number: -42
+    ptr_write_u8(empty_obj, 0, 45); // -
+    ptr_write_u8(empty_obj, 1, 52); // 4
+    ptr_write_u8(empty_obj, 2, 50); // 2
+    for i: i32 in range(0, STATE_SIZE()) {
+        ptr_write_i32(state2, i, 0);
+    }
+    parse_value(empty_obj, state2, 3);
+    let neg_cksum: i32 = ptr_read_i32(state2, ST_CKSUM());
+    if ptr_read_i32(state2, ST_ERR()) == 0 and neg_cksum == 0 - 42 {
+        print("PASS: Negative number -42\n");
+    } else {
+        print("FAIL: Negative number (got checksum ");
+        print_i32(neg_cksum);
+        print(")\n");
+    }
+
+    heap_free(state2);
+    heap_free(empty_obj);
+
+    // --- Benchmark: parse large JSON array 100K times ---
+    let repeats: i32 = 10;
+    let bench_max: i32 = 8192;
+    let bench_json: ptr[i32] = heap_alloc(bench_max, 1);
+    let bench_len: i32 = build_bench_json(bench_json, repeats);
+
+    let iterations: i32 = 100000;
+    print("\n--- Benchmark: ");
+    print_i32(bench_len);
+    print(" byte JSON x ");
+    print_i32(iterations);
+    print(" parses ---\n");
+
+    let bench_state: ptr[i32] = heap_alloc(STATE_SIZE(), 4);
+
+    let t0: i64 = clock_ns();
+    let total_values: i32 = 0;
+
+    for iter: i32 in range(0, iterations) {
+        for i: i32 in range(0, STATE_SIZE()) {
+            ptr_write_i32(bench_state, i, 0);
+        }
+        parse_value(bench_json, bench_state, bench_len);
+        total_values = total_values +% ptr_read_i32(bench_state, ST_TOTAL());
+    }
+
+    let t1: i64 = clock_ns();
+    let elapsed_ms: i64 = (t1 - t0) / 1000000;
+
+    print("Elapsed: ");
+    print_i64(elapsed_ms);
+    print(" ms\n");
+    print("Total values parsed (prevent DCE): ");
+    print_i32(total_values);
+    print("\n");
+
+    if elapsed_ms > 0 {
+        let total_mb: i64 = (widen(iterations) * widen(bench_len)) / 1048576;
+        let throughput: i64 = (total_mb * 1000) / elapsed_ms;
+        print("Throughput: ");
+        print_i64(throughput);
+        print(" MB/s\n");
+    }
+
+    heap_free(bench_state);
+    heap_free(bench_json);
+
+    print("\n=== cJSON Parser complete ===\n");
+    return 0;
+}
