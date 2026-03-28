@@ -228,6 +228,12 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+
+    /// Initialize a new AXIOM project with axiom.toml and src/main.axm
+    Init {
+        /// Project name (creates a new directory with this name)
+        name: String,
+    },
 }
 
 /// Process `@include "path.axm"` directives in source code.
@@ -1070,6 +1076,11 @@ fn main() -> i32 {{
         Commands::Header { input, output } => {
             run_header(&input, output.as_deref())
         }
+
+        // Package manager: initialize a new AXIOM project
+        Commands::Init { name } => {
+            run_init(&name)
+        }
     }
 }
 
@@ -1348,6 +1359,60 @@ fn parse_axiom_toml(input: &str) -> miette::Result<AxiomManifest> {
         },
         dependencies: deps,
     })
+}
+
+/// Initialize a new AXIOM project: create directory, axiom.toml, and src/main.axm.
+fn run_init(name: &str) -> miette::Result<()> {
+    let project_dir = Path::new(name);
+
+    if project_dir.exists() {
+        return Err(miette::miette!("Directory '{}' already exists", name));
+    }
+
+    // Create project directory and src/ subdirectory
+    let src_dir = project_dir.join("src");
+    std::fs::create_dir_all(&src_dir)
+        .map_err(|e| miette::miette!("Failed to create project directory '{}': {}", name, e))?;
+
+    // Write axiom.toml
+    let manifest_content = format!(
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[dependencies]\n"
+    );
+    let manifest_path = project_dir.join("axiom.toml");
+    std::fs::write(&manifest_path, &manifest_content)
+        .map_err(|e| miette::miette!("Failed to write axiom.toml: {e}"))?;
+
+    // Write src/main.axm using the @strict template
+    let main_template = format!(
+        r#"@strict;
+@module {name};
+
+@intent("example helper function — replace with your implementation")
+@precondition(true)
+@postcondition(true)
+fn example(x: i32) -> i32 {{
+    return x;
+}}
+
+@intent("main entry point")
+fn main() -> i32 {{
+    print_i32(example(42));
+    return 0;
+}}
+"#
+    );
+    let main_path = src_dir.join("main.axm");
+    std::fs::write(&main_path, &main_template)
+        .map_err(|e| miette::miette!("Failed to write src/main.axm: {e}"))?;
+
+    eprintln!("[AXIOM Init] Created project '{name}'");
+    eprintln!("  {}/axiom.toml", name);
+    eprintln!("  {}/src/main.axm", name);
+    eprintln!("\nNext steps:");
+    eprintln!("  cd {name}");
+    eprintln!("  axiom build");
+
+    Ok(())
 }
 
 /// Find all .axm files in a directory (non-recursive).
