@@ -987,6 +987,13 @@ fn codegen_inner(
             "declare i32 @memcmp(ptr, ptr, i64)"
         );
     }
+    // snprintf is always available (used by format_* builtins)
+    if ctx.needs_printf {
+        let _ = writeln!(
+            ctx.output,
+            "declare i32 @snprintf(ptr, i64, ptr, ...)"
+        );
+    }
     if ctx.needs_fshl_i32 {
         let _ = writeln!(
             ctx.output,
@@ -4565,6 +4572,13 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "normalize" => return emit_builtin_normalize(ctx, args),
             "reflect" => return emit_builtin_reflect(ctx, args),
             "lerp" => return emit_builtin_lerp(ctx, args),
+            // SIMD intrinsics
+            "simd_min" => return emit_builtin_simd_binary(ctx, args, "llvm.minnum"),
+            "simd_max" => return emit_builtin_simd_binary(ctx, args, "llvm.maxnum"),
+            "simd_abs" => return emit_builtin_simd_unary(ctx, args, "llvm.fabs"),
+            "simd_sqrt" => return emit_builtin_simd_unary(ctx, args, "llvm.sqrt"),
+            "simd_floor" => return emit_builtin_simd_unary(ctx, args, "llvm.floor"),
+            "simd_ceil" => return emit_builtin_simd_unary(ctx, args, "llvm.ceil"),
             // Matrix builtins
             "mat4_identity" => return emit_builtin_mat4_identity(ctx, args),
             "mat3_identity" => return emit_builtin_mat3_identity(ctx, args),
@@ -4604,6 +4618,10 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "memset" => return emit_builtin_memset_user(ctx, args),
             "memmove" => return emit_builtin_memmove(ctx, args),
             "memcmp" => return emit_builtin_memcmp(ctx, args),
+            "format_i32" => return emit_builtin_format(ctx, args, "%d", "i32"),
+            "format_i64" => return emit_builtin_format(ctx, args, "%lld", "i64"),
+            "format_f64" => return emit_builtin_format(ctx, args, "%f", "double"),
+            "format_hex" => return emit_builtin_format(ctx, args, "%x", "i32"),
             // I/O builtins
             "flush" => return emit_builtin_flush(ctx, args),
             // Typed function pointer call
@@ -10897,6 +10915,57 @@ fn emit_builtin_lerp(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
     }
 }
 
+/// Emit a SIMD binary intrinsic (e.g., simd_min, simd_max).
+fn emit_builtin_simd_binary(ctx: &mut CodegenContext, args: &[HirExpr], intrinsic_base: &str) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("SIMD binary op requires 2 arguments"),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue { reg: "0".to_string(), ty: "<4 x double>".to_string() };
+    }
+    let a = emit_expr(ctx, &args[0], None);
+    let b = emit_expr(ctx, &args[1], None);
+    let vt = &a.ty;
+    let intrinsic = format!("@{intrinsic_base}.{}", vt.replace(" ", "").replace("<", "v").replace(">", "").replace("x", ""));
+    // Actually LLVM intrinsic naming: @llvm.minnum.v4f64
+    let llvm_name = match vt.as_str() {
+        "<4 x double>" => format!("@{intrinsic_base}.v4f64"),
+        "<2 x double>" => format!("@{intrinsic_base}.v2f64"),
+        "<4 x float>" => format!("@{intrinsic_base}.v4f32"),
+        "<2 x float>" => format!("@{intrinsic_base}.v2f32"),
+        _ => format!("@{intrinsic_base}.v4f64"),
+    };
+    ctx.math_decls.insert(format!("declare {vt} {llvm_name}({vt}, {vt})"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = call {vt} {llvm_name}({vt} {}, {vt} {})", a.reg, b.reg));
+    LlvmValue { reg: result, ty: vt.clone() }
+}
+
+/// Emit a SIMD unary intrinsic (e.g., simd_abs, simd_sqrt).
+fn emit_builtin_simd_unary(ctx: &mut CodegenContext, args: &[HirExpr], intrinsic_base: &str) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("SIMD unary op requires 1 argument"),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue { reg: "0".to_string(), ty: "<4 x double>".to_string() };
+    }
+    let a = emit_expr(ctx, &args[0], None);
+    let vt = &a.ty;
+    let llvm_name = match vt.as_str() {
+        "<4 x double>" => format!("@{intrinsic_base}.v4f64"),
+        "<2 x double>" => format!("@{intrinsic_base}.v2f64"),
+        "<4 x float>" => format!("@{intrinsic_base}.v4f32"),
+        "<2 x float>" => format!("@{intrinsic_base}.v2f32"),
+        _ => format!("@{intrinsic_base}.v4f64"),
+    };
+    ctx.math_decls.insert(format!("declare {vt} {llvm_name}({vt})"));
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!("{result} = call {vt} {llvm_name}({vt} {})", a.reg));
+    LlvmValue { reg: result, ty: vt.clone() }
+}
+
 /// Emit built-in `assert(condition)` or `assert(condition, "message")`.
 ///
 /// If `condition` is false at runtime, prints a failure message and calls `abort()`.
@@ -11402,6 +11471,34 @@ fn emit_builtin_memcmp(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue 
         reg: result_reg,
         ty: "i32".to_string(),
     }
+}
+
+/// Generic string format builtin: format_i32, format_f64, format_hex, format_i64.
+/// Writes formatted value to buffer via snprintf. Returns chars written.
+fn emit_builtin_format(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+    fmt: &str,
+    val_type: &str,
+) -> LlvmValue {
+    if args.len() != 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: format!("format builtin requires 2 arguments (buf, value)"),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue { reg: "0".to_string(), ty: "i32".to_string() };
+    }
+    let buf = emit_expr(ctx, &args[0], Some("ptr"));
+    let val = emit_expr(ctx, &args[1], Some(val_type));
+    let fmt_idx = ctx.string_literals.len();
+    ctx.string_literals.push(fmt.to_string());
+    ctx.needs_printf = true; // snprintf has same declaration pattern
+    let result = ctx.fresh_reg();
+    ctx.emit(&format!(
+        "{result} = call i32 (ptr, i64, ptr, ...) @snprintf(ptr {}, i64 256, ptr @.str.{fmt_idx}, {} {})",
+        buf.reg, val.ty, val.reg
+    ));
+    LlvmValue { reg: result, ty: "i32".to_string() }
 }
 
 // ---------------------------------------------------------------------------
