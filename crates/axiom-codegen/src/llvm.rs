@@ -262,6 +262,8 @@ struct CodegenContext {
     needs_fshr_i64: bool,
     /// Whether the `@llvm.memmove.p0.p0.i64` intrinsic is needed.
     needs_memmove: bool,
+    /// Whether `@fflush` is needed (flush builtin or debug-mode auto-flush after print).
+    needs_fflush: bool,
     /// Set of SSA register names that hold unsigned integer values.
     /// Used to select unsigned operations (udiv, urem, icmp ult, etc.) in emit_binary_op.
     unsigned_regs: std::collections::HashSet<String>,
@@ -346,6 +348,7 @@ impl CodegenContext {
             needs_fshl_i64: false,
             needs_fshr_i64: false,
             needs_memmove: false,
+            needs_fflush: false,
             unsigned_regs: std::collections::HashSet::new(),
         }
     }
@@ -976,6 +979,9 @@ fn codegen_inner(
             ctx.output,
             "declare i64 @llvm.fshr.i64(i64, i64, i64)"
         );
+    }
+    if ctx.needs_fflush {
+        let _ = writeln!(ctx.output, "declare i32 @fflush(ptr)");
     }
     // Emit allocator function declarations with LLVM allocator attributes.
     // These attributes (allockind, alloc-family) enable LLVM's optimizer to:
@@ -4453,6 +4459,10 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "memcpy" => return emit_builtin_memcpy_user(ctx, args),
             "memset" => return emit_builtin_memset_user(ctx, args),
             "memmove" => return emit_builtin_memmove(ctx, args),
+            // I/O builtins
+            "flush" => return emit_builtin_flush(ctx, args),
+            // Typed function pointer call
+            "call_ptr" => return emit_builtin_call_ptr(ctx, args),
             _ => {}
         }
 
@@ -4480,6 +4490,38 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
                 };
             }
         };
+
+        // Argument count validation: catch mismatched argument counts early.
+        if !func_info.is_variadic && args.len() != func_info.param_types.len() {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: format!(
+                    "function '{}' expects {} argument(s), got {}",
+                    name,
+                    func_info.param_types.len(),
+                    args.len()
+                ),
+                context: "function call".to_string(),
+            });
+            return LlvmValue {
+                reg: "0".to_string(),
+                ty: func_info.return_type.clone(),
+            };
+        }
+        if func_info.is_variadic && args.len() < func_info.param_types.len() {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: format!(
+                    "variadic function '{}' requires at least {} argument(s), got {}",
+                    name,
+                    func_info.param_types.len(),
+                    args.len()
+                ),
+                context: "function call".to_string(),
+            });
+            return LlvmValue {
+                reg: "0".to_string(),
+                ty: func_info.return_type.clone(),
+            };
+        }
 
         // Optimization #5: @const compile-time evaluation.
         // If the callee is @const and all arguments are integer/float literals,
@@ -4669,6 +4711,9 @@ fn emit_builtin_print(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
     let val = emit_expr(ctx, &args[0], Some("ptr"));
     let result_reg = ctx.fresh_reg();
     ctx.emit(&format!("{result_reg} = call i32 @puts(ptr {})", val.reg));
+    if ctx.debug_mode {
+        emit_debug_fflush(ctx);
+    }
     LlvmValue {
         reg: result_reg,
         ty: "i32".to_string(),
@@ -4697,6 +4742,9 @@ fn emit_builtin_print_i64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVal
         "{result_reg} = call i32 (ptr, ...) @printf(ptr @.fmt.i64, i64 {})",
         val.reg
     ));
+    if ctx.debug_mode {
+        emit_debug_fflush(ctx);
+    }
     LlvmValue {
         reg: result_reg,
         ty: "i32".to_string(),
@@ -4750,6 +4798,9 @@ fn emit_builtin_print_i32(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVal
         "{result_reg} = call i32 (ptr, ...) @printf(ptr @.fmt.i32, i32 {})",
         val.reg
     ));
+    if ctx.debug_mode {
+        emit_debug_fflush(ctx);
+    }
     LlvmValue {
         reg: result_reg,
         ty: "i32".to_string(),
@@ -4778,6 +4829,9 @@ fn emit_builtin_print_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmVal
         "{result_reg} = call i32 (ptr, ...) @printf(ptr @.fmt.f64, double {})",
         val.reg
     ));
+    if ctx.debug_mode {
+        emit_debug_fflush(ctx);
+    }
     LlvmValue {
         reg: result_reg,
         ty: "i32".to_string(),
@@ -7614,6 +7668,156 @@ fn emit_builtin_call_fn_ptr_f64(ctx: &mut CodegenContext, args: &[HirExpr]) -> L
     }
 }
 
+/// Emit built-in `flush()` -- calls C `fflush(NULL)` to flush all output streams.
+fn emit_builtin_flush(ctx: &mut CodegenContext, _args: &[HirExpr]) -> LlvmValue {
+    ctx.needs_fflush = true;
+    let _r = ctx.fresh_reg();
+    ctx.emit(&format!("{_r} = call i32 @fflush(ptr null)"));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "i32".to_string(),
+    }
+}
+
+/// Helper: emit a single `fflush(NULL)` call to flush stdout (for debug mode auto-flush).
+fn emit_debug_fflush(ctx: &mut CodegenContext) {
+    ctx.needs_fflush = true;
+    let _r = ctx.fresh_reg();
+    ctx.emit(&format!("{_r} = call i32 @fflush(ptr null)"));
+}
+
+/// Emit built-in `call_ptr(sig, fptr, args...)` -- typed function pointer call.
+///
+/// The first argument is a string literal specifying the signature (e.g., `"i32(i32)"`,
+/// `"void(f32,f32,f32)"`, `"f64()"`). The second argument is the function pointer.
+/// Remaining arguments are the call arguments.
+fn emit_builtin_call_ptr(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() < 2 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "call_ptr() requires at least 2 arguments (signature string, function pointer)"
+                .to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+
+    // First arg: signature string like "void(i32)" or "i32(f32,f32,f32)"
+    let sig = match &args[0].kind {
+        HirExprKind::StringLiteral { value } => value.clone(),
+        _ => {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: "call_ptr() first argument must be a string literal signature (e.g., \"i32(i32)\")"
+                    .to_string(),
+                context: "built-in call".to_string(),
+            });
+            return LlvmValue {
+                reg: "0".to_string(),
+                ty: "i32".to_string(),
+            };
+        }
+    };
+
+    // Parse signature: "ret_type(param_types...)"
+    let (ret_type, param_types) = parse_call_ptr_sig(&sig);
+
+    // Second arg: function pointer
+    let fptr = emit_expr(ctx, &args[1], Some("ptr"));
+
+    // Remaining args: call arguments
+    let mut call_args = Vec::new();
+    for (i, param_type) in param_types.iter().enumerate() {
+        if i + 2 >= args.len() {
+            break;
+        }
+        let val = emit_expr(ctx, &args[i + 2], Some(param_type));
+        call_args.push(format!("{param_type} {}", val.reg));
+    }
+
+    let args_str = call_args.join(", ");
+
+    if ret_type == "void" {
+        ctx.emit(&format!(
+            "call void {}({args_str})",
+            fptr.reg
+        ));
+        LlvmValue {
+            reg: "0".to_string(),
+            ty: "void".to_string(),
+        }
+    } else {
+        let result = ctx.fresh_reg();
+        ctx.emit(&format!(
+            "{result} = call {ret_type} {}({args_str})",
+            fptr.reg
+        ));
+        LlvmValue {
+            reg: result,
+            ty: ret_type,
+        }
+    }
+}
+
+/// Parse a call_ptr signature string like `"void(i32,f32)"` into LLVM types.
+///
+/// Returns `(return_llvm_type, vec_of_param_llvm_types)`.
+fn parse_call_ptr_sig(sig: &str) -> (String, Vec<String>) {
+    let paren = sig.find('(').unwrap_or(sig.len());
+    let ret = sig[..paren].trim();
+    let ret_llvm = match ret {
+        "void" => "void",
+        "i8" => "i8",
+        "i16" => "i16",
+        "i32" => "i32",
+        "i64" => "i64",
+        "u8" => "i8",
+        "u16" => "i16",
+        "u32" => "i32",
+        "u64" => "i64",
+        "f32" => "float",
+        "f64" => "double",
+        "ptr" => "ptr",
+        "bool" => "i1",
+        _ => "i32",
+    }
+    .to_string();
+
+    if paren >= sig.len() || !sig.ends_with(')') {
+        return (ret_llvm, Vec::new());
+    }
+
+    let params_str = &sig[paren + 1..sig.len() - 1]; // strip parens
+    let params: Vec<String> = if params_str.trim().is_empty() {
+        Vec::new()
+    } else {
+        params_str
+            .split(',')
+            .map(|p| {
+                match p.trim() {
+                    "i8" => "i8",
+                    "i16" => "i16",
+                    "i32" => "i32",
+                    "i64" => "i64",
+                    "u8" => "i8",
+                    "u16" => "i16",
+                    "u32" => "i32",
+                    "u64" => "i64",
+                    "f32" => "float",
+                    "f64" => "double",
+                    "ptr" => "ptr",
+                    "bool" => "i1",
+                    _ => "i32",
+                }
+                .to_string()
+            })
+            .collect()
+    };
+
+    (ret_llvm, params)
+}
+
 // ---------------------------------------------------------------------------
 // Pointer read/write builtins
 // ---------------------------------------------------------------------------
@@ -7838,11 +8042,16 @@ fn emit_builtin_ptr_write_f32(
 
     let ptr_val = emit_expr(ctx, &args[0], Some("ptr"));
     let index = emit_expr(ctx, &args[1], Some("i32"));
-    let val = emit_expr(ctx, &args[2], Some("double"));
+    let val = emit_expr(ctx, &args[2], None);
 
-    // Truncate f64 to f32.
-    let f32_reg = ctx.fresh_reg();
-    ctx.emit(&format!("{f32_reg} = fptrunc double {} to float", val.reg));
+    // Only truncate if the value is not already f32 (float).
+    let f32_val = if val.ty == "float" {
+        val.reg.clone()
+    } else {
+        let trunc = ctx.fresh_reg();
+        ctx.emit(&format!("{trunc} = fptrunc double {} to float", val.reg));
+        trunc
+    };
 
     // Widen index to i64 for GEP.
     let idx64 = ctx.fresh_reg();
@@ -7854,7 +8063,7 @@ fn emit_builtin_ptr_write_f32(
         ptr_val.reg
     ));
 
-    ctx.emit(&format!("store float {f32_reg}, ptr {gep_reg}"));
+    ctx.emit(&format!("store float {f32_val}, ptr {gep_reg}"));
     LlvmValue {
         reg: "0".to_string(),
         ty: "void".to_string(),
