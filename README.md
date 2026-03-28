@@ -6,7 +6,7 @@ A programming language designed as the canonical transfer format between AI agen
 
 > **This is NOT a language for humans to program in. This is a language for AI agents to communicate optimized computation through.**
 
-> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 21 real-world C project ports (~60K+ combined GitHub stars) all at parity or faster. ~40,100 LOC. 534 tests. 115/115 benchmarks pass (1.01x avg vs C). ALL 47 milestones COMPLETE.
+> **AXIOM beats C (-O3 -march=native -ffast-math) by 3% overall across 20 real-world benchmarks.** 21 real-world C project ports (~60K+ combined GitHub stars) all at parity or faster. ~40,100 LOC. 545 tests. 115/115 benchmarks pass (1.01x avg vs C). ALL 47 milestones COMPLETE.
 
 ## Why AXIOM Exists
 
@@ -210,7 +210,7 @@ AXIOM Source (.axm)
    HIR LOWERING (25 tests)  Validated annotations, type checking,
        |                     @strict enforcement, pre/postcondition lowering
        v
-   LLVM IR GEN (154 tests)  Optimized IR text with:
+   LLVM IR GEN (165 tests)  Optimized IR text with:
        |                     - noalias, nsw, fast-math
        |                     - fastcc, branch hints
        |                     - allocator attributes
@@ -226,7 +226,7 @@ AXIOM Source (.axm)
 ### Types
 ```axiom
 i8 i16 i32 i64 i128           // Signed integers
-u8 u16 u32 u64 u128           // Unsigned integers
+u8 u16 u32 u64 u128           // Unsigned integers (u32 has proper unsigned semantics: udiv, urem, icmp ult, add nuw)
 f16 bf16 f32 f64              // Floating point
 bool                           // Boolean
 array[T, N]                    // Fixed-size stack array
@@ -331,6 +331,16 @@ let table: ptr[i32] = array_const_i32(1, 2, 3, 4, 5);        // i32 constant arr
 let coeffs: ptr[f64] = array_const_f64(1.0, 0.5, 0.25);      // f64 constant array
 // Functions returning array_const_*() are detected and their callers
 // get direct GEP into .rodata (interprocedural const pointer propagation)
+
+// Global mutable arrays (zero-initialized, writable)
+let table: ptr[i32] = global_array_i32(256);   // 256-element writable global i32 array
+let buf: ptr[i64] = global_array_u8(1024);     // 1024-byte writable global u8 array
+let data: ptr[f64] = global_array_f64(64);     // 64-element writable global f64 array
+
+// Low-level memory operations (map to LLVM intrinsics)
+memcpy(dst, src, 8);              // Copy 8 bytes (non-overlapping) -> llvm.memcpy
+memset(buf, 0, 64);              // Zero-fill 64 bytes -> llvm.memset
+memmove(dst, src, 32);           // Copy 32 bytes (overlapping safe) -> llvm.memmove
 ```
 
 ### Bitwise Operations
@@ -341,6 +351,8 @@ shl(a, n)      // Shift left  shr(a, n)      // Arithmetic shift right
 lshr(a, n)     // Logical shift right
 rotl(a, n)     // Rotate left (i32)    rotr(a, n)     // Rotate right (i32)
 rotl64(a, n)   // Rotate left (i64)    rotr64(a, n)   // Rotate right (i64)
+// Note: >> operator deliberately not supported (AI-first design).
+// Use shr() for arithmetic right shift, lshr() for logical right shift.
 ```
 
 ### Math (25 builtins)
@@ -533,7 +545,7 @@ axiom/
 │   ├── axiom-lexer/            # Tokenizer (63 tests)
 │   ├── axiom-parser/           # Recursive descent + Pratt (52 tests)
 │   ├── axiom-hir/              # High-level IR + validation (25 tests)
-│   ├── axiom-codegen/          # LLVM IR generation (154 tests)
+│   ├── axiom-codegen/          # LLVM IR generation (165 tests)
 │   ├── axiom-optimize/         # Optimization protocol + agent API (132 tests)
 │   ├── axiom-mir/              # Mid-level IR (stub)
 │   └── axiom-driver/           # CLI + MCP server + compilation (96 tests + 12 E2E/doc-tests)
@@ -552,7 +564,7 @@ axiom/
 │   ├── memory/                 # 30 memory benchmarks
 │   ├── fib/                    # Recursive fibonacci (from drujensen/fib)
 │   └── leibniz/                # Leibniz Pi (from niklas-heer/speed-comparison)
-├── examples/                   # 37 example programs (including 16 C project ports)
+├── examples/                   # 38 example programs (including 21 C project ports)
 │   ├── sort/                   # Bubble, insertion, selection sort
 │   ├── nbody/                  # N-body gravitational simulation
 │   ├── numerical/              # Pi, root finding, integration
@@ -584,7 +596,12 @@ axiom/
 │   ├── blake3/                 # BLAKE3 crypto hash port
 │   ├── minimp3/                # minimp3 IMDCT-36 port
 │   ├── stb_jpeg/               # stb_image JPEG IDCT port
-│   └── smhasher/               # SMHasher hash functions port
+│   ├── smhasher/               # SMHasher hash functions port
+│   ├── lodepng/                # lodepng PNG decode port (2,200+ stars)
+│   ├── fpng/                   # fpng fast PNG encode port (850+ stars)
+│   ├── libdeflate/             # libdeflate fast DEFLATE port (900+ stars)
+│   ├── utf8proc/               # utf8proc UTF-8 processing port (450+ stars)
+│   └── roaring/                # Roaring Bitmaps port (1,500+ stars)
 ├── lib/                        # AXIOM standard libraries
 │   └── ecs.axm                 # ECS library (archetype storage)
 ├── scripts/                    # Development scripts
@@ -607,12 +624,12 @@ axiom/
 ## Stats
 
 - **~40,100 lines of Rust** across 7 crates
-- **534 tests** (all passing)
+- **545 tests** (all passing)
 - **115/115 benchmarks pass** (1.01x avg ratio vs C)
-- **16 real-world C project ports** (~50K+ combined GitHub stars) -- all at parity or faster (3 wins)
-- **~165 builtin functions** (I/O, math, vector math, matrix ops, memory, concurrency, collections, debug, slices, global constant arrays)
+- **21 real-world C project ports** (~60K+ combined GitHub stars) -- all at parity or faster (3 wins)
+- **~171 builtin functions** (I/O, math, vector math, matrix ops, memory, memcpy/memset/memmove, concurrency, collections, debug, slices, global constant/mutable arrays)
 - **16 CLI commands**: compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test, replay
-- **37 example programs** (including 16 C project ports), **24 sample programs**
+- **38 example programs** (including 21 C project ports), **24 sample programs**
 - **5 formal specification documents**
 - **7 research documents** (optimization, memory, game engine, multithreading, Lux integration, language plan, optimization knowledge base)
 - **14 optimization rules + 6 anti-patterns** in the LLM knowledge base

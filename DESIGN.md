@@ -4,9 +4,9 @@ This is the living design document for AXIOM. It summarizes the current
 implementation state, references the formal specification files, and tracks
 design decisions and open questions.
 
-**Project stats:** ~39,500 LOC, 532 tests, 115/115 benchmarks pass (1.01x avg vs C), 16 examples, 24 samples. ALL 47 milestones COMPLETE across 8 tracks, plus Phase L verified development pipeline.
+**Project stats:** ~40,100 LOC, 545 tests, 115/115 benchmarks pass (1.01x avg vs C), 38 examples (including 21 C project ports), 24 samples. ALL 47 milestones COMPLETE across 8 tracks, plus Phase L verified development pipeline.
 
-**FINAL benchmark result:** 115/115 benchmarks pass, 1.01x average ratio vs C (parity). Raytracer: AXIOM scalar 42ms (+7% faster than C -O2 47ms), AXIOM AOS vec3 44ms (+2% faster). Optimization Knowledge Base: 10 rules + 5 anti-patterns, grows with each LLM session.
+**FINAL benchmark result:** 115/115 benchmarks pass, 1.01x average ratio vs C (parity). 21 real-world C project ports (~60K+ combined GitHub stars) all at parity or faster. Raytracer: AXIOM scalar 42ms (+7% faster than C -O2 47ms), AXIOM AOS vec3 44ms (+2% faster). Optimization Knowledge Base: 14 rules + 6 anti-patterns, grows with each LLM session.
 
 See `CLAUDE.md` for project structure, conventions, and development workflow.
 
@@ -83,7 +83,7 @@ The `spec/` directory contains the formal language specification:
   InlineHint, LayoutKind, AnnotationValue, StrategyBlock, StrategyValue,
   TransferBlock, OptLogEntry, ParallelForConfig).
 
-### Codegen (`axiom-codegen`) -- Complete (152 tests)
+### Codegen (`axiom-codegen`) -- Complete (165 tests)
 
 - HIR-to-LLVM-IR text generation for the full language subset: functions with
   all primitive types, arithmetic (with `nsw`), if/else/else-if, for loops (with
@@ -91,7 +91,7 @@ The `spec/` directory contains the formal language specification:
   `@export` functions, struct literal constructors, struct return from functions,
   local constants (`const NAME: Type = value`), `range(start, end, step)` with
   optional step, `@lifetime(scope)` on let bindings for stack promotion.
-- ~200 builtin functions covering: I/O, math (25 including trig/log/exp), vector
+- ~206 builtin functions covering: I/O, math (25 including trig/log/exp), vector
   construction & math (vec2/vec3/vec4/ivec2-4/fvec2-4/dot/cross/length/normalize/reflect/lerp),
   matrix operations (mat3/mat4 identity/mul/transpose/rotate/translate/perspective/look_at),
   conversions (including f32_to_f64/f64_to_f32), bitwise, heap memory (including
@@ -100,7 +100,8 @@ The `spec/` directory contains the formal language specification:
   graph), renderer/Vulkan FFI (12), GPU/PBR/glTF (22 including procedural mesh
   generation, texture uploads, and blit), option, string, vec, function pointers,
   result/error handling, CPU feature detection, input system, audio, debug/verification
-  (assert, debug_print).
+  (assert, debug_print), global constant arrays (array_const_*), global mutable arrays
+  (global_array_*), low-level memory operations (memcpy, memset, memmove).
 - GLSL-style swizzles on vec2/vec3/vec4: `.xy`, `.zyx`, `.xxx`, etc.
 - `@pure` -> `memory(none)` or `memory(argmem: read)`, `readnone`/`readonly`,
   fast-math flags on float operations.
@@ -115,7 +116,8 @@ The `spec/` directory contains the formal language specification:
 - `readonly_ptr[T]` -> LLVM `readonly` parameter attribute.
 - `writeonly_ptr[T]` -> LLVM `writeonly` parameter attribute.
 - `noalias` on all pointer parameters (language-level guarantee).
-- `nsw` on all signed integer arithmetic.
+- `nsw` on all signed integer arithmetic. `nuw` on unsigned integer arithmetic (u32).
+- Proper unsigned semantics for `u32`: `udiv`, `urem`, `icmp ult`, `add nuw`, `sub nuw`, `mul nuw`.
 - `fastcc` on all non-exported functions.
 - `!prof` branch weights on `@pure` function base cases.
 - `allockind`/`alloc-family` on all allocator builtins.
@@ -196,7 +198,7 @@ AXIOM Parser (52 tests)      -- Recursive descent + Pratt expressions
 AXIOM HIR (25 tests)         -- Annotation validation, type checking, NodeIds
        |
        v
-LLVM IR Text (152 tests)     -- Optimized IR with noalias, nsw, fast-math,
+LLVM IR Text (165 tests)     -- Optimized IR with noalias, nsw, fast-math,
        |                        fastcc, fences, readonly/writeonly, DWARF debug,
        |                        @precondition/@postcondition runtime checks (--debug)
        v
@@ -231,7 +233,7 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 
 **Demonstrated:** LLM analyzed `divl` bottleneck in prime-counting assembly, suggested 6k+-1 wheel factorization -> 37% speedup. Both AXIOM and C produce identical output at identical speed (1.00x).
 
-**Final benchmark:** 115/115 benchmarks pass, 1.01x avg ratio vs C. Raytracer: AXIOM scalar 42ms (+7% faster than C -O2 47ms). Key techniques: `calloc` zero-page trick, `@inline(always)` -> `alwaysinline`, arena allocators, `noalias` everywhere, SIMD vec2/vec3/vec4, mat3/mat4 matrix types.
+**Final benchmark:** 115/115 benchmarks pass, 1.01x avg ratio vs C. 21 real-world C project ports (~60K+ combined GitHub stars) all at parity or faster. Raytracer: AXIOM scalar 42ms (+7% faster than C -O2 47ms). Key techniques: `calloc` zero-page trick, `@inline(always)` -> `alwaysinline`, arena allocators, `noalias` everywhere, SIMD vec2/vec3/vec4, mat3/mat4 matrix types, `array_const_*` for lookup tables, `memcpy`/`memset`/`memmove` intrinsics, proper unsigned semantics for u32.
 
 **Commands:**
 - `axiom optimize program.axm --iterations 5` -- full LLM optimization loop
@@ -244,14 +246,14 @@ Source (.axm) -> Compile -> LLVM IR + Assembly
 
 | Category | Count | Details |
 |----------|-------|---------|
-| Primitive types | 26 | i8-i128, u8-u128, f16, bf16, f32, f64, bool, vec2/3/4, ivec2/3/4, fvec2/3/4, mat3, mat4 |
+| Primitive types | 26 | i8-i128, u8-u128 (u32 has proper unsigned semantics: udiv, urem, icmp ult, add nuw), f16, bf16, f32, f64, bool, vec2/3/4, ivec2/3/4, fvec2/3/4, mat3, mat4 |
 | Compound types | 11 | array, ptr, readonly_ptr, writeonly_ptr, slice, tensor, tuple, fn, struct |
 | Annotations | 28 | pure, const, inline, complexity, intent, module, constraint, target, strategy, vectorizable, parallel, parallel_for, layout, align, lifetime, export, strict, precondition, postcondition, test, requires, ensures, invariant, trace, link, transfer, optimization_log, custom |
-| Builtin functions | ~200 | I/O (4), math (25), vector math (9), ivec/fvec construction (6), vector conversions (12), matrix ops (14), conversions (5), bitwise (9), memory heap (10), memory narrow ptr (7), arena (4), slices (6), file (3), system (3), coroutines (5), threads (2), atomics (4), mutex (4), jobs (8), renderer (12), GPU/PBR/glTF (22), option (5), string (5), vec (9), fn_ptr (3), result (6), cpu (1), input (4), audio (2), debug (2) |
+| Builtin functions | ~206 | I/O (4), math (25), vector math (9), ivec/fvec construction (6), vector conversions (12), matrix ops (14), conversions (5), bitwise (11), memory heap (10), memory narrow ptr (7), arena (4), global const arrays (3), global mutable arrays (3), memory ops (3: memcpy/memset/memmove), slices (6), file (3), system (3), coroutines (5), threads (2), atomics (4), mutex (4), jobs (8), renderer (12), GPU/PBR/glTF (22), option (5), string (5), vec (9), fn_ptr (3), result (6), cpu (1), input (4), audio (2), debug (2) |
 | CLI commands | 16 | compile, lex, bench, mcp, optimize, profile, fmt, doc, pgo, watch, build, rewrite, lsp, verify, test, replay |
 | Keywords | 21 | fn, let, mut, return, if, else, for, while, in, struct, type, module, import, pub, unsafe, extern, and, or, not, true, false |
 | Type keywords | 33 | i8-i128 (5), u8-u128 (5), f16, bf16, f32, f64, bool, vec2/3/4, ivec2/3/4, fvec2/3/4, mat3, mat4, tensor, array, slice, ptr, readonly_ptr, writeonly_ptr |
-| Operators | 16 | +, -, *, /, %, +%, +\|, -%, -\|, *%, ==, !=, <, >, <=, >= |
+| Operators | 16 | +, -, *, /, %, +%, +\|, -%, -\|, *%, ==, !=, <, >, <=, >= (no `>>` by design -- use shr()/lshr()) |
 | Milestones | 47/47 | ALL COMPLETE across 8 tracks (MT, LLM, Platform, Language, Ecosystem, Renderer, Engine, Self-Improvement) |
 
 ## Resolved Questions

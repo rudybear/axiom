@@ -70,7 +70,7 @@ AXIOM Parser (52 tests)        <- Recursive descent + Pratt expressions
 AXIOM HIR (25 tests)          <- Annotation validation, type checking,
        |                          @strict enforcement, pre/postcondition lowering
        v
-LLVM IR Text Gen (154 tests)  <- Optimized IR with noalias, nsw, fast-math,
+LLVM IR Text Gen (165 tests)  <- Optimized IR with noalias, nsw, fast-math,
        |                          SIMD vec2/vec3/vec4 types,
        |                          fastcc, branch hints, allocator attributes,
        |                          fence release/acquire, readonly/writeonly,
@@ -87,8 +87,8 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`)
-- **Testing**: 534 tests passing (unit + integration + doc-tests + E2E)
-- **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos) + 16 real-world C project ports
+- **Testing**: 545 tests passing (unit + integration + doc-tests + E2E)
+- **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos) + 21 real-world C project ports
 
 ## Current Feature Set
 
@@ -96,6 +96,7 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 ```
 Primitives:    i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f16 bf16 f32 f64 bool
                vec2 vec3 vec4 ivec2 ivec3 ivec4 fvec2 fvec3 fvec4 mat3 mat4
+               u32 has proper unsigned semantics: udiv, urem, icmp ult, add nuw
 Arrays:        array[T, N]              // fixed-size, stack-allocated
 Pointers:      ptr[T]                   // heap pointer
                readonly_ptr[T]          // read-only pointer (enables LLVM readonly attr)
@@ -178,7 +179,7 @@ let broadcast: vec3 = v.xxx;        // Broadcast single component
 @optimization_log { ... }      // Optimization history
 ```
 
-### All Builtin Functions (~165 total)
+### All Builtin Functions (~171 total)
 
 #### I/O (4)
 ```
@@ -268,6 +269,20 @@ arena_reset(arena) arena_destroy(arena)
 array_const_i32(v0, v1, ..., vN)   // Compile-time constant i32 array in .rodata
 array_const_u8(v0, v1, ..., vN)    // Compile-time constant u8 array in .rodata
 array_const_f64(v0, v1, ..., vN)   // Compile-time constant f64 array in .rodata
+```
+
+#### Global Mutable Arrays (3)
+```
+global_array_i32(size)             // Zero-initialized writable global i32 array
+global_array_u8(size)              // Zero-initialized writable global u8 array
+global_array_f64(size)             // Zero-initialized writable global f64 array
+```
+
+#### Memory Operations (3)
+```
+memcpy(dst, src, bytes)            // Copy bytes (non-overlapping) -> llvm.memcpy
+memset(ptr, val, bytes)            // Fill memory with byte value -> llvm.memset
+memmove(dst, src, bytes)           // Copy bytes (overlapping safe) -> llvm.memmove
 ```
 
 #### File I/O (3)
@@ -405,7 +420,7 @@ axiom/
 │   ├── axiom-parser/               # Parser -> AST (52 tests)
 │   ├── axiom-hir/                  # HIR + lowering (25 tests)
 │   ├── axiom-mir/                  # Mid-level IR (stub)
-│   ├── axiom-codegen/              # LLVM IR generation (154 tests)
+│   ├── axiom-codegen/              # LLVM IR generation (165 tests)
 │   ├── axiom-optimize/             # Optimization protocol + agent API (132 tests)
 │   └── axiom-driver/               # CLI + MCP server + compilation (96 tests + 12 E2E/doc-tests)
 │       └── runtime/
@@ -423,7 +438,7 @@ axiom/
 │   ├── memory/                     # 30 memory benchmarks
 │   ├── fib/                        # From drujensen/fib (908 stars)
 │   └── leibniz/                    # From niklas-heer/speed-comparison
-├── examples/                       # 37 example programs (including 16 C project ports)
+├── examples/                       # 38 example programs (including 21 C project ports)
 │   ├── sort/                       # Bubble, insertion, selection sort
 │   ├── nbody/                      # N-body gravitational simulation
 │   ├── numerical/                  # Pi, roots, integration
@@ -455,7 +470,12 @@ axiom/
 │   ├── blake3/                     # BLAKE3 crypto hash port
 │   ├── minimp3/                    # minimp3 IMDCT-36 port
 │   ├── stb_jpeg/                   # stb_image JPEG IDCT port
-│   └── smhasher/                   # SMHasher hash functions port
+│   ├── smhasher/                   # SMHasher hash functions port
+│   ├── lodepng/                    # lodepng PNG decode port (2,200+ stars)
+│   ├── fpng/                       # fpng fast PNG encode port (850+ stars)
+│   ├── libdeflate/                 # libdeflate fast DEFLATE port (900+ stars)
+│   ├── utf8proc/                   # utf8proc UTF-8 processing port (450+ stars)
+│   └── roaring/                    # Roaring Bitmaps port (1,500+ stars)
 ├── lib/                            # AXIOM standard libraries
 │   └── ecs.axm                     # ECS library (archetype storage)
 ├── scripts/                        # Development scripts
@@ -616,3 +636,4 @@ The project uses a 7-agent pipeline:
 5. **Annotations are first-class data, not decorations.**
 6. **Parser must recover gracefully** -- report ALL errors.
 7. **No string types for structured data.**
+8. **No `>>` operator.** AI-first design: use explicit `shr()` (arithmetic) or `lshr()` (logical) to eliminate ambiguity between signed and unsigned right shift.
