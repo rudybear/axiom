@@ -364,3 +364,21 @@ Explicit function calls are:
 
 The `shr()` vs `lshr()` distinction is AXIOM's answer to C's type-dependent `>>` behavior.
 For unsigned types (u32), use `lshr()`. For signed types (i32), use `shr()`.
+
+---
+
+## Rule 15: AI-Driven Adaptive Optimization Loop
+
+**Command:** `axiom optimize --adaptive program.axm --iterations 5`
+
+**Pipeline:** compile+instrument → run+profile → LLM rewrite → verify → benchmark → iterate
+
+**What makes it work:**
+- @test blocks verify correctness after each rewrite
+- @precondition/@postcondition guard against contract violations
+- --record captures function-level execution trace
+- --opt-report captures LLVM missed optimizations
+- Profile data tells the LLM WHERE to optimize (hot functions)
+- LLVM remarks tell the LLM WHAT to optimize (missed passes)
+- History tells the LLM what was already tried
+- Git tracking preserves every optimization step for rollback

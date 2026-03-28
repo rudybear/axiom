@@ -44,6 +44,7 @@ pub mod benchmark;
 pub mod fuzz;
 pub mod history;
 pub mod llm_optimizer;
+pub mod profile;
 pub mod proposal;
 pub mod surface;
 pub mod transfer;

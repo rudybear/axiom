@@ -1130,6 +1130,39 @@ pub fn build_rewrite_prompt_with_remarks(source: &str, missed_opts: &[String]) -
     p
 }
 
+/// Build a rewrite prompt enriched with runtime profile data.
+///
+/// Extends [`build_rewrite_prompt`] with a profile data section and LLVM
+/// missed optimization remarks so the LLM knows WHERE (hot functions) and
+/// WHAT (missed passes) to optimize.
+pub fn build_rewrite_prompt_with_profile(
+    source: &str,
+    profile_text: &str,
+    missed_opts: &[String],
+) -> String {
+    let mut prompt = build_rewrite_prompt(source);
+
+    // Insert profile data before the rewrite instructions
+    if !profile_text.is_empty() {
+        prompt.push('\n');
+        prompt.push_str(profile_text);
+        prompt.push('\n');
+    }
+
+    if !missed_opts.is_empty() {
+        prompt.push_str("\n## LLVM Optimization Remarks (missed)\n");
+        for opt in missed_opts {
+            prompt.push_str(&format!("- {opt}\n"));
+        }
+        prompt.push('\n');
+    }
+
+    prompt.push_str("Focus optimization on the hot functions identified in the profile data.\n");
+    prompt.push_str("Preserve all @precondition/@postcondition contracts.\n");
+
+    prompt
+}
+
 /// A rewrite suggestion from the LLM.
 #[derive(Debug, Clone)]
 pub struct RewriteSuggestion {
@@ -2055,5 +2088,16 @@ Function:        big_func
             .filter(|s| s.contains("@vectorizable"))
             .count();
         assert_eq!(vectorize_count, 1);
+    }
+
+    #[test]
+    fn test_build_rewrite_prompt_with_profile() {
+        let source = "@module test;\nfn main() -> i32 { return 0; }";
+        let profile = "## Runtime Profile Data\n1. main: 1 call, 100% of runtime\n";
+        let remarks = vec!["MISSED: inline in helper".to_string()];
+        let prompt = build_rewrite_prompt_with_profile(source, profile, &remarks);
+        assert!(prompt.contains("Runtime Profile Data"));
+        assert!(prompt.contains("MISSED: inline in helper"));
+        assert!(prompt.contains("hot functions"));
     }
 }

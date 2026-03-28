@@ -113,6 +113,11 @@ enum Commands {
         /// Track each optimization step with git commits (or .axiom-history/ if not in git)
         #[arg(long)]
         track: bool,
+
+        /// Run AI-Driven Adaptive Compilation Pipeline:
+        /// compile+instrument → run+profile → LLM rewrite → verify → benchmark → iterate
+        #[arg(long)]
+        adaptive: bool,
     },
 
     /// Profile an AXIOM program and suggest optimizations
@@ -708,7 +713,13 @@ fn main() -> miette::Result<()> {
             dry_run,
             agent,
             track,
-        } => run_optimize(&input, iterations, &target, api_key.as_deref(), dry_run, &agent, track),
+            adaptive,
+        } => {
+            if adaptive {
+                return run_adaptive_optimization(&input, iterations, dry_run, api_key.as_deref());
+            }
+            run_optimize(&input, iterations, &target, api_key.as_deref(), dry_run, &agent, track)
+        }
 
         Commands::Profile { input, iterations } => run_profile(&input, iterations),
 
@@ -1973,6 +1984,474 @@ fn get_timestamp() -> String {
         Ok(d) => format!("{}s", d.as_secs()),
         Err(_) => "unknown".to_string(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// AI-Driven Adaptive Compilation Pipeline (axiom optimize --adaptive)
+// ---------------------------------------------------------------------------
+
+/// Run the AI-Driven Adaptive Compilation Pipeline.
+///
+/// Pipeline per iteration:
+///   1. Compile with --record (instrumented binary for execution trace)
+///   2. Run the binary to generate a .trace.jsonl file
+///   3. Benchmark the binary to measure wall clock performance
+///   4. Compile with --opt-report to collect LLVM missed optimization remarks
+///   5. Parse the trace into ProfileData
+///   6. Parse the .opt.yaml into missed optimizations
+///   7. Build a profile-enriched LLM rewrite prompt
+///   8. In dry-run mode: write the prompt to a file and print profile data
+///   9. In live mode: call the LLM, apply the rewrite, verify it compiles,
+///      benchmark the new version, and accept/reject based on improvement
+///  10. Record results and check for convergence
+fn run_adaptive_optimization(
+    input: &str,
+    iterations: usize,
+    dry_run: bool,
+    api_key: Option<&str>,
+) -> miette::Result<()> {
+    use axiom_optimize::llm_optimizer::{self, LlmResult};
+    use axiom_optimize::profile;
+
+    // Resolve API key
+    let resolved_api_key: Option<String> = api_key
+        .map(|k| k.to_string())
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
+
+    let effective_dry_run = dry_run || resolved_api_key.is_none();
+
+    eprintln!("=== AXIOM Adaptive Compilation Pipeline ===\n");
+    eprintln!("Source:     {input}");
+    eprintln!("Iterations: {iterations}");
+    eprintln!(
+        "Mode:       {}",
+        if dry_run {
+            "dry-run (prompt generation only, no LLM call)"
+        } else if resolved_api_key.is_some() {
+            "live (Claude API via curl)"
+        } else {
+            "dry-run (no ANTHROPIC_API_KEY found)"
+        }
+    );
+    eprintln!();
+
+    // Read source
+    let mut source = read_source_with_includes(input)?;
+
+    let tmp_dir = std::env::temp_dir();
+    let mut best_ms: Option<f64> = None;
+    let mut no_improve_count = 0usize;
+    const CONVERGE_AFTER: usize = 2; // stop if no improvement for this many iterations
+
+    for iter in 1..=iterations {
+        eprintln!("--- Iteration {iter}/{iterations} ---\n");
+
+        // ------------------------------------------------------------------
+        // Step 1: Compile to LLVM IR
+        // ------------------------------------------------------------------
+        let parse_result = axiom_parser::parse(&source);
+        if parse_result.has_errors() {
+            eprintln!("[ADAPTIVE] Parse errors in current source, stopping:");
+            for e in &parse_result.errors {
+                eprintln!("  {e}");
+            }
+            break;
+        }
+        let hir_result = axiom_hir::lower(&parse_result.module);
+        let hir_module = match hir_result {
+            Ok(m) => m,
+            Err(errors) => {
+                eprintln!("[ADAPTIVE] HIR errors, stopping:");
+                for e in &errors { eprintln!("  {e}"); }
+                break;
+            }
+        };
+        let llvm_ir = match axiom_codegen::codegen(&hir_module) {
+            Ok(ir) => ir,
+            Err(errors) => {
+                eprintln!("[ADAPTIVE] Codegen errors, stopping:");
+                for e in &errors { eprintln!("  {e}"); }
+                break;
+            }
+        };
+
+        // ------------------------------------------------------------------
+        // Step 2: Compile with --record mode for execution trace
+        // ------------------------------------------------------------------
+        let tmp_bin_record = if cfg!(windows) {
+            tmp_dir.join(format!("axiom_adaptive_{iter}_rec.exe"))
+        } else {
+            tmp_dir.join(format!("axiom_adaptive_{iter}_rec"))
+        };
+
+        let constraints = llm_optimizer::extract_constraints_from_source(&source);
+        let optimize_for = constraints.iter()
+            .find(|c| c.key == "optimize_for")
+            .map(|c| c.value.clone());
+
+        let record_opts = compile::CompileOptions {
+            target_arch: None,
+            optimize_for: optimize_for.clone(),
+            ir_text: Some(llvm_ir.clone()),
+            link_dirs: Vec::new(),
+            opt_report: false,
+            sanitize: None,
+            debug_mode: false,
+            record_mode: true,
+        };
+
+        eprintln!("[ADAPTIVE] Compiling with --record...");
+        let record_compiled = compile::compile_to_binary_with_options(
+            &llvm_ir,
+            tmp_bin_record.to_str().unwrap(),
+            &record_opts,
+        );
+
+        // ------------------------------------------------------------------
+        // Step 3: Run the binary to generate trace
+        // ------------------------------------------------------------------
+        let trace_path = tmp_dir.join(format!("axiom_adaptive_{iter}.trace.jsonl"));
+        let profile_data: Option<profile::ProfileData> = if record_compiled.is_ok() {
+            eprintln!("[ADAPTIVE] Running instrumented binary for trace...");
+            let run_output = std::process::Command::new(tmp_bin_record.to_str().unwrap())
+                .env("AXIOM_TRACE_FILE", trace_path.to_str().unwrap_or(""))
+                .output();
+            match run_output {
+                Ok(_) => {
+                    if trace_path.exists() {
+                        match profile::parse_trace(trace_path.to_str().unwrap()) {
+                            Ok(pd) => {
+                                eprintln!("[ADAPTIVE] Profile: {} hot function(s)", pd.hot_functions.len());
+                                for (i, f) in pd.hot_functions.iter().take(5).enumerate() {
+                                    eprintln!(
+                                        "  {}. {}: {} calls, {:.1}% of runtime",
+                                        i + 1, f.name, f.call_count, f.percent_of_runtime
+                                    );
+                                }
+                                Some(pd)
+                            }
+                            Err(e) => {
+                                eprintln!("[ADAPTIVE] Could not parse trace: {e}");
+                                None
+                            }
+                        }
+                    } else {
+                        eprintln!("[ADAPTIVE] No trace file generated (binary may not use AXIOM_TRACE_FILE).");
+                        eprintln!("[ADAPTIVE] Profiling skipped for this iteration.");
+                        None
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[ADAPTIVE] Could not run instrumented binary: {e}");
+                    None
+                }
+            }
+        } else {
+            eprintln!("[ADAPTIVE] Record-mode compile failed; skipping trace.");
+            None
+        };
+
+        // Clean up trace and record binary
+        std::fs::remove_file(&trace_path).ok();
+        std::fs::remove_file(&tmp_bin_record).ok();
+
+        // ------------------------------------------------------------------
+        // Step 4: Benchmark the current source (non-instrumented)
+        // ------------------------------------------------------------------
+        eprintln!("[ADAPTIVE] Benchmarking current source...");
+        let bench_config = axiom_optimize::benchmark::BenchmarkConfig {
+            warmup_runs: 2,
+            measurement_runs: 5,
+            timeout_ms: 30_000,
+        };
+        let current_ms = match axiom_optimize::benchmark::benchmark_source(&source, &bench_config) {
+            Ok(result) => {
+                eprintln!("[ADAPTIVE] Current: {:.3}ms (median)", result.median_ms);
+                Some(result.median_ms)
+            }
+            Err(e) => {
+                eprintln!("[ADAPTIVE] Benchmark failed: {e}");
+                None
+            }
+        };
+
+        // Update best known time
+        if let Some(ms) = current_ms {
+            best_ms = Some(best_ms.map_or(ms, |b: f64| b.min(ms)));
+        }
+
+        // ------------------------------------------------------------------
+        // Step 5: Compile with --opt-report for LLVM missed optimizations
+        // ------------------------------------------------------------------
+        let tmp_bin_analyze = if cfg!(windows) {
+            tmp_dir.join(format!("axiom_adaptive_{iter}_analyze.exe"))
+        } else {
+            tmp_dir.join(format!("axiom_adaptive_{iter}_analyze"))
+        };
+
+        let report_opts = compile::CompileOptions {
+            target_arch: None,
+            optimize_for: optimize_for.clone(),
+            ir_text: Some(llvm_ir.clone()),
+            link_dirs: Vec::new(),
+            opt_report: true,
+            sanitize: None,
+            debug_mode: false,
+            record_mode: false,
+        };
+
+        let missed_opts: Vec<String> = {
+            eprintln!("[ADAPTIVE] Compiling with --opt-report...");
+            let analyze_result = compile::compile_to_binary_with_options(
+                &llvm_ir,
+                tmp_bin_analyze.to_str().unwrap(),
+                &report_opts,
+            );
+            let yaml_path = format!("{}.opt.yaml", tmp_bin_analyze.display());
+            let opts = if analyze_result.is_ok() {
+                if std::path::Path::new(&yaml_path).exists() {
+                    let found = llm_optimizer::extract_missed_optimizations(&yaml_path);
+                    std::fs::remove_file(&yaml_path).ok();
+                    found
+                } else {
+                    // Search temp dir for axiom*.opt.yaml
+                    let mut found = Vec::new();
+                    if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                if name.ends_with(".opt.yaml") && name.contains("axiom") {
+                                    found = llm_optimizer::extract_missed_optimizations(
+                                        path.to_str().unwrap_or_default(),
+                                    );
+                                    std::fs::remove_file(&path).ok();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    found
+                }
+            } else {
+                Vec::new()
+            };
+            std::fs::remove_file(&tmp_bin_analyze).ok();
+            opts
+        };
+
+        if !missed_opts.is_empty() {
+            eprintln!("[ADAPTIVE] {} missed optimization(s):", missed_opts.len());
+            for m in missed_opts.iter().take(5) {
+                eprintln!("  {m}");
+            }
+        } else {
+            eprintln!("[ADAPTIVE] No missed optimizations found.");
+        }
+
+        // ------------------------------------------------------------------
+        // Step 6: Build profile-enriched LLM prompt
+        // ------------------------------------------------------------------
+        let profile_text = if let Some(ref pd) = profile_data {
+            profile::format_profile_for_prompt(pd)
+        } else {
+            String::new()
+        };
+
+        let prompt = llm_optimizer::build_rewrite_prompt_with_profile(
+            &source,
+            &profile_text,
+            &missed_opts,
+        );
+
+        // ------------------------------------------------------------------
+        // Step 7: Dry-run — write prompt to file and print suggestions
+        // ------------------------------------------------------------------
+        if effective_dry_run {
+            let prompt_path = tmp_dir.join(format!("axiom_adaptive_{iter}_prompt.md"));
+            if let Err(e) = std::fs::write(&prompt_path, &prompt) {
+                eprintln!("[ADAPTIVE] Could not write prompt file: {e}");
+            } else {
+                eprintln!("[ADAPTIVE] Prompt written to: {}", prompt_path.display());
+            }
+
+            // Print what the LLM would see
+            eprintln!("\n[ADAPTIVE] === Profile Summary (what LLM would see) ===");
+            if profile_text.is_empty() {
+                eprintln!("  (no profile data — binary did not emit trace)");
+            } else {
+                for line in profile_text.lines() {
+                    eprintln!("  {line}");
+                }
+            }
+
+            if !missed_opts.is_empty() {
+                eprintln!("\n[ADAPTIVE] === LLVM Missed Optimizations ===");
+                for m in &missed_opts {
+                    eprintln!("  {m}");
+                }
+                let suggestions = llm_optimizer::suggest_actions_for_missed(&missed_opts);
+                if !suggestions.is_empty() {
+                    eprintln!("\n[ADAPTIVE] Suggested actions:");
+                    for s in &suggestions {
+                        eprintln!("  -> {s}");
+                    }
+                }
+            }
+
+            eprintln!("\n[ADAPTIVE] Dry-run complete for iteration {iter}.");
+            eprintln!("[ADAPTIVE] Run without --dry-run and with ANTHROPIC_API_KEY to apply LLM rewrites.\n");
+            // In dry-run we only do one pass to show what would happen
+            break;
+        }
+
+        // ------------------------------------------------------------------
+        // Step 8 (live mode): Call LLM and apply rewrite
+        // ------------------------------------------------------------------
+        eprintln!("[ADAPTIVE] Calling LLM for rewrite...");
+        let rewrite_result = llm_optimizer::run_rewrite_with_remarks(
+            &source,
+            resolved_api_key.as_deref(),
+            false,
+            &missed_opts,
+        );
+
+        let new_source = match rewrite_result {
+            LlmResult::Suggestion(ref suggestion) => {
+                // The rewritten source is in the reasoning field (see run_rewrite_with_remarks)
+                let candidate = suggestion.reasoning.clone();
+                eprintln!("[ADAPTIVE] LLM returned rewrite (confidence: {:.0}%)", suggestion.confidence * 100.0);
+                if !suggestion.code_changes.is_empty() {
+                    eprintln!("[ADAPTIVE] Changes:");
+                    for c in &suggestion.code_changes {
+                        let line_str = c.line.map(|l| format!(" (line {l})")).unwrap_or_default();
+                        eprintln!("  - {}{}", c.description, line_str);
+                    }
+                }
+                Some(candidate)
+            }
+            LlmResult::DryRun { prompt_path, .. } => {
+                eprintln!("[ADAPTIVE] Unexpected dry-run result; prompt at {prompt_path}");
+                None
+            }
+            LlmResult::Error(e) => {
+                eprintln!("[ADAPTIVE] LLM error: {e}");
+                None
+            }
+        };
+
+        let new_source = match new_source {
+            Some(s) if !s.trim().is_empty() => s,
+            _ => {
+                eprintln!("[ADAPTIVE] No valid rewrite produced, keeping current source.\n");
+                no_improve_count += 1;
+                if no_improve_count >= CONVERGE_AFTER {
+                    eprintln!("[ADAPTIVE] Converged (no improvement for {CONVERGE_AFTER} iterations).");
+                    break;
+                }
+                continue;
+            }
+        };
+
+        // ------------------------------------------------------------------
+        // Step 9: Verify the rewrite compiles
+        // ------------------------------------------------------------------
+        eprintln!("[ADAPTIVE] Verifying rewrite compiles...");
+        let verify_result = axiom_parser::parse(&new_source);
+        if verify_result.has_errors() {
+            eprintln!("[ADAPTIVE] Rewrite parse errors — rejecting:");
+            for e in &verify_result.errors {
+                eprintln!("  {e}");
+            }
+            no_improve_count += 1;
+            if no_improve_count >= CONVERGE_AFTER {
+                eprintln!("[ADAPTIVE] Converged (no improvement for {CONVERGE_AFTER} iterations).");
+                break;
+            }
+            continue;
+        }
+        let hir_verify = axiom_hir::lower(&verify_result.module);
+        if let Err(errors) = &hir_verify {
+            eprintln!("[ADAPTIVE] Rewrite HIR errors — rejecting:");
+            for e in errors { eprintln!("  {e}"); }
+            no_improve_count += 1;
+            if no_improve_count >= CONVERGE_AFTER {
+                eprintln!("[ADAPTIVE] Converged (no improvement for {CONVERGE_AFTER} iterations).");
+                break;
+            }
+            continue;
+        }
+
+        // ------------------------------------------------------------------
+        // Step 10: Benchmark the rewrite and accept/reject
+        // ------------------------------------------------------------------
+        eprintln!("[ADAPTIVE] Benchmarking rewrite...");
+        let new_ms = match axiom_optimize::benchmark::benchmark_source(&new_source, &bench_config) {
+            Ok(result) => {
+                eprintln!("[ADAPTIVE] Rewrite: {:.3}ms (median)", result.median_ms);
+                Some(result.median_ms)
+            }
+            Err(e) => {
+                eprintln!("[ADAPTIVE] Rewrite benchmark failed: {e}");
+                None
+            }
+        };
+
+        let accepted = match (current_ms, new_ms) {
+            (Some(old), Some(new)) => {
+                let improvement_pct = (old - new) / old * 100.0;
+                if new < old {
+                    eprintln!(
+                        "[ADAPTIVE] Accepting rewrite: {:.3}ms -> {:.3}ms ({:.1}% faster)",
+                        old, new, improvement_pct
+                    );
+                    true
+                } else {
+                    eprintln!(
+                        "[ADAPTIVE] Rejecting rewrite: {:.3}ms -> {:.3}ms ({:.1}% slower)",
+                        old, new, improvement_pct.abs()
+                    );
+                    false
+                }
+            }
+            (None, Some(_)) => {
+                // No baseline — accept any compiling rewrite
+                eprintln!("[ADAPTIVE] No baseline; accepting rewrite.");
+                true
+            }
+            _ => {
+                eprintln!("[ADAPTIVE] Could not compare — keeping current.");
+                false
+            }
+        };
+
+        if accepted {
+            source = new_source;
+            if let Some(ms) = new_ms {
+                best_ms = Some(best_ms.map_or(ms, |b: f64| b.min(ms)));
+            }
+            no_improve_count = 0;
+            eprintln!("[ADAPTIVE] Source updated.\n");
+        } else {
+            no_improve_count += 1;
+            eprintln!("[ADAPTIVE] Source unchanged.\n");
+        }
+
+        if no_improve_count >= CONVERGE_AFTER {
+            eprintln!("[ADAPTIVE] Converged (no improvement for {CONVERGE_AFTER} iterations).");
+            break;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Summary
+    // ------------------------------------------------------------------
+    eprintln!("\n=== Adaptive Optimization Complete ===");
+    if let Some(ms) = best_ms {
+        eprintln!("Best observed runtime: {:.3}ms", ms);
+    }
+    eprintln!("Optimized source is in memory (use --output flag to save).");
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
