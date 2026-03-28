@@ -74,17 +74,24 @@ pub fn lower(module: &ast::Module) -> Result<HirModule, Vec<LowerError>> {
         }
     }
 
-    // Warnings for missing annotations are ONLY emitted when the module
-    // has @strict. Without @strict, no warnings — this prevents flooding
-    // CI and benchmarks with noise. AI agents should use @strict to opt in.
-    //
-    // Design: @strict is the enforcement mechanism. Without it, code compiles
-    // silently. This follows the principle: AI agents that want verification
-    // declare it explicitly. Others are not penalized.
-    if false {
-        // Intentionally disabled — warnings are opt-in via @strict only.
-        // See pessimistic review: unconditional warnings flood CI with 195+
-        // benchmark files × 3-10 functions each = 500+ spurious warnings.
+    // Even without @strict, emit warnings for functions missing @intent.
+    // This nudges AI agents toward annotating without breaking existing code.
+    if !is_strict {
+        for func in &hir.functions {
+            if func.name == "main" {
+                continue;
+            }
+            let has_intent = func
+                .annotations
+                .iter()
+                .any(|a| matches!(a.kind, HirAnnotationKind::Intent(_)));
+            if !has_intent {
+                eprintln!(
+                    "warning: function `{}` has no @intent annotation (add @strict to make this an error)",
+                    func.name
+                );
+            }
+        }
     }
 
     if ctx.errors.is_empty() {
@@ -1913,5 +1920,76 @@ fn main() -> i32 {
 "#;
         let hir = parse_and_lower(source);
         assert!(hir.is_ok(), "functions with @intent should lower without issue");
+    }
+
+    #[test]
+    fn test_strict_mode_missing_contract_only() {
+        // Under @strict, a function with @intent but no @precondition/@postcondition
+        // should fail.
+        let source = r#"
+@strict;
+
+@intent("adds one")
+fn helper(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn main() -> i32 {
+    return helper(5);
+}
+"#;
+        let result = parse_and_lower(source);
+        assert!(
+            result.is_err(),
+            "should fail: @intent present but @precondition/@postcondition missing under @strict"
+        );
+    }
+
+    #[test]
+    fn test_strict_mode_missing_intent_only() {
+        // Under @strict, a function with @precondition but no @intent should fail.
+        let source = r#"
+@strict;
+
+@precondition(x >= 0)
+fn helper(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn main() -> i32 {
+    return helper(5);
+}
+"#;
+        let result = parse_and_lower(source);
+        assert!(
+            result.is_err(),
+            "should fail: @precondition present but @intent missing under @strict"
+        );
+    }
+
+    #[test]
+    fn test_strict_mode_all_annotations_present() {
+        // Under @strict, a function with both @intent and @precondition/@postcondition
+        // should pass.
+        let source = r#"
+@strict;
+
+@intent("adds one to a non-negative number")
+@precondition(x >= 0)
+@postcondition(return > 0)
+fn helper(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn main() -> i32 {
+    return helper(5);
+}
+"#;
+        let result = parse_and_lower(source);
+        assert!(
+            result.is_ok(),
+            "should pass: all @strict annotations present: {:?}",
+            result.err()
+        );
     }
 }

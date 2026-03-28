@@ -2276,6 +2276,11 @@ impl<'src> Parser<'src> {
                 self.advance();
                 self.parse_call_args(Expr::Ident("truncate".to_string()))
             }
+            // `return` as an expression — used in @postcondition(return == ...)
+            TokenKind::Return => {
+                self.advance();
+                Expr::Ident("return".to_string())
+            }
             // Type keywords used as identifiers in expressions (e.g., tensor.zeros)
             ref tok if is_type_keyword(tok) => {
                 let name = type_keyword_name(self.peek());

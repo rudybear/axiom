@@ -7323,3 +7323,104 @@ fn main() -> i32 {
         "i32 division should still use sdiv: {ir}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Feature: ptr_to_i64 emits ptrtoint
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ptr_to_i64_emits_ptrtoint() {
+    let source = r#"
+fn main() -> i32 {
+    let p: ptr[i32] = heap_alloc(4, 4);
+    let n: i64 = ptr_to_i64(p);
+    heap_free(p);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("ptrtoint ptr"),
+        "ptr_to_i64 should emit ptrtoint instruction: {ir}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Feature: i64_to_ptr emits inttoptr
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_i64_to_ptr_emits_inttoptr() {
+    let source = r#"
+fn main() -> i32 {
+    let n: i64 = 12345;
+    let p: ptr[i32] = i64_to_ptr(n);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("inttoptr i64"),
+        "i64_to_ptr should emit inttoptr instruction: {ir}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Feature: memcpy emits @llvm.memcpy intrinsic
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_memcpy_emits_intrinsic() {
+    let source = r#"
+fn main() -> i32 {
+    let src: ptr[i64] = heap_alloc(16, 1);
+    let dst: ptr[i64] = heap_alloc(16, 1);
+    memcpy(dst, src, 16);
+    heap_free(src);
+    heap_free(dst);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("@llvm.memcpy.p0.p0.i64"),
+        "memcpy should emit @llvm.memcpy intrinsic call: {ir}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Feature: global_array emits mutable global (not constant)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_global_array_emits_mutable_global() {
+    let source = r#"
+fn main() -> i32 {
+    let table: ptr[i32] = global_array_i32(128);
+    ptr_write_i32(table, 0, 99);
+    return ptr_read_i32(table, 0);
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("global [128 x i32] zeroinitializer"),
+        "global_array_i32 should emit 'global' (mutable), not 'constant': {ir}"
+    );
+    // Ensure it's NOT emitted as 'constant'
+    assert!(
+        !ir.contains("constant [128 x i32]"),
+        "global_array should use 'global', not 'constant': {ir}"
+    );
+}
