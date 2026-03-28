@@ -7539,7 +7539,6 @@ fn test_tuple_type_to_llvm() {
 }
 
 #[test]
-#[ignore] // TODO: Parser doesn't support .0/.1 tuple field access syntax yet
 fn test_tuple_return_type_codegen() {
     // A function that returns a tuple via insertvalue chain.
     let source = r#"

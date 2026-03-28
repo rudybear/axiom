@@ -3214,7 +3214,7 @@ fn emit_expr(ctx: &mut CodegenContext, expr: &HirExpr, expected_type: Option<&st
             let type_parts: Vec<&str> = elem_vals.iter().map(|v| v.ty.as_str()).collect();
             let tuple_type = format!("{{ {} }}", type_parts.join(", "));
             // Build the tuple value via insertvalue chain.
-            let mut current = format!("undef");
+            let current = format!("undef");
             let mut current_reg = String::new();
             for (i, val) in elem_vals.iter().enumerate() {
                 let result = ctx.fresh_reg();

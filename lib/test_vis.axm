@@ -1,0 +1,3 @@
+@module test_vis;
+pub fn public_func() -> i32 { return 42; }
+fn private_func() -> i32 { return 99; }
