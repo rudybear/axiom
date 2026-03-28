@@ -83,10 +83,10 @@ fn sipround(v: ptr[i64]) {
 
 // ---------------------------------------------------------------------------
 // SipHash-2-4: hash `inlen` bytes from `in_ptr` with 128-bit key (k0, k1)
+// `v` is a pre-allocated 4-element i64 scratch buffer
 // ---------------------------------------------------------------------------
-fn siphash_2_4(in_ptr: ptr[i64], inlen: i32, k0: i64, k1: i64) -> i64 {
+fn siphash_2_4(in_ptr: ptr[i64], inlen: i32, k0: i64, k1: i64, v: ptr[i64]) -> i64 {
     // State initialization
-    let v: ptr[i64] = heap_alloc(4, 8);
     ptr_write_i64(v, 0, bxor(k0, 0x736f6d6570736575));
     ptr_write_i64(v, 1, bxor(k1, 0x646f72616e646f6d));
     ptr_write_i64(v, 2, bxor(k0, 0x6c7967656e657261));
@@ -149,7 +149,6 @@ fn siphash_2_4(in_ptr: ptr[i64], inlen: i32, k0: i64, k1: i64) -> i64 {
     // Result = v0 ^ v1 ^ v2 ^ v3
     let result: i64 = bxor(bxor(ptr_read_i64(v, 0), ptr_read_i64(v, 1)),
                            bxor(ptr_read_i64(v, 2), ptr_read_i64(v, 3)));
-    heap_free(v);
     return result;
 }
 
@@ -171,8 +170,11 @@ fn main() -> i32 {
         ptr_write_u8(msg, i, i);
     }
 
+    // Pre-allocate scratch buffer for hash state (4 x i64)
+    let v: ptr[i64] = heap_alloc(4, 8);
+
     // Compute hash
-    let hash: i64 = siphash_2_4(msg, msg_len, k0, k1);
+    let hash: i64 = siphash_2_4(msg, msg_len, k0, k1, v);
 
     print("SipHash-2-4 Test\n");
     print("Key: 00 01 02 ... 0F\n");
@@ -182,6 +184,7 @@ fn main() -> i32 {
     print("\n");
 
     // Expected result from SipHash reference: 0xa129ca6149be45e5
+    // As signed i64: -6833708440360172059
     let expected: i64 = 0xa129ca6149be45e5;
     print("Expected:    ");
     print_i64(expected);
@@ -199,7 +202,7 @@ fn main() -> i32 {
 
     let checksum: i64 = 0;
     for i: i32 in range(0, iterations) {
-        let h: i64 = siphash_2_4(msg, msg_len, k0, k1);
+        let h: i64 = siphash_2_4(msg, msg_len, k0, k1, v);
         checksum = bxor(checksum, h);
     }
 
@@ -224,11 +227,16 @@ fn main() -> i32 {
     print("\n");
 
     // MB/s = bytes_total / elapsed_ns * 1000
-    let throughput_mbps: i64 = (bytes_total *% 1000) / elapsed_ns;
-    print("Throughput: ~");
-    print_i64(throughput_mbps);
-    print(" MB/s\n");
+    if elapsed_ns > 0 {
+        let throughput_mbps: i64 = (bytes_total *% 1000) / elapsed_ns;
+        print("Throughput: ~");
+        print_i64(throughput_mbps);
+        print(" MB/s\n");
+    } else {
+        print("Throughput: too fast to measure\n");
+    }
 
+    heap_free(v);
     heap_free(msg);
     return 0;
 }

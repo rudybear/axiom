@@ -7010,6 +7010,58 @@ fn test_debug_mode_crash_handler() {
 }
 
 #[test]
+fn test_array_const_i32_emits_global_constant() {
+    let source = r#"
+fn get_table() -> ptr[i32] {
+    return array_const_i32(10, 20, 30, 40, 50);
+}
+fn main() -> i32 {
+    let t: ptr[i32] = get_table();
+    let v: i32 = ptr_read_i32(t, 2);
+    print_i32(v);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors(), "parse errors: {:?}", parse_result.errors);
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    // Should contain a global constant array
+    assert!(
+        ir.contains("@.const.arr.0 = private unnamed_addr constant [5 x i32]"),
+        "should emit global constant array: {ir}"
+    );
+    // Should contain the values
+    assert!(
+        ir.contains("i32 10, i32 20, i32 30, i32 40, i32 50"),
+        "should contain array values: {ir}"
+    );
+    // The function should return the global pointer
+    assert!(
+        ir.contains("ret ptr @.const.arr.0"),
+        "function should return global ptr: {ir}"
+    );
+}
+
+#[test]
+fn test_array_const_f64_emits_global_constant() {
+    let source = r#"
+fn get_data() -> ptr[f64] {
+    return array_const_f64(1.0, 2.5, 3.14);
+}
+fn main() -> i32 { return 0; }
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("@.const.arr.0 = private unnamed_addr constant [3 x double]"),
+        "should emit global constant f64 array: {ir}"
+    );
+}
+
+#[test]
 fn test_no_crash_handler_without_debug() {
     let source = "fn main() -> i32 { return 0; }";
     let parse_result = axiom_parser::parse(source);

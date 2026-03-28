@@ -230,6 +230,10 @@ struct CodegenContext {
     record_mode: bool,
     /// Whether trace runtime functions are needed (axiom_trace_init/enter/exit/close).
     needs_trace: bool,
+    /// Counter for unique global constant array names.
+    const_array_count: usize,
+    /// Collected global constant array declarations (emitted before function bodies).
+    const_arrays: Vec<String>,
 }
 
 /// Ownership kind for pointer parameters, used for access validation.
@@ -302,6 +306,8 @@ impl CodegenContext {
             current_func_name_for_trace: String::new(),
             record_mode: false,
             needs_trace: false,
+            const_array_count: 0,
+            const_arrays: Vec::new(),
         }
     }
 
@@ -542,10 +548,16 @@ fn codegen_inner(
         );
     }
 
+    // Emit global constant arrays (array_const_i32, array_const_u8, array_const_f64).
+    for arr in &ctx.const_arrays.clone() {
+        let _ = writeln!(ctx.output, "{arr}");
+    }
+
     let has_globals = !ctx.string_literals.is_empty()
         || ctx.needs_printf_i64
         || ctx.needs_printf_i32
-        || ctx.needs_printf_f64;
+        || ctx.needs_printf_f64
+        || !ctx.const_arrays.is_empty();
     if has_globals {
         ctx.emit_blank();
     }
@@ -3938,6 +3950,10 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             // Debug builtins
             "assert" => return emit_builtin_assert(ctx, args),
             "debug_print" => return emit_builtin_debug_print(ctx, args),
+            // Global constant array builtins
+            "array_const_i32" => return emit_builtin_array_const(ctx, args, "i32"),
+            "array_const_u8" => return emit_builtin_array_const(ctx, args, "i8"),
+            "array_const_f64" => return emit_builtin_array_const(ctx, args, "double"),
             _ => {}
         }
 
@@ -10023,6 +10039,97 @@ fn emit_builtin_debug_print(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmV
     LlvmValue {
         reg: val.reg,
         ty: val.ty,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global constant array builtins
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `array_const_i32(v0, v1, ..., vN) -> ptr[i32]` (and u8/f64 variants).
+///
+/// Creates a global constant array in `.rodata` and returns a pointer to it.
+/// All arguments must be compile-time literal values.
+fn emit_builtin_array_const(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+    elem_type: &str,
+) -> LlvmValue {
+    if args.is_empty() {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "array_const requires at least 1 argument".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    // Evaluate all args as compile-time constants.
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        match &arg.kind {
+            HirExprKind::IntLiteral { value } => {
+                values.push(format!("{elem_type} {value}"));
+            }
+            HirExprKind::FloatLiteral { value } => {
+                // Format float with enough precision.
+                values.push(format!("{elem_type} {value:e}"));
+            }
+            HirExprKind::UnaryOp {
+                op: UnaryOp::Neg,
+                operand,
+            } => {
+                // Handle negative literals: -42, -3.14
+                match &operand.kind {
+                    HirExprKind::IntLiteral { value } => {
+                        values.push(format!("{elem_type} -{value}"));
+                    }
+                    HirExprKind::FloatLiteral { value } => {
+                        values.push(format!("{elem_type} -{value:e}"));
+                    }
+                    _ => {
+                        ctx.errors.push(CodegenError::UnsupportedExpression {
+                            expr: "array_const requires all arguments to be literals"
+                                .to_string(),
+                            context: "built-in call".to_string(),
+                        });
+                        return LlvmValue {
+                            reg: "null".to_string(),
+                            ty: "ptr".to_string(),
+                        };
+                    }
+                }
+            }
+            _ => {
+                ctx.errors.push(CodegenError::UnsupportedExpression {
+                    expr: "array_const requires all arguments to be literals".to_string(),
+                    context: "built-in call".to_string(),
+                });
+                return LlvmValue {
+                    reg: "null".to_string(),
+                    ty: "ptr".to_string(),
+                };
+            }
+        }
+    }
+
+    let n = values.len();
+    let arr_id = ctx.const_array_count;
+    ctx.const_array_count += 1;
+
+    let global_name = format!("@.const.arr.{arr_id}");
+    let array_type = format!("[{n} x {elem_type}]");
+    let initializer = values.join(", ");
+
+    ctx.const_arrays.push(format!(
+        "{global_name} = private unnamed_addr constant {array_type} [{initializer}]"
+    ));
+
+    LlvmValue {
+        reg: global_name,
+        ty: "ptr".to_string(),
     }
 }
 
