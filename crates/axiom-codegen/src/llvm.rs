@@ -34,6 +34,9 @@ struct VarInfo {
     /// Local arrays have `alloca [N x T]` — the alloca IS the array pointer.
     /// Array parameters have `alloca ptr` — the alloca stores a pointer to the array.
     array_info: Option<ArrayVarInfo>,
+    /// Whether this variable has an unsigned integer type (u8, u16, u32, u64, u128).
+    /// Used to select unsigned operations (udiv, urem, icmp ult, etc.) in codegen.
+    is_unsigned: bool,
 }
 
 /// Extra info for array variables, enabling correct GEP codegen.
@@ -257,6 +260,11 @@ struct CodegenContext {
     needs_fshl_i64: bool,
     /// Whether the `@llvm.fshr.i64` intrinsic is needed (64-bit rotate right).
     needs_fshr_i64: bool,
+    /// Whether the `@llvm.memmove.p0.p0.i64` intrinsic is needed.
+    needs_memmove: bool,
+    /// Set of SSA register names that hold unsigned integer values.
+    /// Used to select unsigned operations (udiv, urem, icmp ult, etc.) in emit_binary_op.
+    unsigned_regs: std::collections::HashSet<String>,
 }
 
 /// Ownership kind for pointer parameters, used for access validation.
@@ -337,6 +345,8 @@ impl CodegenContext {
             const_array_meta: HashMap::new(),
             needs_fshl_i64: false,
             needs_fshr_i64: false,
+            needs_memmove: false,
+            unsigned_regs: std::collections::HashSet::new(),
         }
     }
 
@@ -937,6 +947,12 @@ fn codegen_inner(
             "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)"
         );
     }
+    if ctx.needs_memmove {
+        let _ = writeln!(
+            ctx.output,
+            "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)"
+        );
+    }
     if ctx.needs_fshl_i32 {
         let _ = writeln!(
             ctx.output,
@@ -1385,6 +1401,18 @@ fn is_signed_int_type_str(ty: &str) -> bool {
     matches!(ty, "i8" | "i16" | "i32" | "i64" | "i128")
 }
 
+/// Check if an HIR type is an unsigned integer type (u8, u16, u32, u64, u128).
+fn is_unsigned_hir_type(ty: &HirType) -> bool {
+    matches!(
+        ty,
+        HirType::Primitive(PrimitiveType::U8)
+            | HirType::Primitive(PrimitiveType::U16)
+            | HirType::Primitive(PrimitiveType::U32)
+            | HirType::Primitive(PrimitiveType::U64)
+            | HirType::Primitive(PrimitiveType::U128)
+    )
+}
+
 /// Emit a contract check (precondition or postcondition) as a conditional branch.
 ///
 /// If the condition is false, prints an error message and calls `exit(1)`.
@@ -1432,6 +1460,7 @@ fn emit_function(ctx: &mut CodegenContext, func: &HirFunction) {
     ctx.variables.clear();
     ctx.const_ptr_vars.clear();
     ctx.param_ownership.clear();
+    ctx.unsigned_regs.clear();
     ctx.block_terminated = false;
     ctx.current_return_type = String::new();
 
@@ -1752,6 +1781,7 @@ fn emit_param_allocas(ctx: &mut CodegenContext, params: &[HirParam]) {
                         size,
                         is_local: false,
                     }),
+                    is_unsigned: false,
                 },
             );
         } else if let HirType::UserDefined(ref struct_name) = param.ty {
@@ -1769,6 +1799,7 @@ fn emit_param_allocas(ctx: &mut CodegenContext, params: &[HirParam]) {
                     alloca_name,
                     llvm_type,
                     array_info: None,
+                    is_unsigned: false,
                 },
             );
         } else {
@@ -1785,12 +1816,14 @@ fn emit_param_allocas(ctx: &mut CodegenContext, params: &[HirParam]) {
                 "store {llvm_type} %{}, ptr {alloca_name}{align_suffix}",
                 param.name
             ));
+            let is_unsigned = is_unsigned_hir_type(&param.ty);
             ctx.variables.insert(
                 param.name.clone(),
                 VarInfo {
                     alloca_name,
                     llvm_type,
                     array_info: None,
+                    is_unsigned,
                 },
             );
         }
@@ -1846,6 +1879,7 @@ fn emit_stmt(ctx: &mut CodegenContext, stmt: &HirStmt) {
                             alloca_name: result_alloca.clone(),
                             llvm_type: ty.clone(),
                             array_info: None,
+                            is_unsigned: false,
                         },
                     );
 
@@ -1994,6 +2028,7 @@ fn emit_let(
                     size: *size,
                     is_local: true,
                 }),
+                is_unsigned: false,
             },
         );
         return;
@@ -2051,6 +2086,7 @@ fn emit_let(
                             alloca_name,
                             llvm_type,
                             array_info: None,
+                            is_unsigned: false,
                         },
                     );
                     // Track this variable as stack-promoted so heap_free
@@ -2096,6 +2132,7 @@ fn emit_let(
                 alloca_name: alloca_name.clone(),
                 llvm_type,
                 array_info: None,
+                is_unsigned: false,
             },
         );
 
@@ -2157,6 +2194,7 @@ fn emit_let(
                 alloca_name,
                 llvm_type,
                 array_info: None,
+                is_unsigned: false,
             },
         );
         return;
@@ -2189,6 +2227,7 @@ fn emit_let(
                     alloca_name: val.reg,
                     llvm_type,
                     array_info: None,
+                    is_unsigned: false,
                 },
             );
             return;
@@ -2211,12 +2250,14 @@ fn emit_let(
         ));
     }
 
+    let is_unsigned = is_unsigned_hir_type(ty);
     ctx.variables.insert(
         name.to_string(),
         VarInfo {
             alloca_name,
             llvm_type,
             array_info: None,
+            is_unsigned,
         },
     );
 }
@@ -2245,6 +2286,7 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
                         alloca_name: alloca_name.clone(),
                         llvm_type: vi.llvm_type.clone(),
                         array_info: None,
+                        is_unsigned: vi.is_unsigned,
                     },
                 );
                 // Now fall through to the normal assignment path.
@@ -2832,6 +2874,7 @@ fn emit_for(
             alloca_name: alloca_name.clone(),
             llvm_type: loop_type.clone(),
             array_info: None,
+            is_unsigned: false,
         },
     );
 
@@ -3199,6 +3242,11 @@ fn emit_ident(ctx: &mut CodegenContext, name: &str) -> LlvmValue {
         "{reg} = load {}, ptr {}{align_suffix}",
         var_info.llvm_type, var_info.alloca_name
     ));
+    // Propagate unsigned flag: if the variable is unsigned, mark the register
+    // so emit_binary_op can use unsigned operations (udiv, urem, icmp ult, etc.).
+    if var_info.is_unsigned {
+        ctx.unsigned_regs.insert(reg.clone());
+    }
     LlvmValue {
         reg,
         ty: var_info.llvm_type,
@@ -3886,23 +3934,33 @@ fn emit_binary_op(
             // RHS is a literal — adopt LHS type
             rhs_val.ty = lhs_val.ty.clone();
         } else if !lhs_is_literal && !rhs_is_literal {
-            // Both are registers with different types — cast smaller to larger
+            // Both are registers with different types — cast smaller to larger.
+            // Use zext for unsigned, sext for signed.
             let lhs_bits = type_bits(&lhs_val.ty);
             let rhs_bits = type_bits(&rhs_val.ty);
+            let any_unsigned = ctx.unsigned_regs.contains(&lhs_val.reg)
+                || ctx.unsigned_regs.contains(&rhs_val.reg);
+            let ext_op = if any_unsigned { "zext" } else { "sext" };
             if lhs_bits < rhs_bits {
                 let cast_reg = ctx.fresh_reg();
                 ctx.emit(&format!(
-                    "{cast_reg} = sext {} {} to {}",
+                    "{cast_reg} = {ext_op} {} {} to {}",
                     lhs_val.ty, lhs_val.reg, rhs_val.ty
                 ));
+                if any_unsigned {
+                    ctx.unsigned_regs.insert(cast_reg.clone());
+                }
                 lhs_val.reg = cast_reg;
                 lhs_val.ty = rhs_val.ty.clone();
             } else if rhs_bits < lhs_bits {
                 let cast_reg = ctx.fresh_reg();
                 ctx.emit(&format!(
-                    "{cast_reg} = sext {} {} to {}",
+                    "{cast_reg} = {ext_op} {} {} to {}",
                     rhs_val.ty, rhs_val.reg, lhs_val.ty
                 ));
+                if any_unsigned {
+                    ctx.unsigned_regs.insert(cast_reg.clone());
+                }
                 rhs_val.reg = cast_reg;
                 rhs_val.ty = lhs_val.ty.clone();
             }
@@ -3911,6 +3969,8 @@ fn emit_binary_op(
 
     let is_float = is_float_type(&lhs_val.ty);
     let is_int = is_signed_int_type_str(&lhs_val.ty);
+    let is_unsigned = ctx.unsigned_regs.contains(&lhs_val.reg)
+        || ctx.unsigned_regs.contains(&rhs_val.reg);
     let in_pure = ctx.current_func_is_pure || ctx.current_func_is_const;
     let result_reg = ctx.fresh_reg();
 
@@ -3948,21 +4008,26 @@ fn emit_binary_op(
         // Integer arithmetic — add nsw/nuw flags.
         // Regular ops (Add, Sub, Mul) get nsw (no signed wrap) since AXIOM defines
         // overflow as UB for non-Wrap variants.
+        // Unsigned types use nuw (no unsigned wrap) instead of nsw.
         // Wrap variants (AddWrap, SubWrap, MulWrap) explicitly allow wrapping — no flags.
         (BinOp::Add, false) => {
-            if is_int { "add nsw" } else { "add" }
+            if is_unsigned { "add nuw" } else if is_int { "add nsw" } else { "add" }
         }
         (BinOp::Sub, false) => {
-            if is_int { "sub nsw" } else { "sub" }
+            if is_unsigned { "sub nuw" } else if is_int { "sub nsw" } else { "sub" }
         }
         (BinOp::Mul, false) => {
-            if is_int { "mul nsw" } else { "mul" }
+            if is_unsigned { "mul nuw" } else if is_int { "mul nsw" } else { "mul" }
         }
         (BinOp::AddWrap, false) => "add",
         (BinOp::SubWrap, false) => "sub",
         (BinOp::MulWrap, false) => "mul",
-        (BinOp::Div, false) => "sdiv",
-        (BinOp::Mod, false) => "srem",
+        (BinOp::Div, false) => {
+            if is_unsigned { "udiv" } else { "sdiv" }
+        }
+        (BinOp::Mod, false) => {
+            if is_unsigned { "urem" } else { "srem" }
+        }
         // Float arithmetic — add `fast` flag in @pure/@const functions.
         (BinOp::Add, true) => {
             if in_pure { "fadd fast" } else { "fadd" }
@@ -4004,8 +4069,9 @@ fn emit_binary_op(
             };
         }
         (BinOp::Lt, false) => {
+            let cmp = if is_unsigned { "ult" } else { "slt" };
             ctx.emit(&format!(
-                "{result_reg} = icmp slt {} {}, {}",
+                "{result_reg} = icmp {cmp} {} {}, {}",
                 lhs_val.ty, lhs_val.reg, rhs_val.reg
             ));
             return LlvmValue {
@@ -4014,8 +4080,9 @@ fn emit_binary_op(
             };
         }
         (BinOp::Gt, false) => {
+            let cmp = if is_unsigned { "ugt" } else { "sgt" };
             ctx.emit(&format!(
-                "{result_reg} = icmp sgt {} {}, {}",
+                "{result_reg} = icmp {cmp} {} {}, {}",
                 lhs_val.ty, lhs_val.reg, rhs_val.reg
             ));
             return LlvmValue {
@@ -4024,8 +4091,9 @@ fn emit_binary_op(
             };
         }
         (BinOp::LtEq, false) => {
+            let cmp = if is_unsigned { "ule" } else { "sle" };
             ctx.emit(&format!(
-                "{result_reg} = icmp sle {} {}, {}",
+                "{result_reg} = icmp {cmp} {} {}, {}",
                 lhs_val.ty, lhs_val.reg, rhs_val.reg
             ));
             return LlvmValue {
@@ -4034,8 +4102,9 @@ fn emit_binary_op(
             };
         }
         (BinOp::GtEq, false) => {
+            let cmp = if is_unsigned { "uge" } else { "sge" };
             ctx.emit(&format!(
-                "{result_reg} = icmp sge {} {}, {}",
+                "{result_reg} = icmp {cmp} {} {}, {}",
                 lhs_val.ty, lhs_val.reg, rhs_val.reg
             ));
             return LlvmValue {
@@ -4121,6 +4190,10 @@ fn emit_binary_op(
         "{result_reg} = {instruction} {} {}, {}",
         lhs_val.ty, lhs_val.reg, rhs_val.reg
     ));
+    // Propagate unsigned flag through arithmetic results.
+    if is_unsigned {
+        ctx.unsigned_regs.insert(result_reg.clone());
+    }
     LlvmValue {
         reg: result_reg,
         ty: lhs_val.ty,
@@ -4370,6 +4443,14 @@ fn emit_call(ctx: &mut CodegenContext, func: &HirExpr, args: &[HirExpr]) -> Llvm
             "array_const_i32" => return emit_builtin_array_const(ctx, args, "i32"),
             "array_const_u8" => return emit_builtin_array_const(ctx, args, "i8"),
             "array_const_f64" => return emit_builtin_array_const(ctx, args, "double"),
+            // Global mutable array builtins (zero-initialized, writable)
+            "global_array_i32" => return emit_builtin_global_array(ctx, args, "i32"),
+            "global_array_u8" => return emit_builtin_global_array(ctx, args, "i8"),
+            "global_array_f64" => return emit_builtin_global_array(ctx, args, "double"),
+            // Memory builtins (memcpy, memset, memmove)
+            "memcpy" => return emit_builtin_memcpy_user(ctx, args),
+            "memset" => return emit_builtin_memset_user(ctx, args),
+            "memmove" => return emit_builtin_memmove(ctx, args),
             _ => {}
         }
 
@@ -10657,6 +10738,182 @@ fn emit_builtin_array_const(
     LlvmValue {
         reg: global_name,
         ty: "ptr".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global mutable array builtins
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `global_array_i32(size)`, `global_array_u8(size)`, `global_array_f64(size)`.
+///
+/// Creates a mutable global array with zeroinitializer. Unlike `array_const_*` which
+/// creates immutable constant data, `global_array_*` creates writable globals that
+/// persist across function calls (similar to C `static` arrays).
+///
+/// Returns a `ptr` to the global array.
+fn emit_builtin_global_array(
+    ctx: &mut CodegenContext,
+    args: &[HirExpr],
+    elem_type: &str,
+) -> LlvmValue {
+    if args.len() != 1 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "global_array requires exactly 1 argument (size)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "null".to_string(),
+            ty: "ptr".to_string(),
+        };
+    }
+
+    // Evaluate size as a compile-time constant.
+    let size = match &args[0].kind {
+        HirExprKind::IntLiteral { value } => *value as usize,
+        _ => {
+            ctx.errors.push(CodegenError::UnsupportedExpression {
+                expr: "global_array requires a literal size".to_string(),
+                context: "built-in call".to_string(),
+            });
+            return LlvmValue {
+                reg: "null".to_string(),
+                ty: "ptr".to_string(),
+            };
+        }
+    };
+
+    let arr_id = ctx.const_array_count;
+    ctx.const_array_count += 1;
+    let global_name = format!("@.global.arr.{arr_id}");
+    let array_type = format!("[{size} x {elem_type}]");
+
+    // Emit mutable global with zeroinitializer (private, writable).
+    ctx.const_arrays.push(format!(
+        "{global_name} = private global {array_type} zeroinitializer"
+    ));
+
+    // Track metadata for potential inbounds GEP optimization.
+    ctx.const_array_meta
+        .insert(global_name.clone(), (elem_type.to_string(), size));
+
+    LlvmValue {
+        reg: global_name,
+        ty: "ptr".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory builtins (memcpy, memset, memmove)
+// ---------------------------------------------------------------------------
+
+/// Emit built-in `memcpy(dst, src, num_bytes)`.
+///
+/// Copies `num_bytes` bytes from `src` to `dst`. The memory regions must not overlap.
+/// For overlapping regions, use `memmove`.
+fn emit_builtin_memcpy_user(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "memcpy() requires exactly 3 arguments (dst, src, num_bytes)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+    let dst = emit_expr(ctx, &args[0], Some("ptr"));
+    let src = emit_expr(ctx, &args[1], Some("ptr"));
+    let n = emit_expr(ctx, &args[2], Some("i64"));
+    let n64 = if n.ty != "i64" {
+        let ext = ctx.fresh_reg();
+        ctx.emit(&format!("{ext} = zext {} {} to i64", n.ty, n.reg));
+        ext
+    } else {
+        n.reg.clone()
+    };
+    ctx.needs_memcpy = true;
+    ctx.emit(&format!(
+        "call void @llvm.memcpy.p0.p0.i64(ptr {}, ptr {}, i64 {n64}, i1 false)",
+        dst.reg, src.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `memset(dst, val, num_bytes)`.
+///
+/// Sets `num_bytes` bytes at `dst` to the value `val` (truncated to i8).
+fn emit_builtin_memset_user(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "memset() requires exactly 3 arguments (dst, val, num_bytes)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+    let dst = emit_expr(ctx, &args[0], Some("ptr"));
+    let val = emit_expr(ctx, &args[1], Some("i32"));
+    let n = emit_expr(ctx, &args[2], Some("i64"));
+    // Truncate val to i8.
+    let val8 = ctx.fresh_reg();
+    ctx.emit(&format!("{val8} = trunc i32 {} to i8", val.reg));
+    let n64 = if n.ty != "i64" {
+        let ext = ctx.fresh_reg();
+        ctx.emit(&format!("{ext} = zext {} {} to i64", n.ty, n.reg));
+        ext
+    } else {
+        n.reg.clone()
+    };
+    ctx.needs_memset = true;
+    ctx.emit(&format!(
+        "call void @llvm.memset.p0.i64(ptr {}, i8 {val8}, i64 {n64}, i1 false)",
+        dst.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "i32".to_string(),
+    }
+}
+
+/// Emit built-in `memmove(dst, src, num_bytes)`.
+///
+/// Copies `num_bytes` bytes from `src` to `dst`. Handles overlapping memory regions
+/// correctly, unlike `memcpy`.
+fn emit_builtin_memmove(ctx: &mut CodegenContext, args: &[HirExpr]) -> LlvmValue {
+    if args.len() != 3 {
+        ctx.errors.push(CodegenError::UnsupportedExpression {
+            expr: "memmove() requires exactly 3 arguments (dst, src, num_bytes)".to_string(),
+            context: "built-in call".to_string(),
+        });
+        return LlvmValue {
+            reg: "0".to_string(),
+            ty: "i32".to_string(),
+        };
+    }
+    let dst = emit_expr(ctx, &args[0], Some("ptr"));
+    let src = emit_expr(ctx, &args[1], Some("ptr"));
+    let n = emit_expr(ctx, &args[2], Some("i64"));
+    let n64 = if n.ty != "i64" {
+        let ext = ctx.fresh_reg();
+        ctx.emit(&format!("{ext} = zext {} {} to i64", n.ty, n.reg));
+        ext
+    } else {
+        n.reg.clone()
+    };
+    ctx.needs_memmove = true;
+    ctx.emit(&format!(
+        "call void @llvm.memmove.p0.p0.i64(ptr {}, ptr {}, i64 {n64}, i1 false)",
+        dst.reg, src.reg
+    ));
+    LlvmValue {
+        reg: "0".to_string(),
+        ty: "i32".to_string(),
     }
 }
 

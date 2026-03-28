@@ -7073,3 +7073,253 @@ fn test_no_crash_handler_without_debug() {
         "non-debug mode should not emit crash handler: {ir}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Feature: memcpy / memset / memmove builtins
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_memcpy_builtin() {
+    let source = r#"
+fn main() -> i32 {
+    let src: ptr[i64] = heap_alloc(8, 1);
+    let dst: ptr[i64] = heap_alloc(8, 1);
+    memcpy(dst, src, 8);
+    heap_free(src);
+    heap_free(dst);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("call void @llvm.memcpy.p0.p0.i64(ptr"),
+        "should emit memcpy intrinsic call: {ir}"
+    );
+    assert!(
+        ir.contains("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)"),
+        "should declare memcpy intrinsic: {ir}"
+    );
+}
+
+#[test]
+fn test_memset_builtin() {
+    let source = r#"
+fn main() -> i32 {
+    let buf: ptr[i64] = heap_alloc(64, 1);
+    memset(buf, 0, 64);
+    heap_free(buf);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("call void @llvm.memset.p0.i64(ptr"),
+        "should emit memset intrinsic call: {ir}"
+    );
+    // Check truncation of val to i8.
+    assert!(
+        ir.contains("trunc i32"),
+        "should truncate i32 val to i8: {ir}"
+    );
+}
+
+#[test]
+fn test_memmove_builtin() {
+    let source = r#"
+fn main() -> i32 {
+    let buf: ptr[i64] = heap_alloc(64, 1);
+    memmove(buf, buf, 32);
+    heap_free(buf);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("call void @llvm.memmove.p0.p0.i64(ptr"),
+        "should emit memmove intrinsic call: {ir}"
+    );
+    assert!(
+        ir.contains("declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)"),
+        "should declare memmove intrinsic: {ir}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Feature: global_array_i32 / global_array_u8 / global_array_f64
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_global_array_i32() {
+    let source = r#"
+fn main() -> i32 {
+    let table: ptr[i32] = global_array_i32(256);
+    ptr_write_i32(table, 0, 42);
+    return ptr_read_i32(table, 0);
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("@.global.arr.0 = private global [256 x i32] zeroinitializer"),
+        "should emit mutable global i32 array: {ir}"
+    );
+}
+
+#[test]
+fn test_global_array_u8() {
+    let source = r#"
+fn main() -> i32 {
+    let buf: ptr[i64] = global_array_u8(1024);
+    ptr_write_u8(buf, 0, 255);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("@.global.arr.0 = private global [1024 x i8] zeroinitializer"),
+        "should emit mutable global u8 array: {ir}"
+    );
+}
+
+#[test]
+fn test_global_array_f64() {
+    let source = r#"
+fn main() -> i32 {
+    let data: ptr[f64] = global_array_f64(64);
+    ptr_write_f64(data, 0, 3.14);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("@.global.arr.0 = private global [64 x double] zeroinitializer"),
+        "should emit mutable global f64 array: {ir}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Feature: u32 unsigned semantics
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_u32_unsigned_division() {
+    let source = r#"
+fn main() -> i32 {
+    let big: u32 = 3000000000;
+    let half: u32 = big / 2;
+    print_i32(half);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("udiv"),
+        "u32 division should use udiv, not sdiv: {ir}"
+    );
+    assert!(
+        !ir.contains("sdiv"),
+        "u32 division should not use sdiv: {ir}"
+    );
+}
+
+#[test]
+fn test_u32_unsigned_modulo() {
+    let source = r#"
+fn main() -> i32 {
+    let a: u32 = 4000000000;
+    let b: u32 = a % 7;
+    print_i32(b);
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("urem"),
+        "u32 modulo should use urem, not srem: {ir}"
+    );
+}
+
+#[test]
+fn test_u32_unsigned_comparison() {
+    let source = r#"
+fn main() -> i32 {
+    let a: u32 = 3000000000;
+    let b: u32 = 1;
+    if a > b {
+        print_i32(1);
+    }
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("icmp ugt"),
+        "u32 comparison should use unsigned icmp ugt: {ir}"
+    );
+}
+
+#[test]
+fn test_u32_no_nsw_on_add() {
+    let source = r#"
+fn main() -> i32 {
+    let a: u32 = 1;
+    let b: u32 = 2;
+    let c: u32 = a + b;
+    return 0;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    // Unsigned add should use nuw, not nsw.
+    assert!(
+        ir.contains("add nuw"),
+        "u32 addition should use 'add nuw', not 'add nsw': {ir}"
+    );
+}
+
+#[test]
+fn test_signed_i32_still_uses_sdiv() {
+    let source = r#"
+fn main() -> i32 {
+    let a: i32 = 100;
+    let b: i32 = a / 3;
+    return b;
+}
+"#;
+    let parse_result = axiom_parser::parse(source);
+    assert!(!parse_result.has_errors());
+    let hir = axiom_hir::lower(&parse_result.module).expect("lowering should succeed");
+    let ir = codegen(&hir).expect("codegen should succeed");
+    assert!(
+        ir.contains("sdiv"),
+        "i32 division should still use sdiv: {ir}"
+    );
+}
