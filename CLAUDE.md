@@ -21,7 +21,7 @@ AXIOM must achieve top-tier scores on language comparison benchmarks. This is a 
 - Binary trees (Benchmarks Game classic): **AXIOM 80% faster** with arena allocator
 - See real-world port results below
 
-**Real-world C project ports (21 total):**
+**Real-world C project ports (21 total, all modules annotated with `@strict`):**
 
 | Project | GitHub Stars | Result |
 |---------|-------------|--------|
@@ -87,7 +87,7 @@ clang -O2                     <- Native binary (x86_64, AArch64)
 - **Parser**: Hand-written recursive descent with Pratt parsing
 - **Build system**: Cargo workspace
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`)
-- **Testing**: 565 tests passing (unit + integration + doc-tests + E2E)
+- **Testing**: 579 tests passing (unit + integration + doc-tests + E2E)
 - **Benchmarks**: 197 programs (115 simple + 30 complex + 20 real-world + 30 memory + 2 GitHub repos) + 21 real-world C project ports
 
 ## Current Feature Set
@@ -119,6 +119,7 @@ if / else if / else            // Conditional chains (else if fully supported)
 for i in range(start, end)     // Counted loop
 for i in range(start, end, step) // Counted loop with step
 while cond { }                 // While loop
+match expr { pat => expr, _ => expr }  // Pattern match (integers, booleans)
 break;                         // Break out of loop
 continue;                      // Skip to next iteration
 return expr;                   // Return with value
@@ -175,15 +176,19 @@ let broadcast: vec3 = v.xxx;        // Broadcast single component
 @invariant(expr)               // Block: loop invariant (checked in --debug)
 @trace                         // Function: emit ENTER/EXIT calls for tracing
 @link("lib", "kind")           // Function: link against a native library
+@cfg(condition)                // Conditional compilation (e.g., @cfg(target_os = "windows"))
 @transfer { ... }              // Inter-agent handoff
 @optimization_log { ... }      // Optimization history
 ```
 
-### All Builtin Functions (~171 total)
+### All Builtin Functions (~185 total)
 
-#### I/O (4)
+#### I/O (8)
 ```
 print(str) print_i32(n) print_i64(n) print_f64(x)
+print_hex_i32(n) print_hex_i64(n)
+flush()
+format_i32(n) format_f64(x) format_hex(n) format_i64(n)
 ```
 
 #### Math (25)
@@ -278,11 +283,28 @@ global_array_u8(size)              // Zero-initialized writable global u8 array
 global_array_f64(size)             // Zero-initialized writable global f64 array
 ```
 
-#### Memory Operations (3)
+#### Memory Operations (4)
 ```
 memcpy(dst, src, bytes)            // Copy bytes (non-overlapping) -> llvm.memcpy
 memset(ptr, val, bytes)            // Fill memory with byte value -> llvm.memset
 memmove(dst, src, bytes)           // Copy bytes (overlapping safe) -> llvm.memmove
+memcmp(a, b, bytes)               // Compare bytes -> 0 if equal, nonzero otherwise
+```
+
+#### Pointer Casts (2)
+```
+ptr_to_i64(ptr)                    // Cast pointer to i64 integer
+i64_to_ptr(n)                      // Cast i64 integer to pointer
+```
+
+#### SIMD Intrinsics (6)
+```
+simd_min(a, b)                     // Elementwise min on SIMD vector types
+simd_max(a, b)                     // Elementwise max on SIMD vector types
+simd_abs(v)                        // Elementwise absolute value
+simd_sqrt(v)                       // Elementwise square root
+simd_floor(v)                      // Elementwise floor
+simd_ceil(v)                       // Elementwise ceil
 ```
 
 #### File I/O (3)
@@ -317,13 +339,14 @@ atomic_add(ptr, delta) atomic_cas(ptr, expected, desired)
 mutex_create() mutex_lock(mtx) mutex_unlock(mtx) mutex_destroy(mtx)
 ```
 
-#### Job System (8)
+#### Job System (9)
 ```
 jobs_init(num_workers) job_dispatch(func, data, total_items)
 job_wait() jobs_shutdown() num_cores()
 job_dispatch_handle(func, data, total_items)
 job_dispatch_after(func, data, total_items, dependency_handle)
 job_wait_handle(handle)
+parallel_range(func, start, end, arg)
 ```
 
 #### Option (5)
@@ -343,9 +366,10 @@ vec_get_i32(v, idx) vec_get_f64(v, idx) vec_set_i32(v, idx, val) vec_set_f64(v, 
 vec_len(v) vec_free(v)
 ```
 
-#### Function Pointers (3)
+#### Function Pointers (4)
 ```
 fn_ptr(func_name) call_fn_ptr_i32(fp, arg) call_fn_ptr_f64(fp, arg)
+call_ptr(fp, args...)
 ```
 
 #### Result / Error Handling (6)
@@ -607,15 +631,22 @@ Types: `feat`, `fix`, `refactor`, `test`, `spec`, `docs`, `bench`, `chore`, `per
 - **E2E tests**: Compile to binary and verify output
 - **Benchmark tests**: Compare AXIOM vs C performance
 
-### Multi-Agent Development Pipeline
-The project uses a 7-agent pipeline:
-1. **Architect** -- designs specifications
-2. **Optimistic Design Reviewer** -- reviews spec for completeness
-3. **Pessimistic Design Reviewer** -- reviews spec for risks
-4. **Coder** -- implements from spec
-5. **QA** -- runs tests, verifies criteria
-6. **Optimistic Code Reviewer** -- reviews for quality
-7. **Pessimistic Code Reviewer** -- adversarial review for bugs and UB
+### Multi-Agent Development Pipeline (7-Agents Optimized)
+The project uses a 7-agent pipeline with model-optimized assignments:
+
+| # | Agent | Model | Rationale |
+|---|-------|-------|-----------|
+| 1 | **Architect** | **Opus** | Deep reasoning for design decisions |
+| 2 | **Optimistic Design Reviewer** | **Sonnet** | Structured completeness review |
+| 3 | **Pessimistic Design Reviewer** | **Opus** | Adversarial review needs max depth |
+| 4 | **Coder** | **Sonnet** | Implementation from well-defined spec |
+| 5 | **QA** | **Sonnet** | Systematic test analysis |
+| 6 | **Optimistic Code Reviewer** | **Sonnet** | Code review with clear patterns |
+| 7 | **Pessimistic Code Reviewer** | **Opus** | Finding subtle bugs and UB |
+
+**Model mix:** 3 Opus + 4 Sonnet = ~3x less rate limit pressure than 7 Opus.
+Opus for critical thinking (architect + pessimistic). Sonnet for implementation and systematic work.
+Sonnet agents run 3-5 in parallel safely. Opus agents run 1-2 at a time.
 
 ---
 
