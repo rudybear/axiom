@@ -2814,10 +2814,18 @@ fn emit_if(
         }
 
         // Merge block.
-        ctx.emit_blank();
-        ctx.emit_raw(&format!("{merge_label}:"));
-        // If both branches terminated, the merge block is unreachable.
-        ctx.block_terminated = then_terminated && else_terminated;
+        if then_terminated && else_terminated {
+            // Both branches return/break — merge block is unreachable.
+            // Only emit it if something might reference it (safety).
+            ctx.emit_blank();
+            ctx.emit_raw(&format!("{merge_label}:"));
+            ctx.emit("unreachable");
+            ctx.block_terminated = true;
+        } else {
+            ctx.emit_blank();
+            ctx.emit_raw(&format!("{merge_label}:"));
+            ctx.block_terminated = false;
+        }
     } else {
         if let Some((then_weight, else_weight)) = branch_weights {
             let md_id = ctx.fresh_metadata_id();
