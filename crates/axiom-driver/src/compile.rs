@@ -441,6 +441,156 @@ fn install_instructions() -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Static Library Compilation: axiom compile --lib
+// ---------------------------------------------------------------------------
+
+/// Compile LLVM IR to a static library (.a on Unix, .lib on Windows).
+///
+/// Steps:
+/// 1. Write IR to temp .ll file
+/// 2. Compile to object file with `clang -c`
+/// 3. Create archive with `llvm-ar` (or `ar`) to produce .a/.lib
+///
+/// Only `@export` functions will be externally visible in the resulting archive
+/// (non-export functions use `fastcc` and `internal` linkage in the IR).
+pub fn compile_to_static_lib(
+    llvm_ir: &str,
+    output_path: &str,
+    options: &CompileOptions,
+) -> miette::Result<()> {
+    let temp_ll = temp_ll_path();
+    std::fs::write(&temp_ll, llvm_ir)
+        .map_err(|e| miette::miette!("failed to write temp file {}: {}", temp_ll.display(), e))?;
+
+    let compiler = find_compiler()?;
+    let clang_path = match &compiler {
+        CompilerKind::Clang(p) => p.clone(),
+    };
+
+    // Also compile the runtime if needed
+    let needs_rt = axiom_codegen::needs_runtime(llvm_ir);
+    let rt_path = if needs_rt {
+        Some(write_runtime_c()?)
+    } else {
+        None
+    };
+
+    let opt_level = resolve_opt_level(options.optimize_for.as_deref());
+
+    // Step 1: Compile .ll to .o
+    let obj_path = temp_ll.with_extension("o");
+    let mut cmd = Command::new(&clang_path);
+    cmd.arg("-c")
+        .arg(opt_level)
+        .arg("-Wno-override-module")
+        .arg(&temp_ll)
+        .arg("-o")
+        .arg(&obj_path);
+
+    let march = match &options.target_arch {
+        Some(arch) => format!("-march={arch}"),
+        None => "-march=native".to_string(),
+    };
+    cmd.arg(&march);
+
+    if options.debug_mode {
+        cmd.arg("-g");
+    }
+
+    let child = cmd
+        .output()
+        .map_err(|e| miette::miette!("failed to run clang -c: {}", e))?;
+    if !child.status.success() {
+        let stderr = String::from_utf8_lossy(&child.stderr);
+        let _ = std::fs::remove_file(&temp_ll);
+        return Err(miette::miette!("clang -c failed:\n{}", stderr));
+    }
+
+    // Step 1b: If runtime is needed, compile it to .o as well
+    let rt_obj_path = if let Some(ref rt) = rt_path {
+        let rt_obj = rt.with_extension("o");
+        let mut rt_cmd = Command::new(&clang_path);
+        rt_cmd
+            .arg("-c")
+            .arg(opt_level)
+            .arg("-Wno-override-module")
+            .arg(rt)
+            .arg("-o")
+            .arg(&rt_obj);
+        rt_cmd.arg(&march);
+        if options.debug_mode {
+            rt_cmd.arg("-DAXIOM_DEBUG_MODE");
+            rt_cmd.arg("-g");
+        }
+        let rt_child = rt_cmd
+            .output()
+            .map_err(|e| miette::miette!("failed to compile runtime: {}", e))?;
+        if !rt_child.status.success() {
+            let stderr = String::from_utf8_lossy(&rt_child.stderr);
+            let _ = std::fs::remove_file(&temp_ll);
+            let _ = std::fs::remove_file(&obj_path);
+            return Err(miette::miette!("runtime compilation failed:\n{}", stderr));
+        }
+        Some(rt_obj)
+    } else {
+        None
+    };
+
+    // Step 2: Create archive with llvm-ar or ar
+    let ar_name = find_ar()?;
+    let mut ar_cmd = Command::new(&ar_name);
+    ar_cmd.arg("rcs").arg(output_path).arg(&obj_path);
+    if let Some(ref rt_obj) = rt_obj_path {
+        ar_cmd.arg(rt_obj);
+    }
+
+    let ar_child = ar_cmd
+        .output()
+        .map_err(|e| miette::miette!("failed to run {}: {}", ar_name, e))?;
+    if !ar_child.status.success() {
+        let stderr = String::from_utf8_lossy(&ar_child.stderr);
+        let _ = std::fs::remove_file(&temp_ll);
+        let _ = std::fs::remove_file(&obj_path);
+        if let Some(ref rt_obj) = rt_obj_path {
+            let _ = std::fs::remove_file(rt_obj);
+        }
+        return Err(miette::miette!("{} failed:\n{}", ar_name, stderr));
+    }
+
+    // Clean up temp files
+    let _ = std::fs::remove_file(&temp_ll);
+    let _ = std::fs::remove_file(&obj_path);
+    if let Some(ref rt_obj) = rt_obj_path {
+        let _ = std::fs::remove_file(rt_obj);
+    }
+    if let Some(ref rp) = rt_path {
+        if let Some(rt_dir) = rp.parent() {
+            let _ = std::fs::remove_dir_all(rt_dir);
+        }
+    }
+
+    Ok(())
+}
+
+/// Find an archiver tool (llvm-ar, ar, or llvm-lib on Windows).
+fn find_ar() -> miette::Result<String> {
+    let candidates = if cfg!(windows) {
+        vec!["llvm-ar", "llvm-lib", "ar", "lib"]
+    } else {
+        vec!["llvm-ar", "ar"]
+    };
+    for name in &candidates {
+        if compiler_exists(name) {
+            return Ok(name.to_string());
+        }
+    }
+    Err(miette::miette!(
+        "no archiver (llvm-ar / ar) found on PATH.\n\
+         Install LLVM or binutils to create static libraries."
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // L4: PGO (Profile-Guided Optimization) Bootstrap
 // ---------------------------------------------------------------------------
 
@@ -741,5 +891,11 @@ mod tests {
         let opts = CompileOptions::default();
         assert!(opts.target_arch.is_none());
         assert!(opts.optimize_for.is_none());
+    }
+
+    #[test]
+    fn test_find_ar_does_not_panic() {
+        // find_ar should return Ok or Err without panicking
+        let _result = find_ar();
     }
 }

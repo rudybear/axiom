@@ -1,3 +1,4 @@
+@strict;
 @module roaring;
 @intent("Roaring bitmap core operations: array/bitset containers, union, intersection, cardinality, with benchmark");
 
@@ -29,6 +30,7 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+@intent("Roaring bitmap constants: container geometry")
 @const fn BITSET_WORDS() -> i32 { return 1024; }
 @const fn BITS_PER_WORD() -> i32 { return 64; }
 @const fn MAX_VALUE() -> i32 { return 65536; }
@@ -37,6 +39,11 @@
 // Popcount (Hamming weight) for 64-bit integer
 // Uses the Kernighan/SWAR bit-counting algorithm
 // ---------------------------------------------------------------------------
+@intent("Count the number of set bits in a 64-bit integer using SWAR parallel bit-summation")
+@postcondition(return >= 0 and return <= 64)
+@test { input: (0), expect: 0 }
+@test { input: (1), expect: 1 }
+@test { input: (-1), expect: 64 }
 @pure @inline(always)
 fn popcount64(x: i64) -> i32 {
     // SWAR (SIMD Within A Register) popcount
@@ -62,6 +69,7 @@ fn popcount64(x: i64) -> i32 {
 // ---------------------------------------------------------------------------
 // Bitset: create zeroed 1024-word container
 // ---------------------------------------------------------------------------
+@intent("Allocate a zeroed 1024-word (8KB) bitset container capable of representing 65536 bits")
 fn bitset_create() -> ptr[i64] {
     return heap_alloc_zeroed(BITSET_WORDS(), 8);
 }
@@ -69,6 +77,8 @@ fn bitset_create() -> ptr[i64] {
 // ---------------------------------------------------------------------------
 // Bitset: set bit at position k
 // ---------------------------------------------------------------------------
+@intent("Set the bit at position k in the bitset container")
+@precondition(k >= 0 and k < 65536)
 @inline(always)
 fn bitset_set(bs: ptr[i64], k: i32) {
     let word_idx: i32 = lshr(k, 6);   // k / 64
@@ -81,6 +91,9 @@ fn bitset_set(bs: ptr[i64], k: i32) {
 // ---------------------------------------------------------------------------
 // Bitset: test bit at position k (returns 0 or 1)
 // ---------------------------------------------------------------------------
+@intent("Test whether bit k is set in the bitset, returning 0 or 1")
+@precondition(k >= 0 and k < 65536)
+@postcondition(return == 0 or return == 1)
 @pure @inline(always)
 fn bitset_test(bs: ptr[i64], k: i32) -> i32 {
     let word_idx: i32 = lshr(k, 6);
@@ -92,6 +105,8 @@ fn bitset_test(bs: ptr[i64], k: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Bitset: cardinality (popcount all words)
 // ---------------------------------------------------------------------------
+@intent("Count total set bits across all 1024 words of the bitset container")
+@postcondition(return >= 0 and return <= 65536)
 @pure @inline(always)
 fn bitset_cardinality(bs: ptr[i64]) -> i32 {
     let count: i32 = 0;
@@ -104,6 +119,7 @@ fn bitset_cardinality(bs: ptr[i64]) -> i32 {
 // ---------------------------------------------------------------------------
 // Bitset OR (union): dst = a | b
 // ---------------------------------------------------------------------------
+@intent("Compute bitwise OR union of bitset containers a and b, storing result in dst")
 @pure @inline(always)
 fn bitset_union(a: ptr[i64], b: ptr[i64], dst: ptr[i64]) {
     for i: i32 in range(0, BITSET_WORDS()) {
@@ -114,6 +130,7 @@ fn bitset_union(a: ptr[i64], b: ptr[i64], dst: ptr[i64]) {
 // ---------------------------------------------------------------------------
 // Bitset AND (intersection): dst = a & b
 // ---------------------------------------------------------------------------
+@intent("Compute bitwise AND intersection of bitset containers a and b, storing result in dst")
 @pure @inline(always)
 fn bitset_intersection(a: ptr[i64], b: ptr[i64], dst: ptr[i64]) {
     for i: i32 in range(0, BITSET_WORDS()) {
@@ -124,6 +141,8 @@ fn bitset_intersection(a: ptr[i64], b: ptr[i64], dst: ptr[i64]) {
 // ---------------------------------------------------------------------------
 // Bitset union cardinality (without materializing)
 // ---------------------------------------------------------------------------
+@intent("Count set bits in the union of a and b without materializing the result container")
+@postcondition(return >= 0 and return <= 65536)
 @pure @inline(always)
 fn bitset_union_count(a: ptr[i64], b: ptr[i64]) -> i32 {
     let count: i32 = 0;
@@ -136,6 +155,8 @@ fn bitset_union_count(a: ptr[i64], b: ptr[i64]) -> i32 {
 // ---------------------------------------------------------------------------
 // Bitset intersection cardinality (without materializing)
 // ---------------------------------------------------------------------------
+@intent("Count set bits in the intersection of a and b without materializing the result container")
+@postcondition(return >= 0 and return <= 65536)
 @pure @inline(always)
 fn bitset_intersection_count(a: ptr[i64], b: ptr[i64]) -> i32 {
     let count: i32 = 0;
@@ -155,6 +176,8 @@ fn bitset_intersection_count(a: ptr[i64], b: ptr[i64]) -> i32 {
 // ---------------------------------------------------------------------------
 // Array container: create with given capacity
 // ---------------------------------------------------------------------------
+@intent("Allocate a sorted array container with given capacity, length stored at index 0")
+@precondition(capacity > 0)
 fn array_create(capacity: i32) -> ptr[i32] {
     let buf: ptr[i32] = heap_alloc(capacity + 1, 4);
     ptr_write_i32(buf, 0, 0);  // length = 0
@@ -164,6 +187,8 @@ fn array_create(capacity: i32) -> ptr[i32] {
 // ---------------------------------------------------------------------------
 // Array container: get length
 // ---------------------------------------------------------------------------
+@intent("Return the current element count of the array container")
+@postcondition(return >= 0)
 @pure @inline(always)
 fn array_len(arr: ptr[i32]) -> i32 {
     return ptr_read_i32(arr, 0);
@@ -172,6 +197,7 @@ fn array_len(arr: ptr[i32]) -> i32 {
 // ---------------------------------------------------------------------------
 // Array container: append value (caller ensures sorted order)
 // ---------------------------------------------------------------------------
+@intent("Append val to the end of the array container, incrementing its length")
 @inline(always)
 fn array_append(arr: ptr[i32], val: i32) {
     let len: i32 = ptr_read_i32(arr, 0);
@@ -182,6 +208,8 @@ fn array_append(arr: ptr[i32], val: i32) {
 // ---------------------------------------------------------------------------
 // Array container: get value at index
 // ---------------------------------------------------------------------------
+@intent("Read the value at logical index idx from the array container (data starts at offset 1)")
+@precondition(idx >= 0)
 @pure @inline(always)
 fn array_get(arr: ptr[i32], idx: i32) -> i32 {
     return ptr_read_i32(arr, idx + 1);
@@ -191,6 +219,7 @@ fn array_get(arr: ptr[i32], idx: i32) -> i32 {
 // Array OR (union): merge two sorted arrays, result in dst
 // Uses merge-join (linear scan of both arrays)
 // ---------------------------------------------------------------------------
+@intent("Merge-join two sorted array containers into dst, producing the set union with no duplicates")
 fn array_union(a: ptr[i32], b: ptr[i32], dst: ptr[i32]) {
     let alen: i32 = array_len(a);
     let blen: i32 = array_len(b);
@@ -233,6 +262,7 @@ fn array_union(a: ptr[i32], b: ptr[i32], dst: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // Array AND (intersection): find common elements
 // ---------------------------------------------------------------------------
+@intent("Merge-intersect two sorted array containers into dst, producing only common elements")
 fn array_intersection(a: ptr[i32], b: ptr[i32], dst: ptr[i32]) {
     let alen: i32 = array_len(a);
     let blen: i32 = array_len(b);
@@ -263,6 +293,7 @@ fn array_intersection(a: ptr[i32], b: ptr[i32], dst: ptr[i32]) {
 // VERIFICATION AND BENCHMARK
 // ===========================================================================
 
+@intent("Verify bitset and array container operations against known set results, then benchmark 100K iterations of union/intersection/cardinality")
 fn main() -> i32 {
     print("=== Roaring Bitmap (CRoaring Core) ===\n");
 

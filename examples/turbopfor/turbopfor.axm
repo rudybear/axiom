@@ -1,4 +1,5 @@
 @module turbopfor;
+@strict;
 @intent("TurboPFor-style integer compression: bit-packing, delta encoding, variable-byte encoding with benchmarks");
 
 // =============================================================================
@@ -22,6 +23,9 @@
 // Bit-width calculation: find minimum bits needed for max value in array
 // ---------------------------------------------------------------------------
 
+@intent("find maximum value in an i32 array of n elements")
+@precondition(n > 0)
+@postcondition(true)
 @pure @inline(always)
 fn find_max_value(input: ptr[i32], n: i32) -> i32 {
     let max_val: i32 = 0;
@@ -34,6 +38,9 @@ fn find_max_value(input: ptr[i32], n: i32) -> i32 {
     return max_val;
 }
 
+@intent("compute minimum number of bits needed to represent a non-negative value")
+@precondition(val >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn bit_width(val: i32) -> i32 {
     // Count bits needed to represent val (0 needs 0 bits, but we return 1 minimum)
@@ -58,6 +65,9 @@ fn bit_width(val: i32) -> i32 {
 // Algorithm: maintain a bit buffer (32-bit accumulator). For each value,
 // OR it into the accumulator at the current bit offset, flush full bytes.
 
+@intent("bit-pack n integers into output stream using minimum bit width")
+@precondition(n > 0)
+@postcondition(true)
 @inline(always)
 fn bitpack_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
     let max_val: i32 = find_max_value(input, n);
@@ -102,6 +112,9 @@ fn bitpack_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
 // Decodes n integers from input byte stream into output[].
 // bits = number of bits per integer (read from header by caller).
 
+@intent("decode n bit-packed integers from input stream into output array")
+@precondition(n > 0 and bits > 0)
+@postcondition(true)
 @inline(always)
 fn bitpack_decode(input: ptr[i32], start: i32, n: i32, bits: i32, output: ptr[i32]) {
     let in_pos: i32 = start;
@@ -133,6 +146,9 @@ fn bitpack_decode(input: ptr[i32], start: i32, n: i32, bits: i32, output: ptr[i3
 // ---------------------------------------------------------------------------
 // For sorted input [100, 103, 107, 115], output = [100, 3, 4, 8].
 
+@intent("delta encode sorted array: store differences between consecutive values")
+@precondition(n >= 1)
+@postcondition(true)
 @inline(always)
 fn delta_encode(input: ptr[i32], n: i32, output: ptr[i32]) {
     if n < 1 {
@@ -149,6 +165,9 @@ fn delta_encode(input: ptr[i32], n: i32, output: ptr[i32]) {
 // Delta decode: reconstruct original values from deltas
 // ---------------------------------------------------------------------------
 
+@intent("reconstruct original values from delta-encoded differences")
+@precondition(n >= 1)
+@postcondition(true)
 @inline(always)
 fn delta_decode(input: ptr[i32], n: i32, output: ptr[i32]) {
     if n < 1 {
@@ -168,6 +187,9 @@ fn delta_decode(input: ptr[i32], n: i32, output: ptr[i32]) {
 // Low 7 bits carry payload.
 // Returns: number of bytes written.
 
+@intent("encode n integers using variable-byte encoding with 7-bit payloads")
+@precondition(n > 0)
+@postcondition(true)
 @inline(always)
 fn vbyte_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
     let out_pos: i32 = 0;
@@ -203,6 +225,9 @@ fn vbyte_encode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
 // Decodes n integers from input byte stream into output[].
 // Returns: number of bytes consumed from input.
 
+@intent("decode n variable-byte encoded integers from input stream")
+@precondition(n > 0)
+@postcondition(true)
 @inline(always)
 fn vbyte_decode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
     let in_pos: i32 = 0;
@@ -228,6 +253,9 @@ fn vbyte_decode(input: ptr[i32], n: i32, output: ptr[i32]) -> i32 {
 // Combined pipeline: delta + bitpack encode
 // ---------------------------------------------------------------------------
 
+@intent("apply delta encoding then bit-packing for optimal compression")
+@precondition(n > 0)
+@postcondition(true)
 @inline(always)
 fn delta_bitpack_encode(input: ptr[i32], n: i32,
                         delta_buf: ptr[i32],
@@ -240,6 +268,9 @@ fn delta_bitpack_encode(input: ptr[i32], n: i32,
 // Combined pipeline: bitpack + delta decode
 // ---------------------------------------------------------------------------
 
+@intent("decode bit-packed data then apply delta reconstruction")
+@precondition(n > 0)
+@postcondition(true)
 @inline(always)
 fn delta_bitpack_decode(input: ptr[i32], n: i32,
                         delta_buf: ptr[i32],
@@ -255,6 +286,9 @@ fn delta_bitpack_decode(input: ptr[i32], n: i32,
 // Verify: compare two i32 arrays
 // ---------------------------------------------------------------------------
 
+@intent("compare two i32 arrays element-by-element, return 1 if identical")
+@precondition(n >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn arrays_equal(a: ptr[i32], b: ptr[i32], n: i32) -> i32 {
     for i: i32 in range(0, n) {
@@ -269,6 +303,9 @@ fn arrays_equal(a: ptr[i32], b: ptr[i32], n: i32) -> i32 {
 // Pseudo-random number generator (LCG)
 // ---------------------------------------------------------------------------
 
+@intent("advance LCG pseudo-random number generator and return next value")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn lcg_next(state: ptr[i32]) -> i32 {
     let s: i32 = ptr_read_i32(state, 0);
@@ -283,6 +320,9 @@ fn lcg_next(state: ptr[i32]) -> i32 {
 // Generate sorted test data simulating document IDs
 // ---------------------------------------------------------------------------
 
+@intent("generate n sorted document IDs with random gaps simulating posting lists")
+@precondition(n > 0)
+@postcondition(true)
 fn generate_sorted_ids(output: ptr[i32], n: i32, seed: i32) {
     let state: ptr[i32] = heap_alloc(1, 4);
     ptr_write_i32(state, 0, seed);
@@ -302,6 +342,9 @@ fn generate_sorted_ids(output: ptr[i32], n: i32, seed: i32) {
 // Generate small-value data (simulating frequency counts)
 // ---------------------------------------------------------------------------
 
+@intent("generate n random small values in range 0..max_val for testing")
+@precondition(n > 0 and max_val > 0)
+@postcondition(true)
 fn generate_small_values(output: ptr[i32], n: i32, seed: i32, max_val: i32) {
     let state: ptr[i32] = heap_alloc(1, 4);
     ptr_write_i32(state, 0, seed);

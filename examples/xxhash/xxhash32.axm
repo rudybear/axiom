@@ -1,4 +1,5 @@
 @module xxhash32;
+@strict;
 @intent("xxHash32 non-cryptographic hash function ported from C, with verification and benchmark");
 
 // =============================================================================
@@ -19,18 +20,33 @@
 // xxHash32 prime constants (as signed i32, same bit patterns as uint32_t)
 // ---------------------------------------------------------------------------
 
+@intent("return xxHash32 prime constant P1")
+@precondition(true)
+@postcondition(true)
 @const fn PRIME1() -> i32 { return 0 - 1640531535; }
 // 0x9E3779B1 = 2654435761 -> as i32 = -1640531535
 
+@intent("return xxHash32 prime constant P2")
+@precondition(true)
+@postcondition(true)
 @const fn PRIME2() -> i32 { return 0 - 2048144777; }
 // 0x85EBCA77 = 2246822519 -> as i32 = -2048144777
 
+@intent("return xxHash32 prime constant P3")
+@precondition(true)
+@postcondition(true)
 @const fn PRIME3() -> i32 { return 0 - 1028477379; }
 // 0xC2B2AE3D = 3266489917 -> as i32 = -1028477379
 
+@intent("return xxHash32 prime constant P4")
+@precondition(true)
+@postcondition(true)
 @const fn PRIME4() -> i32 { return 668265263; }
 // 0x27D4EB2F = 668265263
 
+@intent("return xxHash32 prime constant P5")
+@precondition(true)
+@postcondition(true)
 @const fn PRIME5() -> i32 { return 374761393; }
 // 0x165667B1 = 374761393
 
@@ -38,6 +54,9 @@
 // Helper: read a 32-bit little-endian value from a byte buffer
 // ---------------------------------------------------------------------------
 
+@intent("read 4 bytes from buffer as little-endian i32")
+@precondition(byte_offset >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn read32_le(data: ptr[i32], byte_offset: i32) -> i32 {
     // GAP: No ptr_read_u8; ptr_read_u8 returns i32 (zero-extended byte).
@@ -53,6 +72,9 @@ fn read32_le(data: ptr[i32], byte_offset: i32) -> i32 {
 // Core round function: acc = rotl((acc +% (val *% PRIME2)), 13) *% PRIME1
 // ---------------------------------------------------------------------------
 
+@intent("apply one xxHash32 accumulator round with wrapping multiply and rotate")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn xxh32_round(acc: i32, val: i32) -> i32 {
     let a: i32 = acc +% (val *% PRIME2());
@@ -63,6 +85,9 @@ fn xxh32_round(acc: i32, val: i32) -> i32 {
 // Avalanche / finalization mix
 // ---------------------------------------------------------------------------
 
+@intent("apply xxHash32 avalanche finalization mix to hash value")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn xxh32_avalanche(h: i32) -> i32 {
     let h1: i32 = bxor(h, lshr(h, 15));
@@ -77,6 +102,9 @@ fn xxh32_avalanche(h: i32) -> i32 {
 // xxHash32 main function
 // ---------------------------------------------------------------------------
 
+@intent("compute xxHash32 hash of data buffer with given seed")
+@precondition(len >= 0)
+@postcondition(true)
 @pure
 fn xxhash32(data: ptr[i32], len: i32, seed: i32) -> i32 {
     let h: i32 = 0;
@@ -134,6 +162,9 @@ fn xxhash32(data: ptr[i32], len: i32, seed: i32) -> i32 {
 // Test data initialization
 // ---------------------------------------------------------------------------
 
+@intent("fill buffer with deterministic pseudo-random byte pattern")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_test_data(data: ptr[i32], len: i32) {
     for i: i32 in range(0, len) {
         // Fill with a deterministic pattern

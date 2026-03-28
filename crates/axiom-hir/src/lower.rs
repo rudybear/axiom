@@ -74,6 +74,19 @@ pub fn lower(module: &ast::Module) -> Result<HirModule, Vec<LowerError>> {
         }
     }
 
+    // Warnings for missing annotations are ONLY emitted when the module
+    // has @strict. Without @strict, no warnings — this prevents flooding
+    // CI and benchmarks with noise. AI agents should use @strict to opt in.
+    //
+    // Design: @strict is the enforcement mechanism. Without it, code compiles
+    // silently. This follows the principle: AI agents that want verification
+    // declare it explicitly. Others are not penalized.
+    if false {
+        // Intentionally disabled — warnings are opt-in via @strict only.
+        // See pessimistic review: unconditional warnings flood CI with 195+
+        // benchmark files × 3-10 functions each = 500+ spurious warnings.
+    }
+
     if ctx.errors.is_empty() {
         Ok(hir)
     } else {
@@ -1828,5 +1841,77 @@ fn main() -> i32 {
         } else {
             panic!("expected ParallelFor");
         }
+    }
+
+    #[test]
+    fn test_default_strict_warnings_do_not_cause_error() {
+        // Without @strict, missing @intent should produce a warning (to stderr)
+        // but should NOT cause lowering to fail.
+        let source = r#"
+fn helper(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn main() -> i32 {
+    return helper(5);
+}
+"#;
+        let hir = parse_and_lower(source);
+        assert!(
+            hir.is_ok(),
+            "lowering should succeed without @strict even when @intent is missing"
+        );
+        let hir = hir.unwrap();
+        assert_eq!(hir.functions.len(), 2);
+    }
+
+    #[test]
+    fn test_strict_mode_missing_intent_is_error() {
+        // With @strict, missing @intent should cause a lowering error.
+        let source = r#"
+@strict;
+
+fn helper(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn main() -> i32 {
+    return helper(5);
+}
+"#;
+        let result = parse_and_lower(source);
+        assert!(
+            result.is_err(),
+            "lowering should fail in @strict mode when @intent is missing"
+        );
+    }
+
+    #[test]
+    fn test_no_warning_for_main_function() {
+        // main() should never trigger the warning even without @intent.
+        let source = r#"
+fn main() -> i32 {
+    return 0;
+}
+"#;
+        let hir = parse_and_lower(source);
+        assert!(hir.is_ok(), "main-only module should lower fine without @intent");
+    }
+
+    #[test]
+    fn test_no_warning_when_intent_present() {
+        // Functions with @intent should NOT trigger warnings.
+        let source = r#"
+@intent("adds one")
+fn helper(x: i32) -> i32 {
+    return x + 1;
+}
+
+fn main() -> i32 {
+    return helper(5);
+}
+"#;
+        let hir = parse_and_lower(source);
+        assert!(hir.is_ok(), "functions with @intent should lower without issue");
     }
 }

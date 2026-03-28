@@ -1,4 +1,5 @@
 @module lzav;
+@strict;
 @intent("LZAV-style compression/decompression with improved ratio over LZ4, verification and benchmark");
 
 // =============================================================================
@@ -25,25 +26,38 @@
 // Constants
 // ---------------------------------------------------------------------------
 
+@intent("return LZAV hash table size") @precondition(true) @postcondition(true)
 @const fn HASH_TABLE_SIZE() -> i32 { return 16384; }
+@intent("return LZAV hash table log2 size") @precondition(true) @postcondition(true)
 @const fn HASH_LOG() -> i32 { return 14; }
+@intent("return LZAV hash table bitmask") @precondition(true) @postcondition(true)
 @const fn HASH_MASK() -> i32 { return 16383; }
+@intent("return minimum match length for backreference") @precondition(true) @postcondition(true)
 @const fn MIN_MATCH() -> i32 { return 4; }
+@intent("return maximum token length field value") @precondition(true) @postcondition(true)
 @const fn MAX_TOKEN_LEN() -> i32 { return 63; }
 
 // Token type codes (upper 2 bits of token byte)
+@intent("return token type code for literal run") @precondition(true) @postcondition(true)
 @const fn TYPE_LITERAL() -> i32 { return 0; }
+@intent("return token type code for short match") @precondition(true) @postcondition(true)
 @const fn TYPE_SHORT_MATCH() -> i32 { return 1; }
+@intent("return token type code for long match") @precondition(true) @postcondition(true)
 @const fn TYPE_LONG_MATCH() -> i32 { return 2; }
+@intent("return token type code for repeat match") @precondition(true) @postcondition(true)
 @const fn TYPE_REPEAT_MATCH() -> i32 { return 3; }
 
 // Hash multiplier (2654435761 as signed i32 = -1640531535)
+@intent("return LZAV hash multiplier constant") @precondition(true) @postcondition(true)
 @const fn HASH_MULT() -> i32 { return 0 - 1640531535; }
 
 // ---------------------------------------------------------------------------
 // Helper: read 4 bytes as a 32-bit value (little-endian)
 // ---------------------------------------------------------------------------
 
+@intent("read 4 bytes from buffer as little-endian i32")
+@precondition(byte_offset >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn read32_le(data: ptr[i32], byte_offset: i32) -> i32 {
     let b0: i32 = ptr_read_u8(data, byte_offset);
@@ -57,6 +71,9 @@ fn read32_le(data: ptr[i32], byte_offset: i32) -> i32 {
 // Hash function: hash 4 bytes at position
 // ---------------------------------------------------------------------------
 
+@intent("compute LZAV hash of 4-byte value for hash table lookup")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn lzav_hash(val: i32) -> i32 {
     return band(lshr(val *% HASH_MULT(), 18), HASH_MASK());
@@ -66,6 +83,9 @@ fn lzav_hash(val: i32) -> i32 {
 // Write token byte: 2-bit type + 6-bit length
 // ---------------------------------------------------------------------------
 
+@intent("write LZAV token byte encoding 2-bit type and 6-bit length")
+@precondition(pos >= 0 and tok_type >= 0 and tok_type <= 3)
+@postcondition(true)
 @inline(always)
 fn write_token(dst: ptr[i32], pos: i32, tok_type: i32, length: i32) {
     let token: i32 = bor(shl(tok_type, 6), band(length, MAX_TOKEN_LEN()));
@@ -77,6 +97,9 @@ fn write_token(dst: ptr[i32], pos: i32, tok_type: i32, length: i32) {
 // Encodes remainder in 255-byte run-length chunks
 // ---------------------------------------------------------------------------
 
+@intent("write run-length encoded extended length in 255-byte chunks")
+@precondition(pos >= 0 and length >= 0)
+@postcondition(true)
 @inline(always)
 fn write_extended_length(dst: ptr[i32], pos: i32, length: i32) -> i32 {
     let rem: i32 = length;
@@ -95,6 +118,9 @@ fn write_extended_length(dst: ptr[i32], pos: i32, length: i32) -> i32 {
 // Read extended length during decompression
 // ---------------------------------------------------------------------------
 
+@intent("read run-length encoded extended length from compressed stream")
+@precondition(pos >= 0 and base_len >= 0)
+@postcondition(true)
 @inline(always)
 fn read_extended_length(src: ptr[i32], pos: i32, base_len: i32,
                         out_len: ptr[i32], out_pos: ptr[i32], src_len: i32) {
@@ -119,12 +145,18 @@ fn read_extended_length(src: ptr[i32], pos: i32, base_len: i32,
 // Write offset: 1 byte for short, 2 bytes for long
 // ---------------------------------------------------------------------------
 
+@intent("write 1-byte short offset for nearby match")
+@precondition(pos >= 0 and offset >= 0 and offset < 256)
+@postcondition(true)
 @inline(always)
 fn write_offset_short(dst: ptr[i32], pos: i32, offset: i32) -> i32 {
     ptr_write_u8(dst, pos, band(offset, 255));
     return pos + 1;
 }
 
+@intent("write 2-byte long offset for distant match")
+@precondition(pos >= 0 and offset >= 0)
+@postcondition(true)
 @inline(always)
 fn write_offset_long(dst: ptr[i32], pos: i32, offset: i32) -> i32 {
     ptr_write_u8(dst, pos, band(offset, 255));
@@ -136,6 +168,9 @@ fn write_offset_long(dst: ptr[i32], pos: i32, offset: i32) -> i32 {
 // Compute match length between two positions
 // ---------------------------------------------------------------------------
 
+@intent("compute byte-by-byte match length between two positions")
+@precondition(pos1 >= 0 and pos2 >= 0 and max_len >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn match_length(src: ptr[i32], pos1: i32, pos2: i32, max_len: i32) -> i32 {
     let len: i32 = 0;
@@ -153,6 +188,9 @@ fn match_length(src: ptr[i32], pos1: i32, pos2: i32, max_len: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Returns compressed size in bytes, or 0 on failure.
 
+@intent("compress source buffer using LZAV with short/long/repeat match types")
+@precondition(src_len >= 0 and dst_max > 0)
+@postcondition(true)
 @inline(always)
 fn lzav_compress(src: ptr[i32], src_len: i32,
                  dst: ptr[i32], dst_max: i32) -> i32 {
@@ -331,6 +369,9 @@ fn lzav_compress(src: ptr[i32], src_len: i32,
 // ---------------------------------------------------------------------------
 // Returns decompressed size in bytes, or 0 on failure.
 
+@intent("decompress LZAV compressed data back to original bytes")
+@precondition(src_len > 0 and dst_max > 0)
+@postcondition(true)
 @inline(always)
 fn lzav_decompress(src: ptr[i32], src_len: i32,
                    dst: ptr[i32], dst_max: i32) -> i32 {
@@ -481,6 +522,9 @@ fn lzav_decompress(src: ptr[i32], src_len: i32,
 // Verify: compare two byte buffers
 // ---------------------------------------------------------------------------
 
+@intent("compare two byte buffers for equality, return 1 if identical")
+@precondition(len >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
@@ -495,6 +539,9 @@ fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
 // Test data generators
 // ---------------------------------------------------------------------------
 
+@intent("fill buffer with repeating ABCDEFGH 8-byte cycle pattern")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_repeating(buf: ptr[i32], len: i32) {
     // "ABCDEFGH" repeating -- 8-byte cycle with 4-byte matches
     for i: i32 in range(0, len) {
@@ -503,6 +550,9 @@ fn fill_repeating(buf: ptr[i32], len: i32) {
     }
 }
 
+@intent("fill buffer with alternating repeating and pseudo-random sections")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_mixed(buf: ptr[i32], len: i32) {
     for i: i32 in range(0, len) {
         let section: i32 = i / 64;
@@ -514,6 +564,9 @@ fn fill_mixed(buf: ptr[i32], len: i32) {
     }
 }
 
+@intent("fill buffer with repeating English pangram text pattern")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_text_like(buf: ptr[i32], len: i32) {
     let pattern_len: i32 = 44;
     let pat: ptr[i32] = heap_alloc(pattern_len, 1);
@@ -535,6 +588,9 @@ fn fill_text_like(buf: ptr[i32], len: i32) {
 }
 
 // Fill with highly repetitive data (tests repeat-match encoding)
+@intent("fill buffer with phase-shifted patterns for repeat-match testing")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_run_data(buf: ptr[i32], len: i32) {
     // Runs of the same 4 bytes at varying offsets
     for i: i32 in range(0, len) {

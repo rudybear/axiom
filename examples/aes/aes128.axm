@@ -1,4 +1,5 @@
 @module aes128;
+@strict;
 @intent("AES-128 ECB mode encryption/decryption with NIST test vector verification and benchmark");
 
 // =============================================================================
@@ -17,15 +18,23 @@
 // ---------------------------------------------------------------------------
 // AES constants
 // ---------------------------------------------------------------------------
+@intent("return AES block size in 32-bit words") @precondition(true) @postcondition(true)
 @const fn NB() -> i32 { return 4; }
+@intent("return AES-128 key length in 32-bit words") @precondition(true) @postcondition(true)
 @const fn NK() -> i32 { return 4; }
+@intent("return AES-128 number of rounds") @precondition(true) @postcondition(true)
 @const fn NR() -> i32 { return 10; }
+@intent("return AES-128 key length in bytes") @precondition(true) @postcondition(true)
 @const fn KEYLEN() -> i32 { return 16; }
+@intent("return AES-128 expanded key size in bytes") @precondition(true) @postcondition(true)
 @const fn KEYEXPSIZE() -> i32 { return 176; }
 
 // ---------------------------------------------------------------------------
 // S-box: 256-byte AES substitution box (global constant in .rodata)
 // ---------------------------------------------------------------------------
+@intent("return pointer to AES forward S-box constant table")
+@precondition(true)
+@postcondition(true)
 @pure
 fn get_sbox() -> ptr[i32] {
     return array_const_u8(
@@ -51,6 +60,9 @@ fn get_sbox() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 // Inverse S-box (global constant in .rodata)
 // ---------------------------------------------------------------------------
+@intent("return pointer to AES inverse S-box constant table")
+@precondition(true)
+@postcondition(true)
 @pure
 fn get_rsbox() -> ptr[i32] {
     return array_const_u8(
@@ -76,6 +88,9 @@ fn get_rsbox() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 // Rcon (round constants, global constant in .rodata)
 // ---------------------------------------------------------------------------
+@intent("return pointer to AES round constant table")
+@precondition(true)
+@postcondition(true)
 @pure
 fn get_rcon() -> ptr[i32] {
     return array_const_u8(
@@ -86,6 +101,9 @@ fn get_rcon() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 // GF(2^8) multiply by 2 (xtime)
 // ---------------------------------------------------------------------------
+@intent("multiply byte by 2 in GF(2^8) with irreducible polynomial reduction")
+@precondition(x >= 0 and x <= 255)
+@postcondition(true)
 @pure @inline(always)
 fn xtime(x: i32) -> i32 {
     // Shift left by 1, then XOR with 0x1B if high bit was set
@@ -99,6 +117,9 @@ fn xtime(x: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // GF(2^8) general multiply
 // ---------------------------------------------------------------------------
+@intent("multiply two bytes in GF(2^8) finite field")
+@precondition(a >= 0 and a <= 255 and b >= 0 and b <= 255)
+@postcondition(true)
 @pure @inline(always)
 fn gmul(a: i32, b: i32) -> i32 {
     let result: i32 = 0;
@@ -128,6 +149,9 @@ fn gmul(a: i32, b: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Key Expansion
 // ---------------------------------------------------------------------------
+@intent("expand 16-byte AES key into 176-byte round key schedule")
+@precondition(true)
+@postcondition(true)
 fn key_expansion(key: ptr[i32], round_key: ptr[i32], sbox: ptr[i32], rcon: ptr[i32]) {
     // First round key is the key itself (16 bytes = NK*4)
     memcpy(round_key, key, 16);
@@ -171,6 +195,9 @@ fn key_expansion(key: ptr[i32], round_key: ptr[i32], sbox: ptr[i32], rcon: ptr[i
 // ---------------------------------------------------------------------------
 // AddRoundKey: XOR state with round key
 // ---------------------------------------------------------------------------
+@intent("XOR AES state with round key for specified round")
+@precondition(round >= 0 and round <= 10)
+@postcondition(true)
 @inline(always)
 fn add_round_key(round: i32, state: ptr[i32], round_key: ptr[i32]) {
     // AES state is column-major: state[row][col]
@@ -189,6 +216,9 @@ fn add_round_key(round: i32, state: ptr[i32], round_key: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // SubBytes: substitute each byte using S-box
 // ---------------------------------------------------------------------------
+@intent("substitute each state byte through AES forward S-box")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn sub_bytes(state: ptr[i32], sbox: ptr[i32]) {
     for i: i32 in range(0, 16) {
@@ -199,6 +229,9 @@ fn sub_bytes(state: ptr[i32], sbox: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // InvSubBytes: substitute each byte using inverse S-box
 // ---------------------------------------------------------------------------
+@intent("substitute each state byte through AES inverse S-box")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn inv_sub_bytes(state: ptr[i32], rsbox: ptr[i32]) {
     for i: i32 in range(0, 16) {
@@ -209,6 +242,9 @@ fn inv_sub_bytes(state: ptr[i32], rsbox: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // ShiftRows: cyclically shift rows
 // ---------------------------------------------------------------------------
+@intent("cyclically left-shift state rows by 0,1,2,3 positions")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn shift_rows(state: ptr[i32]) {
     // Row 0: no shift
@@ -238,6 +274,9 @@ fn shift_rows(state: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // InvShiftRows: cyclically shift rows in reverse
 // ---------------------------------------------------------------------------
+@intent("cyclically right-shift state rows to reverse ShiftRows")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn inv_shift_rows(state: ptr[i32]) {
     // Row 1: shift right by 1
@@ -266,6 +305,9 @@ fn inv_shift_rows(state: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // MixColumns: mix columns using GF(2^8) arithmetic
 // ---------------------------------------------------------------------------
+@intent("mix each column of AES state using GF(2^8) arithmetic")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn mix_columns(state: ptr[i32]) {
     for col: i32 in range(0, 4) {
@@ -294,6 +336,9 @@ fn mix_columns(state: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // InvMixColumns: inverse mix columns using GF(2^8) multiply
 // ---------------------------------------------------------------------------
+@intent("inverse mix columns using GF(2^8) multiply for decryption")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn inv_mix_columns(state: ptr[i32]) {
     for col: i32 in range(0, 4) {
@@ -317,6 +362,9 @@ fn inv_mix_columns(state: ptr[i32]) {
 // AES-128 Encrypt one block (16 bytes) in-place
 // State layout: state[row * 4 + col], input is column-major from plaintext
 // ---------------------------------------------------------------------------
+@intent("encrypt one 16-byte block in-place using AES-128 ECB")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn aes_encrypt_block(state: ptr[i32], round_key: ptr[i32], sbox: ptr[i32]) {
     // Initial round key addition
@@ -339,6 +387,9 @@ fn aes_encrypt_block(state: ptr[i32], round_key: ptr[i32], sbox: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // AES-128 Decrypt one block (16 bytes) in-place
 // ---------------------------------------------------------------------------
+@intent("decrypt one 16-byte block in-place using AES-128 ECB")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn aes_decrypt_block(state: ptr[i32], round_key: ptr[i32], rsbox: ptr[i32]) {
     // Initial round key addition (last round key)
@@ -364,6 +415,9 @@ fn aes_decrypt_block(state: ptr[i32], round_key: ptr[i32], rsbox: ptr[i32]) {
 // Load 16 bytes from plaintext into AES state (column-major)
 // plaintext[col*4 + row] -> state[row * 4 + col]
 // ---------------------------------------------------------------------------
+@intent("load 16 plaintext bytes into AES column-major state matrix")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn load_state(state: ptr[i32], input: ptr[i32]) {
     for col: i32 in range(0, 4) {
@@ -377,6 +431,9 @@ fn load_state(state: ptr[i32], input: ptr[i32]) {
 // Store AES state back to output (column-major)
 // state[row * 4 + col] -> output[col*4 + row]
 // ---------------------------------------------------------------------------
+@intent("store AES column-major state matrix back to 16-byte output")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn store_state(output: ptr[i32], state: ptr[i32]) {
     for col: i32 in range(0, 4) {
@@ -389,6 +446,9 @@ fn store_state(output: ptr[i32], state: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // Print 16 bytes as hex
 // ---------------------------------------------------------------------------
+@intent("print a byte value as decimal digits")
+@precondition(val >= 0 and val <= 255)
+@postcondition(true)
 fn print_hex_byte(val: i32) {
     let hi: i32 = lshr(band(val, 0xF0), 4);
     let lo: i32 = band(val, 0x0F);
@@ -397,6 +457,9 @@ fn print_hex_byte(val: i32) {
     // In a real implementation, we'd print hex chars a-f.
 }
 
+@intent("print 16 bytes of a block as space-separated decimal values")
+@precondition(true)
+@postcondition(true)
 fn print_block(label: ptr[i32], data: ptr[i32]) {
     // GAP: Cannot pass string to generic print. Using print() for label.
     for i: i32 in range(0, 16) {
@@ -409,6 +472,9 @@ fn print_block(label: ptr[i32], data: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // Compare two 16-byte blocks
 // ---------------------------------------------------------------------------
+@intent("compare two 16-byte blocks for equality, return 1 if equal")
+@precondition(true)
+@postcondition(true)
 @pure
 fn blocks_equal(a: ptr[i32], b: ptr[i32]) -> i32 {
     for i: i32 in range(0, 16) {

@@ -1,3 +1,4 @@
+@strict;
 @module minimp3;
 @intent("MP3 IMDCT-36 core transform + Huffman table decode, ported from minimp3");
 
@@ -24,11 +25,13 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+@intent("IMDCT transform geometry constants")
 @const fn IMDCT_N() -> i32 { return 36; }
 @const fn IMDCT_HALF() -> i32 { return 18; }
 @const fn PI() -> f64 { return 3.14159265358979323846; }
 
 // Huffman table sizes (simplified MP3 table)
+@intent("Huffman decode table size constants")
 @const fn HUFF_TABLE_SIZE() -> i32 { return 256; }
 @const fn HUFF_MAX_BITS() -> i32 { return 8; }
 
@@ -36,6 +39,7 @@
 // Build IMDCT cosine table: cos_table[n*18 + k] for n=0..35, k=0..17
 // Total 648 entries stored as f64
 // ---------------------------------------------------------------------------
+@intent("Precompute the 36x18 cosine lookup table for IMDCT-36: cos(PI/36 * (2n+19) * (2k+1))")
 fn build_imdct_cos_table(table: ptr[i32]) {
     for n: i32 in range(0, 36) {
         for k: i32 in range(0, 18) {
@@ -56,6 +60,7 @@ fn build_imdct_cos_table(table: ptr[i32]) {
 // output: ptr to 36 f64 values (time domain)
 // cos_tab: precomputed 648-entry cosine table
 //
+@intent("Compute the 36-point IMDCT: transform 18 frequency coefficients to 36 time-domain samples via precomputed cosine table")
 @pure @inline(always)
 fn imdct36(input: ptr[i32], output: ptr[i32], cos_tab: ptr[i32]) {
     for n: i32 in range(0, 36) {
@@ -76,6 +81,7 @@ fn imdct36(input: ptr[i32], output: ptr[i32], cos_tab: ptr[i32]) {
 // MP3 uses a sine window: w[n] = sin(PI/36 * (n + 0.5))
 // This is applied to the IMDCT output, then overlap-added with previous block.
 //
+@intent("Precompute the 36-entry MP3 sine window: w[n] = sin(PI/36 * (n + 0.5))")
 fn build_imdct_window(win: ptr[i32]) {
     for n: i32 in range(0, 36) {
         let n_f: f64 = to_f64(n);
@@ -84,6 +90,7 @@ fn build_imdct_window(win: ptr[i32]) {
     }
 }
 
+@intent("IMDCT-36 with MP3 sine window and overlap-add: first half adds previous overlap, second half saves to overlap buffer")
 @pure @inline(always)
 fn imdct36_windowed(input: ptr[i32], output: ptr[i32],
                     cos_tab: ptr[i32], window: ptr[i32],
@@ -118,6 +125,7 @@ fn imdct36_windowed(input: ptr[i32], output: ptr[i32],
 // Build a simple test Huffman table:
 //   Codes of length 1-8, mapping to spectral values 0..255
 //
+@intent("Build a simplified MP3-style Huffman lookup table: 256-entry, mapping 8-bit codes to (value, bits_consumed) pairs")
 fn build_huffman_table(huff_val: ptr[i32], huff_bits: ptr[i32]) {
     // Simplified table: for each 8-bit code, store decoded value and bit length.
     // We simulate a typical MP3-like distribution:
@@ -179,6 +187,8 @@ fn build_huffman_table(huff_val: ptr[i32], huff_bits: ptr[i32]) {
 // bit_pos: current bit position (modified via return)
 // Returns: decoded value in low 16 bits, new bit_pos in high 16 bits
 //
+@intent("Decode one Huffman symbol from bitstream at bit_pos, returning packed (value | new_pos<<16)")
+@precondition(bit_pos >= 0)
 @inline(always)
 fn huff_decode_one(bitstream: ptr[i32], bit_pos: i32,
                    huff_val: ptr[i32], huff_bits: ptr[i32]) -> i32 {
@@ -205,6 +215,8 @@ fn huff_decode_one(bitstream: ptr[i32], bit_pos: i32,
 // ---------------------------------------------------------------------------
 // Huffman decode: decode N symbols from bitstream
 // ---------------------------------------------------------------------------
+@intent("Decode count consecutive Huffman symbols from bitstream into output buffer, returning final bit position")
+@precondition(bit_pos >= 0 and count >= 0)
 @inline(always)
 fn huff_decode_block(bitstream: ptr[i32], bit_pos: i32, count: i32,
                      output: ptr[i32],
@@ -222,6 +234,8 @@ fn huff_decode_block(bitstream: ptr[i32], bit_pos: i32, count: i32,
 // ---------------------------------------------------------------------------
 // Test: verify IMDCT-36 against known reference values
 // ---------------------------------------------------------------------------
+@intent("Verify IMDCT-36 against analytic reference: unit impulse response and all-ones cosine sum")
+@postcondition(return == 0 or return == 1)
 fn test_imdct() -> i32 {
     print("--- Test: IMDCT-36 ---\n");
 
@@ -303,6 +317,8 @@ fn test_imdct() -> i32 {
 // ---------------------------------------------------------------------------
 // Test: verify Huffman decode
 // ---------------------------------------------------------------------------
+@intent("Verify Huffman decode against a known hand-crafted bitstream encoding [0,1,2,3,0,0,1]")
+@postcondition(return == 0 or return == 1)
 fn test_huffman() -> i32 {
     print("--- Test: Huffman decode ---\n");
 
@@ -377,6 +393,7 @@ fn test_huffman() -> i32 {
 // ---------------------------------------------------------------------------
 // Benchmark: 1M IMDCT-36 transforms
 // ---------------------------------------------------------------------------
+@intent("Benchmark 1M windowed IMDCT-36 transforms with overlap-add, reporting transforms/sec")
 fn bench_imdct() {
     print("\n--- Benchmark: 1M IMDCT-36 transforms ---\n");
 
@@ -435,6 +452,7 @@ fn bench_imdct() {
 // ---------------------------------------------------------------------------
 // Benchmark: Huffman decode throughput
 // ---------------------------------------------------------------------------
+@intent("Benchmark Huffman decode throughput over 10M symbols, reporting M symbols/sec")
 fn bench_huffman() {
     print("\n--- Benchmark: Huffman decode 10M symbols ---\n");
 
@@ -493,6 +511,7 @@ fn bench_huffman() {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+@intent("Run IMDCT-36 and Huffman decode verification tests, then benchmark both kernels")
 fn main() -> i32 {
     print("=== minimp3 Core: IMDCT-36 + Huffman Decode ===\n\n");
 

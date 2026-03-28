@@ -1,3 +1,4 @@
+@strict;
 @module blake3;
 @intent("BLAKE3 cryptographic hash function, portable implementation with verification and benchmark");
 
@@ -20,6 +21,7 @@
 // ---------------------------------------------------------------------------
 // BLAKE3 constants: IV (same as BLAKE2s)
 // ---------------------------------------------------------------------------
+@intent("BLAKE3 initialization vector constants (identical to BLAKE2s IV)")
 @const fn IV0() -> i32 { return 0x6A09E667; }
 @const fn IV1() -> i32 { return 0 - 1150833019; }  // 0xBB67AE85 = 3144134277 -> -1150833019
 @const fn IV2() -> i32 { return 0x3C6EF372; }
@@ -30,6 +32,7 @@
 @const fn IV7() -> i32 { return 0x5BE0CD19; }
 
 // Block length and flags
+@intent("BLAKE3 domain separation constants: block size and flag bits")
 @const fn BLOCK_LEN() -> i32 { return 64; }
 @const fn CHUNK_START() -> i32 { return 1; }
 @const fn CHUNK_END() -> i32 { return 2; }
@@ -41,6 +44,7 @@
 // applied to the message word indices.
 // We store 7 rounds x 16 indices = 112 entries.
 // ---------------------------------------------------------------------------
+@intent("Return the 7-round x 16-index message word permutation schedule for BLAKE3 compression")
 @pure @inline(always)
 fn get_msg_schedule() -> ptr[i32] {
     return array_const_u8(
@@ -64,6 +68,8 @@ fn get_msg_schedule() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 // Helper: read 32-bit little-endian from byte buffer
 // ---------------------------------------------------------------------------
+@intent("Read a 32-bit little-endian integer from byte buffer at given offset")
+@precondition(byte_offset >= 0)
 @pure @inline(always)
 fn read32_le(data: ptr[i32], byte_offset: i32) -> i32 {
     let b0: i32 = ptr_read_u8(data, byte_offset);
@@ -76,6 +82,8 @@ fn read32_le(data: ptr[i32], byte_offset: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Write 32-bit little-endian to byte buffer
 // ---------------------------------------------------------------------------
+@intent("Write a 32-bit integer as little-endian bytes into dst at given offset")
+@precondition(byte_offset >= 0)
 @inline(always)
 fn write32_le(dst: ptr[i32], byte_offset: i32, val: i32) {
     ptr_write_u8(dst, byte_offset,     band(val, 0xFF));
@@ -90,6 +98,7 @@ fn write32_le(dst: ptr[i32], byte_offset: i32, val: i32) {
 // state[c] += state[d] + my; state[b] = rotr(state[b] ^ state[c], rb);
 // Rotation amounts: 16, 12, 8, 7
 // ---------------------------------------------------------------------------
+@intent("BLAKE3 G quarter-round mixing function: mix state[a,b,c,d] with message words mx,my using rotations 16,12,8,7")
 @pure @inline(always)
 fn g(state: ptr[i32], a: i32, b: i32, c: i32, d: i32, mx: i32, my: i32) {
     let sa: i32 = ptr_read_i32(state, a);
@@ -116,6 +125,8 @@ fn g(state: ptr[i32], a: i32, b: i32, c: i32, d: i32, mx: i32, my: i32) {
 // ---------------------------------------------------------------------------
 // One round of column + diagonal mixing
 // ---------------------------------------------------------------------------
+@intent("Execute one BLAKE3 round: 4 column G mixes + 4 diagonal G mixes with permuted message words")
+@precondition(round_idx >= 0 and round_idx < 7)
 @pure @inline(always)
 fn round_fn(state: ptr[i32], msg: ptr[i32], schedule: ptr[i32], round_idx: i32) {
     let base: i32 = round_idx * 16;
@@ -159,6 +170,8 @@ fn round_fn(state: ptr[i32], msg: ptr[i32], schedule: ptr[i32], round_idx: i32) 
 //   flags: domain separation flags
 //   out: 16-word output state (first 8 words XOR'd with last 8)
 // ---------------------------------------------------------------------------
+@intent("BLAKE3 compression function: compress one 64-byte block with chaining value, counter, and domain flags into 8-word output")
+@precondition(block_len >= 0 and block_len <= 64)
 @inline(always)
 fn blake3_compress(cv: ptr[i32], block: ptr[i32], counter_lo: i32, counter_hi: i32,
                    block_len: i32, flags: i32, out: ptr[i32]) {
@@ -214,6 +227,8 @@ fn blake3_compress(cv: ptr[i32], block: ptr[i32], counter_lo: i32, counter_hi: i
 // BLAKE3 hash: hash input_len bytes producing 32-byte output
 // Single-chunk implementation (no tree hashing for simplicity).
 // ---------------------------------------------------------------------------
+@intent("Hash input_len bytes producing a 32-byte BLAKE3 digest in output (single-chunk, no tree hashing)")
+@precondition(input_len >= 0)
 fn blake3_hash(input: ptr[i32], input_len: i32, output: ptr[i32]) {
     // Initialize chaining value from IV
     let cv: ptr[i32] = heap_alloc(8, 4);
@@ -308,6 +323,7 @@ fn blake3_hash(input: ptr[i32], input_len: i32, output: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // Print hash as hex
 // ---------------------------------------------------------------------------
+@intent("Print a single byte value as two hex nibble digits")
 fn print_hex_byte(val: i32) {
     let hi: i32 = lshr(val, 4);
     let lo: i32 = band(val, 15);
@@ -322,6 +338,7 @@ fn print_hex_byte(val: i32) {
     }
 }
 
+@intent("Print len bytes of hash as space-separated decimal nibble pairs")
 fn print_hash(hash: ptr[i32], len: i32) {
     for i: i32 in range(0, len) {
         let b: i32 = ptr_read_u8(hash, i);
@@ -338,6 +355,9 @@ fn print_hash(hash: ptr[i32], len: i32) {
 // ---------------------------------------------------------------------------
 // Verification helper: compare hash bytes
 // ---------------------------------------------------------------------------
+@intent("Compare len bytes of hash against expected, returning 1 if identical or 0 otherwise")
+@precondition(len >= 0)
+@postcondition(return == 0 or return == 1)
 @pure @inline(always)
 fn hash_matches(hash: ptr[i32], expected: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
@@ -351,6 +371,8 @@ fn hash_matches(hash: ptr[i32], expected: ptr[i32], len: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Fill test data
 // ---------------------------------------------------------------------------
+@intent("Fill buf with len bytes of sequential test pattern (i mod 256)")
+@precondition(len >= 0)
 @inline(always)
 fn fill_test_data(buf: ptr[i32], len: i32) {
     for i: i32 in range(0, len) {
@@ -361,6 +383,7 @@ fn fill_test_data(buf: ptr[i32], len: i32) {
 // ---------------------------------------------------------------------------
 // Main: verify against BLAKE3 test vector, then benchmark
 // ---------------------------------------------------------------------------
+@intent("Verify BLAKE3 against reference test vectors for empty and single-byte inputs, then benchmark 50x1MB throughput")
 fn main() -> i32 {
     print("=== BLAKE3 Hash (Portable) ===\n");
 

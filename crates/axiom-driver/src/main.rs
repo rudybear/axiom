@@ -55,6 +55,11 @@ enum Commands {
         /// Enable a sanitizer: address, thread, undefined, or memory
         #[arg(long, value_parser = ["address", "thread", "undefined", "memory"])]
         sanitize: Option<String>,
+
+        /// Compile as a static library (.a/.lib) instead of an executable.
+        /// Only @export functions are visible in the resulting archive.
+        #[arg(long)]
+        lib: bool,
     },
 
     /// Tokenize an AXIOM source file (debug tool)
@@ -206,6 +211,22 @@ enum Commands {
         /// Enable fuzz testing from @precondition constraints
         #[arg(long)]
         fuzz: bool,
+    },
+
+    /// Create a new AXIOM source file with @strict annotations template
+    New {
+        /// Output file name (e.g., "program.axm")
+        name: String,
+    },
+
+    /// Generate a C header from @export functions in an AXIOM source file
+    Header {
+        /// Input .axm file
+        input: String,
+
+        /// Output header file path (defaults to input with .h extension)
+        #[arg(short, long)]
+        output: Option<String>,
     },
 }
 
@@ -667,7 +688,7 @@ fn main() -> miette::Result<()> {
             }
         }
 
-        Commands::Compile { input, output, emit, target, error_format, debug, link_dirs, opt_report, sanitize } => {
+        Commands::Compile { input, output, emit, target, error_format, debug, link_dirs, opt_report, sanitize, lib } => {
             let source = read_source_with_includes(&input)?;
             let use_json = error_format.as_deref() == Some("json");
 
@@ -805,6 +826,42 @@ fn main() -> miette::Result<()> {
                             )
                         })?;
 
+                    if lib {
+                        // --lib: compile to static library (.a/.lib)
+                        let output_path = output.unwrap_or_else(|| {
+                            let stem = Path::new(&input)
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string();
+                            if cfg!(windows) {
+                                format!("{stem}.lib")
+                            } else {
+                                format!("lib{stem}.a")
+                            }
+                        });
+
+                        let constraints = axiom_optimize::llm_optimizer::extract_constraints_from_source(&source);
+                        let optimize_for = constraints.iter()
+                            .find(|c| c.key == "optimize_for")
+                            .map(|c| c.value.clone());
+                        let compile_opts = compile::CompileOptions {
+                            target_arch: target.clone(),
+                            optimize_for,
+                            ir_text: Some(llvm_ir.clone()),
+                            link_dirs: link_dirs.clone(),
+                            opt_report,
+                            sanitize: sanitize.clone(),
+                            debug_mode: debug,
+                            record_mode: false,
+                        };
+
+                        compile::compile_to_static_lib(&llvm_ir, &output_path, &compile_opts)?;
+                        eprintln!("compiled {} -> {} (static library)", input, output_path);
+
+                        return Ok(());
+                    }
+
                     let output_path = output.unwrap_or_else(|| {
                         if cfg!(windows) {
                             "a.exe".into()
@@ -928,6 +985,38 @@ fn main() -> miette::Result<()> {
         // Verified Development Pipeline: run @test annotations
         Commands::Test { input, fuzz } => {
             run_test_with_fuzz(&input, fuzz)
+        }
+
+        // Scaffold a new AXIOM source file with @strict annotations template
+        Commands::New { name } => {
+            let file_name = if name.ends_with(".axm") {
+                name.clone()
+            } else {
+                format!("{name}.axm")
+            };
+            let module_name = file_name.trim_end_matches(".axm");
+            let template = format!(
+                r#"@strict;
+@module {module_name};
+
+@intent("main entry point")
+fn main() -> i32 {{
+    return 0;
+}}
+"#
+            );
+            if Path::new(&file_name).exists() {
+                return Err(miette::miette!("{file_name} already exists"));
+            }
+            std::fs::write(&file_name, &template)
+                .map_err(|e| miette::miette!("Failed to write {file_name}: {e}"))?;
+            eprintln!("Created {file_name} with @strict annotations template");
+            Ok(())
+        }
+
+        // Generate C header from @export functions
+        Commands::Header { input, output } => {
+            run_header(&input, output.as_deref())
         }
     }
 }
@@ -1997,6 +2086,164 @@ fn compile_for_opt_remarks(
 }
 
 // ---------------------------------------------------------------------------
+// C Header Generation: axiom header
+// ---------------------------------------------------------------------------
+
+/// Generate a C header file from @export functions in an AXIOM source file.
+///
+/// Parses the source, finds all functions annotated with @export, and generates
+/// C prototypes with proper type mapping. This enables C programs to call AXIOM
+/// libraries compiled with `axiom compile --lib`.
+fn run_header(input: &str, output: Option<&str>) -> miette::Result<()> {
+    let source = read_source_with_includes(input)?;
+
+    let mut result = axiom_parser::parse(&source);
+    if result.has_errors() {
+        eprintln!("--- Parse Errors ---");
+        for err in &result.errors {
+            eprintln!("  {err}");
+        }
+        return Err(miette::miette!(
+            "parsing failed with {} error(s)",
+            result.errors.len()
+        ));
+    }
+    resolve_imports(&mut result.module, input);
+
+    let hir_module = axiom_hir::lower(&result.module).map_err(|errors| {
+        for err in &errors {
+            eprintln!("  {err}");
+        }
+        miette::miette!("HIR lowering failed with {} error(s)", errors.len())
+    })?;
+
+    // Collect @export functions
+    let mut exports: Vec<&axiom_hir::HirFunction> = Vec::new();
+    for func in &hir_module.functions {
+        let is_export = func
+            .annotations
+            .iter()
+            .any(|a| matches!(a.kind, axiom_hir::HirAnnotationKind::Export));
+        if is_export {
+            exports.push(func);
+        }
+    }
+
+    if exports.is_empty() {
+        eprintln!("warning: no @export functions found in {input}");
+        eprintln!("hint: add @export to functions you want callable from C");
+    }
+
+    // Derive guard name from input filename
+    let stem = Path::new(input)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_uppercase()
+        .replace(|c: char| !c.is_alphanumeric(), "_");
+    let guard = format!("{stem}_H");
+
+    let mut header = String::new();
+    header.push_str(&format!("/* Auto-generated from {input} by AXIOM compiler */\n"));
+    header.push_str(&format!("#ifndef {guard}\n"));
+    header.push_str(&format!("#define {guard}\n\n"));
+    header.push_str("#include <stdint.h>\n\n");
+
+    for func in &exports {
+        let ret_c = hir_type_to_c(&func.return_type);
+        let params_c: Vec<String> = func
+            .params
+            .iter()
+            .map(|p| {
+                let ty_c = hir_type_to_c(&p.ty);
+                format!("{ty_c} {}", p.name)
+            })
+            .collect();
+        let params_str = if params_c.is_empty() {
+            "void".to_string()
+        } else {
+            params_c.join(", ")
+        };
+        header.push_str(&format!("{ret_c} {name}({params_str});\n", name = func.name));
+    }
+
+    header.push_str(&format!("\n#endif /* {guard} */\n"));
+
+    // Write to file or stdout
+    let output_path = output.map(|s| s.to_string()).unwrap_or_else(|| {
+        let stem = Path::new(input)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        format!("{stem}.h")
+    });
+
+    std::fs::write(&output_path, &header)
+        .map_err(|e| miette::miette!("Failed to write {output_path}: {e}"))?;
+    eprintln!("Generated C header: {output_path}");
+
+    Ok(())
+}
+
+/// Map an AXIOM HIR type to its C equivalent string.
+fn hir_type_to_c(ty: &axiom_hir::HirType) -> String {
+    use axiom_hir::{HirType, PrimitiveType};
+    match ty {
+        HirType::Primitive(p) => match p {
+            PrimitiveType::I8 => "int8_t".into(),
+            PrimitiveType::I16 => "int16_t".into(),
+            PrimitiveType::I32 => "int32_t".into(),
+            PrimitiveType::I64 => "int64_t".into(),
+            PrimitiveType::I128 => "__int128".into(),
+            PrimitiveType::U8 => "uint8_t".into(),
+            PrimitiveType::U16 => "uint16_t".into(),
+            PrimitiveType::U32 => "uint32_t".into(),
+            PrimitiveType::U64 => "uint64_t".into(),
+            PrimitiveType::U128 => "unsigned __int128".into(),
+            PrimitiveType::F16 => "_Float16".into(),
+            PrimitiveType::Bf16 => "__bf16".into(),
+            PrimitiveType::F32 => "float".into(),
+            PrimitiveType::F64 => "double".into(),
+            PrimitiveType::Bool => "int".into(),
+            PrimitiveType::Vec2 | PrimitiveType::Vec3 | PrimitiveType::Vec4 => "double*".into(),
+            PrimitiveType::IVec2 | PrimitiveType::IVec3 | PrimitiveType::IVec4 => "int32_t*".into(),
+            PrimitiveType::FVec2 | PrimitiveType::FVec3 | PrimitiveType::FVec4 => "float*".into(),
+            PrimitiveType::Mat3 | PrimitiveType::Mat4 => "double*".into(),
+        },
+        HirType::Ptr { element } => {
+            let inner = hir_type_to_c(element);
+            format!("{inner}*")
+        }
+        HirType::ReadonlyPtr { element } => {
+            let inner = hir_type_to_c(element);
+            format!("const {inner}*")
+        }
+        HirType::WriteonlyPtr { element } => {
+            let inner = hir_type_to_c(element);
+            format!("{inner}*")
+        }
+        HirType::Array { element, size } => {
+            // C doesn't have array return types; use pointer
+            let inner = hir_type_to_c(element);
+            format!("{inner}* /* array[{size}] */")
+        }
+        HirType::Slice { element } => {
+            let inner = hir_type_to_c(element);
+            format!("{inner}* /* slice */")
+        }
+        HirType::Tuple { .. } => "void* /* tuple */".into(),
+        HirType::Fn { .. } => "void* /* fn ptr */".into(),
+        HirType::Tensor { element, .. } => {
+            let inner = hir_type_to_c(element);
+            format!("{inner}* /* tensor */")
+        }
+        HirType::UserDefined(name) => format!("void* /* {name} */"),
+        HirType::Unknown(name) => format!("void* /* unknown: {name} */"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Verified Development Pipeline: axiom verify
 // ---------------------------------------------------------------------------
 
@@ -2943,5 +3190,143 @@ fn main() -> i32 {
         // Should not panic regardless of git state
         let result = git_track_optimization("nonexistent.axm", "test message");
         assert!(result.is_ok());
+    }
+
+    // axiom new: scaffold command
+
+    #[test]
+    fn test_axiom_new_creates_file() {
+        let path = std::env::temp_dir().join("axiom_test_new_scaffold.axm");
+        let path_str = path.display().to_string();
+        // Remove if left over from a previous run
+        let _ = std::fs::remove_file(&path);
+
+        // Simulate what the New handler does
+        let file_name = path_str.clone();
+        let module_name = "axiom_test_new_scaffold";
+        let template = format!(
+            "@strict;\n@module {module_name};\n\n@intent(\"main entry point\")\nfn main() -> i32 {{\n    return 0;\n}}\n"
+        );
+        std::fs::write(&file_name, &template).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("@strict;"));
+        assert!(content.contains("@module axiom_test_new_scaffold;"));
+        assert!(content.contains("@intent(\"main entry point\")"));
+        assert!(content.contains("fn main()"));
+
+        // Verify it parses without errors
+        let result = axiom_parser::parse(&content);
+        assert!(!result.has_errors(), "scaffolded file should parse cleanly");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // axiom header: C header generation
+
+    #[test]
+    fn test_hir_type_to_c_primitives() {
+        use axiom_hir::{HirType, PrimitiveType};
+
+        assert_eq!(hir_type_to_c(&HirType::Primitive(PrimitiveType::I32)), "int32_t");
+        assert_eq!(hir_type_to_c(&HirType::Primitive(PrimitiveType::I64)), "int64_t");
+        assert_eq!(hir_type_to_c(&HirType::Primitive(PrimitiveType::F32)), "float");
+        assert_eq!(hir_type_to_c(&HirType::Primitive(PrimitiveType::F64)), "double");
+        assert_eq!(hir_type_to_c(&HirType::Primitive(PrimitiveType::Bool)), "int");
+        assert_eq!(hir_type_to_c(&HirType::Primitive(PrimitiveType::U8)), "uint8_t");
+        assert_eq!(hir_type_to_c(&HirType::Primitive(PrimitiveType::U64)), "uint64_t");
+    }
+
+    #[test]
+    fn test_hir_type_to_c_pointers() {
+        use axiom_hir::{HirType, PrimitiveType};
+
+        let ptr_f64 = HirType::Ptr {
+            element: Box::new(HirType::Primitive(PrimitiveType::F64)),
+        };
+        assert_eq!(hir_type_to_c(&ptr_f64), "double*");
+
+        let readonly_ptr_i32 = HirType::ReadonlyPtr {
+            element: Box::new(HirType::Primitive(PrimitiveType::I32)),
+        };
+        assert_eq!(hir_type_to_c(&readonly_ptr_i32), "const int32_t*");
+
+        let writeonly_ptr_f32 = HirType::WriteonlyPtr {
+            element: Box::new(HirType::Primitive(PrimitiveType::F32)),
+        };
+        assert_eq!(hir_type_to_c(&writeonly_ptr_f32), "float*");
+    }
+
+    #[test]
+    fn test_run_header_generates_file() {
+        let source = r#"
+@strict;
+@module test_header;
+
+@intent("add two numbers")
+@precondition(true)
+@export
+fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+@intent("scale value")
+@precondition(true)
+@export
+fn scale_val(data: ptr[f64], n: i32) -> i32 {
+    return 0;
+}
+
+@intent("main entry")
+fn main() -> i32 {
+    return 0;
+}
+"#;
+        let axm_path = std::env::temp_dir().join("axiom_test_header.axm");
+        let h_path = std::env::temp_dir().join("axiom_test_header.h");
+        std::fs::write(&axm_path, source).unwrap();
+
+        let result = run_header(
+            &axm_path.display().to_string(),
+            Some(&h_path.display().to_string()),
+        );
+        assert!(result.is_ok(), "header generation should succeed: {:?}", result.err());
+
+        let header = std::fs::read_to_string(&h_path).unwrap();
+        assert!(header.contains("#ifndef"), "header should have include guard");
+        assert!(header.contains("#include <stdint.h>"), "header should include stdint.h");
+        assert!(header.contains("int32_t add(int32_t a, int32_t b)"), "header should have add prototype");
+        assert!(header.contains("int32_t scale_val(double* data, int32_t n)"), "header should have scale_val prototype");
+        // main should NOT be in the header (it's not @export)
+        assert!(!header.contains("main("), "non-export main should not appear in header");
+
+        let _ = std::fs::remove_file(&axm_path);
+        let _ = std::fs::remove_file(&h_path);
+    }
+
+    #[test]
+    fn test_run_header_no_exports() {
+        let source = r#"
+fn main() -> i32 {
+    return 0;
+}
+"#;
+        let axm_path = std::env::temp_dir().join("axiom_test_header_no_export.axm");
+        let h_path = std::env::temp_dir().join("axiom_test_header_no_export.h");
+        std::fs::write(&axm_path, source).unwrap();
+
+        let result = run_header(
+            &axm_path.display().to_string(),
+            Some(&h_path.display().to_string()),
+        );
+        assert!(result.is_ok(), "header generation should succeed even with no exports");
+
+        let header = std::fs::read_to_string(&h_path).unwrap();
+        assert!(header.contains("#ifndef"), "header should still have include guard");
+        // No function prototypes expected
+        assert!(!header.contains("main("), "no exports means no function prototypes");
+
+        let _ = std::fs::remove_file(&axm_path);
+        let _ = std::fs::remove_file(&h_path);
     }
 }

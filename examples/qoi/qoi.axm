@@ -1,4 +1,5 @@
 @module qoi;
+@strict;
 @intent("QOI (Quite OK Image Format) encoder/decoder, ported from C reference");
 
 // =============================================================================
@@ -31,22 +32,55 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+@intent("return QOI OP_INDEX tag value")
+@precondition(true)
+@postcondition(true)
 @const fn QOI_OP_INDEX() -> i32 { return 0x00; }
+@intent("return QOI OP_DIFF tag value")
+@precondition(true)
+@postcondition(true)
 @const fn QOI_OP_DIFF()  -> i32 { return 0x40; }
+@intent("return QOI OP_LUMA tag value")
+@precondition(true)
+@postcondition(true)
 @const fn QOI_OP_LUMA()  -> i32 { return 0x80; }
+@intent("return QOI OP_RUN tag value")
+@precondition(true)
+@postcondition(true)
 @const fn QOI_OP_RUN()   -> i32 { return 0xC0; }
+@intent("return QOI OP_RGB tag value")
+@precondition(true)
+@postcondition(true)
 @const fn QOI_OP_RGB()   -> i32 { return 0xFE; }
+@intent("return QOI OP_RGBA tag value")
+@precondition(true)
+@postcondition(true)
 @const fn QOI_OP_RGBA()  -> i32 { return 0xFF; }
 
+@intent("return QOI magic number for header validation")
+@precondition(true)
+@postcondition(true)
 @const fn QOI_MAGIC() -> i32 { return 0x716F6966; }  // "qoif" in big-endian
+@intent("return QOI header size in bytes")
+@precondition(true)
+@postcondition(true)
 @const fn QOI_HEADER_SIZE() -> i32 { return 14; }
+@intent("return QOI end marker size in bytes")
+@precondition(true)
+@postcondition(true)
 @const fn QOI_END_MARKER_SIZE() -> i32 { return 8; }
 
+@intent("return number of RGBA channels per pixel")
+@precondition(true)
+@postcondition(true)
 @const fn CHANNELS() -> i32 { return 4; }  // RGBA
 
 // ---------------------------------------------------------------------------
 // Pixel hash: (r*3 + g*5 + b*7 + a*11) % 64
 // ---------------------------------------------------------------------------
+@intent("compute QOI pixel hash index from RGBA components")
+@precondition(r >= 0 and g >= 0 and b >= 0 and a >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn qoi_color_hash(r: i32, g: i32, b: i32, a: i32) -> i32 {
     return (r * 3 + g * 5 + b * 7 + a * 11) % 64;
@@ -55,27 +89,45 @@ fn qoi_color_hash(r: i32, g: i32, b: i32, a: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Pack/unpack RGBA into i32 for hash table storage
 // ---------------------------------------------------------------------------
+@intent("pack four RGBA byte values into a single i32")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn pack_rgba(r: i32, g: i32, b: i32, a: i32) -> i32 {
     return bor(bor(band(r, 0xFF), shl(band(g, 0xFF), 8)),
                bor(shl(band(b, 0xFF), 16), shl(band(a, 0xFF), 24)));
 }
 
+@intent("extract red channel from packed RGBA i32")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn unpack_r(packed: i32) -> i32 { return band(packed, 0xFF); }
 
+@intent("extract green channel from packed RGBA i32")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn unpack_g(packed: i32) -> i32 { return band(lshr(packed, 8), 0xFF); }
 
+@intent("extract blue channel from packed RGBA i32")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn unpack_b(packed: i32) -> i32 { return band(lshr(packed, 16), 0xFF); }
 
+@intent("extract alpha channel from packed RGBA i32")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn unpack_a(packed: i32) -> i32 { return band(lshr(packed, 24), 0xFF); }
 
 // ---------------------------------------------------------------------------
 // Write big-endian 32-bit value to byte buffer
 // ---------------------------------------------------------------------------
+@intent("write 32-bit value as big-endian to byte buffer at offset")
+@precondition(offset >= 0)
+@postcondition(true)
 @inline(always)
 fn write_be32(buf: ptr[i64], offset: i32, val: i32) {
     ptr_write_u8(buf, offset,     band(lshr(val, 24), 0xFF));
@@ -87,6 +139,9 @@ fn write_be32(buf: ptr[i64], offset: i32, val: i32) {
 // ---------------------------------------------------------------------------
 // Read big-endian 32-bit value from byte buffer
 // ---------------------------------------------------------------------------
+@intent("read 32-bit big-endian value from byte buffer at offset")
+@precondition(offset >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn read_be32(buf: ptr[i64], offset: i32) -> i32 {
     let b0: i32 = ptr_read_u8(buf, offset);
@@ -102,6 +157,9 @@ fn read_be32(buf: ptr[i64], offset: i32) -> i32 {
 // `pixels` is raw RGBA (4 bytes per pixel), `w` x `h` image
 // `out` must be pre-allocated with enough space (w*h*5 + header + end is safe)
 // ---------------------------------------------------------------------------
+@intent("encode raw RGBA pixels into QOI compressed format")
+@precondition(w > 0 and h > 0)
+@postcondition(true)
 fn qoi_encode(pixels: ptr[i64], w: i32, h: i32, out: ptr[i64]) -> i32 {
     let total_pixels: i32 = w * h;
 
@@ -227,6 +285,9 @@ fn qoi_encode(pixels: ptr[i64], w: i32, h: i32, out: ptr[i64]) -> i32 {
 // `data` is encoded QOI data, `data_len` bytes
 // `out_pixels` is pre-allocated RGBA buffer
 // ---------------------------------------------------------------------------
+@intent("decode QOI compressed data into raw RGBA pixels")
+@precondition(data_len > 0)
+@postcondition(true)
 fn qoi_decode(data: ptr[i64], data_len: i32, out_pixels: ptr[i64]) -> i32 {
     // Read and validate header
     let magic: i32 = read_be32(data, 0);
@@ -321,6 +382,9 @@ fn qoi_decode(data: ptr[i64], data_len: i32, out_pixels: ptr[i64]) -> i32 {
 // ---------------------------------------------------------------------------
 // Generate test image: 256x256 gradient pattern
 // ---------------------------------------------------------------------------
+@intent("fill pixel buffer with 256x256 RGBA gradient test pattern")
+@precondition(w > 0 and h > 0)
+@postcondition(true)
 fn generate_test_image(pixels: ptr[i64], w: i32, h: i32) {
     for y: i32 in range(0, h) {
         for x: i32 in range(0, w) {
@@ -337,6 +401,9 @@ fn generate_test_image(pixels: ptr[i64], w: i32, h: i32) {
 // ---------------------------------------------------------------------------
 // Verify round-trip: compare original and decoded pixels
 // ---------------------------------------------------------------------------
+@intent("compare original and decoded pixel buffers, return error count")
+@precondition(total_pixels > 0)
+@postcondition(true)
 fn verify_roundtrip(original: ptr[i64], decoded: ptr[i64], total_pixels: i32) -> i32 {
     let errors: i32 = 0;
     for i: i32 in range(0, total_pixels * 4) {

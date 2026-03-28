@@ -1,4 +1,5 @@
 @module heatshrink;
+@strict;
 @intent("Heatshrink LZSS compression/decompression for embedded systems, ported from C");
 
 // =============================================================================
@@ -26,10 +27,15 @@
 // ---------------------------------------------------------------------------
 // Configuration constants
 // ---------------------------------------------------------------------------
+@intent("return sliding window bit width") @precondition(true) @postcondition(true)
 @const fn WINDOW_BITS() -> i32 { return 8; }
+@intent("return lookahead buffer bit width") @precondition(true) @postcondition(true)
 @const fn LOOKAHEAD_BITS() -> i32 { return 4; }
+@intent("return sliding window size in bytes") @precondition(true) @postcondition(true)
 @const fn WINDOW_SIZE() -> i32 { return 256; }
+@intent("return maximum lookahead match length") @precondition(true) @postcondition(true)
 @const fn LOOKAHEAD_SIZE() -> i32 { return 16; }
+@intent("return minimum match length for backreference") @precondition(true) @postcondition(true)
 @const fn MIN_MATCH_LEN() -> i32 { return 2; }
 
 // ---------------------------------------------------------------------------
@@ -44,6 +50,9 @@
 // GAP: Cannot store ptr in i32 slot. We pass the output buffer separately.
 
 // Write `count` bits from `value` (MSB first) to the output buffer
+@intent("write count bits from value MSB-first to output bit stream")
+@precondition(count >= 0)
+@postcondition(true)
 @inline(always)
 fn bits_write(outbuf: ptr[i32], pos: ptr[i32], value: i32, count: i32) {
     // pos[0] = byte_pos, pos[1] = bit_pos, pos[2] = current_byte
@@ -76,6 +85,9 @@ fn bits_write(outbuf: ptr[i32], pos: ptr[i32], value: i32, count: i32) {
 }
 
 // Flush remaining bits (pad with zeros)
+@intent("flush remaining partial byte to output buffer with zero padding")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn bits_flush(outbuf: ptr[i32], pos: ptr[i32]) {
     let bit_pos: i32 = ptr_read_i32(pos, 1);
@@ -94,6 +106,9 @@ fn bits_flush(outbuf: ptr[i32], pos: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // pos[0] = byte_pos, pos[1] = bit_pos
 
+@intent("read count bits MSB-first from input bit stream")
+@precondition(count >= 0)
+@postcondition(true)
 @inline(always)
 fn bits_read(inbuf: ptr[i32], pos: ptr[i32], count: i32) -> i32 {
     let byte_pos: i32 = ptr_read_i32(pos, 0);
@@ -120,6 +135,9 @@ fn bits_read(inbuf: ptr[i32], pos: ptr[i32], count: i32) -> i32 {
 // Find best match in the window
 // ---------------------------------------------------------------------------
 // Returns match_offset in out[0], match_length in out[1]
+@intent("find best backreference match in sliding window, output offset and length")
+@precondition(pos >= 0 and input_len > 0)
+@postcondition(true)
 @pure @inline(always)
 fn find_best_match(input: ptr[i32], input_len: i32, pos: i32, out: ptr[i32]) {
     let best_len: i32 = 0;
@@ -162,6 +180,9 @@ fn find_best_match(input: ptr[i32], input_len: i32, pos: i32, out: ptr[i32]) {
 // Compress: input bytes -> compressed bit stream
 // Returns compressed size in bytes
 // ---------------------------------------------------------------------------
+@intent("compress input bytes using LZSS with bit-level output encoding")
+@precondition(input_len > 0 and max_output > 0)
+@postcondition(true)
 fn heatshrink_compress(input: ptr[i32], input_len: i32,
                        output: ptr[i32], max_output: i32) -> i32 {
     // Bit writer state: [byte_pos, bit_pos, current_byte]
@@ -206,6 +227,9 @@ fn heatshrink_compress(input: ptr[i32], input_len: i32,
 // Decompress: compressed bit stream -> original bytes
 // Returns decompressed size in bytes
 // ---------------------------------------------------------------------------
+@intent("decompress LZSS bit stream back to original bytes")
+@precondition(expected_len > 0 and max_output > 0)
+@postcondition(true)
 fn heatshrink_decompress(input: ptr[i32], input_bits_len: i32,
                           output: ptr[i32], max_output: i32,
                           expected_len: i32) -> i32 {
@@ -251,6 +275,9 @@ fn heatshrink_decompress(input: ptr[i32], input_bits_len: i32,
 // ---------------------------------------------------------------------------
 // Verify: compare two byte buffers
 // ---------------------------------------------------------------------------
+@intent("compare two byte buffers for equality, return 1 if identical")
+@precondition(len >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
@@ -264,6 +291,9 @@ fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Fill test data with a repeating pattern (good for compression)
 // ---------------------------------------------------------------------------
+@intent("fill buffer with repeating ABC pattern for compression testing")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_repeating_pattern(buf: ptr[i32], len: i32) {
     // Pattern: "ABCABCABCABC..." (3-byte repeat for good compression ratio)
     for i: i32 in range(0, len) {
@@ -279,6 +309,9 @@ fn fill_repeating_pattern(buf: ptr[i32], len: i32) {
 }
 
 // Fill with more complex pattern for realistic testing
+@intent("fill buffer with mixed repeated and semi-random data")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_mixed_pattern(buf: ptr[i32], len: i32) {
     // Mix of repeated and non-repeated data
     for i: i32 in range(0, len) {

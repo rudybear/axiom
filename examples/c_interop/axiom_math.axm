@@ -1,0 +1,37 @@
+@strict;
+@module axiom_math;
+
+@intent("compute dot product of two f64 arrays")
+@precondition(n > 0)
+@export
+@pure
+fn dot_product(a: ptr[f64], b: ptr[f64], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        sum = sum + ptr_read_f64(a, i) * ptr_read_f64(b, i);
+    }
+    return sum;
+}
+
+@intent("scale all elements of an f64 array by a constant factor")
+@precondition(n > 0)
+@export
+fn scale(data: ptr[f64], n: i32, factor: f64) -> i32 {
+    for i: i32 in range(0, n) {
+        let val: f64 = ptr_read_f64(data, i);
+        ptr_write_f64(data, i, val * factor);
+    }
+    return 0;
+}
+
+@intent("compute the sum of all elements in an f64 array")
+@precondition(n > 0)
+@export
+@pure
+fn array_sum(data: ptr[f64], n: i32) -> f64 {
+    let sum: f64 = 0.0;
+    for i: i32 in range(0, n) {
+        sum = sum + ptr_read_f64(data, i);
+    }
+    return sum;
+}

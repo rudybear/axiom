@@ -1,3 +1,4 @@
+@strict;
 @module base64;
 @intent("Base64 encode/decode codec ported from Turbo-Base64 core algorithm, with verification and benchmark");
 
@@ -21,6 +22,7 @@
 // Base64 encode table: 64 entries (indices 0..63 -> ASCII chars)
 // A=65..Z=90, a=97..z=122, 0=48..9=57, +=43, /=47
 // ---------------------------------------------------------------------------
+@intent("Return the 64-entry base64 encode lookup table mapping 6-bit indices to ASCII characters")
 @pure @inline(always)
 fn get_encode_table() -> ptr[i32] {
     return array_const_u8(
@@ -34,6 +36,7 @@ fn get_encode_table() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 // Base64 decode table: 256 entries (ASCII char -> 6-bit value, 0xFF=invalid)
 // ---------------------------------------------------------------------------
+@intent("Return the 256-entry base64 decode lookup table mapping ASCII chars to 6-bit values (0xFF=invalid)")
 @pure @inline(always)
 fn get_decode_table() -> ptr[i32] {
     return array_const_u8(
@@ -60,6 +63,9 @@ fn get_decode_table() -> ptr[i32] {
 // Base64 encode: src (src_len bytes) -> dst (returns encoded length)
 // Output buffer must be at least ((src_len + 2) / 3) * 4 bytes.
 // ---------------------------------------------------------------------------
+@intent("Encode src_len bytes from src into base64 ASCII in dst, returning the encoded byte count")
+@precondition(src_len >= 0)
+@postcondition(return == ((src_len + 2) / 3) * 4)
 @inline(always)
 fn base64_encode(src: ptr[i32], src_len: i32, dst: ptr[i32]) -> i32 {
     let enc: ptr[i32] = get_encode_table();
@@ -116,6 +122,9 @@ fn base64_encode(src: ptr[i32], src_len: i32, dst: ptr[i32]) -> i32 {
 // src_len must be a multiple of 4. Handles '=' padding.
 // Output buffer must be at least (src_len / 4) * 3 bytes.
 // ---------------------------------------------------------------------------
+@intent("Decode base64-encoded src of src_len chars into raw bytes in dst, returning decoded byte count")
+@precondition(src_len >= 0 and src_len % 4 == 0)
+@postcondition(return <= (src_len / 4) * 3)
 @inline(always)
 fn base64_decode(src: ptr[i32], src_len: i32, dst: ptr[i32]) -> i32 {
     let dec: ptr[i32] = get_decode_table();
@@ -158,6 +167,9 @@ fn base64_decode(src: ptr[i32], src_len: i32, dst: ptr[i32]) -> i32 {
 // Verification helpers
 // ---------------------------------------------------------------------------
 
+@intent("Compare len bytes of buffers a and b for equality, returning 1 if identical or 0 otherwise")
+@precondition(len >= 0)
+@postcondition(return == 0 or return == 1)
 @pure @inline(always)
 fn bytes_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
@@ -168,6 +180,7 @@ fn bytes_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     return 1;
 }
 
+@intent("Debug helper: iterate over buf bytes as ASCII (no-op passthrough for inspection)")
 fn print_bytes_as_ascii(buf: ptr[i32], len: i32) {
     // Print encoded output as characters
     for i: i32 in range(0, len) {
@@ -180,6 +193,8 @@ fn print_bytes_as_ascii(buf: ptr[i32], len: i32) {
 // ---------------------------------------------------------------------------
 // Fill buffer with deterministic test data
 // ---------------------------------------------------------------------------
+@intent("Fill buf with len bytes of deterministic pseudorandom test data using LCG pattern")
+@precondition(len >= 0)
 @inline(always)
 fn fill_test_data(buf: ptr[i32], len: i32) {
     for i: i32 in range(0, len) {
@@ -190,6 +205,7 @@ fn fill_test_data(buf: ptr[i32], len: i32) {
 // ---------------------------------------------------------------------------
 // Main: verify against known values, then benchmark
 // ---------------------------------------------------------------------------
+@intent("Verify base64 encode/decode against known test vectors, then benchmark 100MB throughput")
 fn main() -> i32 {
     print("=== Base64 Codec (Turbo-Base64 Core) ===\n");
 

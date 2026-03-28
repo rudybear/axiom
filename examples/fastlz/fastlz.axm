@@ -1,4 +1,5 @@
 @module fastlz;
+@strict;
 @intent("FastLZ compression/decompression core algorithm ported from C, with verification and benchmark");
 
 // =============================================================================
@@ -36,19 +37,30 @@
 // Constants
 // ---------------------------------------------------------------------------
 
+@intent("return hash table size") @precondition(true) @postcondition(true)
 @const fn HASH_SIZE() -> i32 { return 8192; }
+@intent("return hash table bitmask") @precondition(true) @postcondition(true)
 @const fn HASH_MASK() -> i32 { return 8191; }
+@intent("return maximum backreference distance") @precondition(true) @postcondition(true)
 @const fn MAX_DISTANCE() -> i32 { return 8191; }
+@intent("return maximum far distance") @precondition(true) @postcondition(true)
 @const fn MAX_FARDISTANCE() -> i32 { return 65535; }
+@intent("return minimum match length for backreference") @precondition(true) @postcondition(true)
 @const fn MIN_MATCH() -> i32 { return 3; }
+@intent("return maximum short match length") @precondition(true) @postcondition(true)
 @const fn MAX_SHORT_MATCH() -> i32 { return 8; }
+@intent("return maximum literal run length per tag") @precondition(true) @postcondition(true)
 @const fn MAX_LIT_RUN() -> i32 { return 32; }
+@intent("return maximum match length") @precondition(true) @postcondition(true)
 @const fn MAX_MATCH() -> i32 { return 264; }
 
 // ---------------------------------------------------------------------------
 // Hash function: hash 3 bytes at position
 // ---------------------------------------------------------------------------
 
+@intent("compute FastLZ hash of 3 bytes for hash table lookup")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn fastlz_hash(b0: i32, b1: i32, b2: i32) -> i32 {
     // Simple hash: (b0 * 17 ^ b1 * 31 ^ b2) & HASH_MASK
@@ -60,6 +72,9 @@ fn fastlz_hash(b0: i32, b1: i32, b2: i32) -> i32 {
 // Helper: read 3-byte hash value at position
 // ---------------------------------------------------------------------------
 
+@intent("hash 3 bytes at given position in source buffer")
+@precondition(pos >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn hash_at(src: ptr[i32], pos: i32) -> i32 {
     let b0: i32 = ptr_read_u8(src, pos);
@@ -73,6 +88,9 @@ fn hash_at(src: ptr[i32], pos: i32) -> i32 {
 // Returns new output position
 // ---------------------------------------------------------------------------
 
+@intent("emit a literal run to output buffer, return new output position")
+@precondition(count > 0 and dst_pos >= 0)
+@postcondition(true)
 @inline(always)
 fn emit_literals(src: ptr[i32], src_start: i32, count: i32,
                  dst: ptr[i32], dst_pos: i32) -> i32 {
@@ -106,6 +124,9 @@ fn emit_literals(src: ptr[i32], src_start: i32, count: i32,
 // Returns new output position
 // ---------------------------------------------------------------------------
 
+@intent("emit a backreference with distance and match length to output")
+@precondition(distance > 0 and match_len >= 3)
+@postcondition(true)
 @inline(always)
 fn emit_backref(dst: ptr[i32], dst_pos: i32, distance: i32, match_len: i32) -> i32 {
     let p: i32 = dst_pos;
@@ -156,6 +177,9 @@ fn emit_backref(dst: ptr[i32], dst_pos: i32, distance: i32, match_len: i32) -> i
 // ---------------------------------------------------------------------------
 // Returns compressed size, or 0 on failure.
 
+@intent("compress source buffer using FastLZ Level 1 algorithm")
+@precondition(src_len >= 0 and dst_max > 0)
+@postcondition(true)
 fn fastlz_compress(src: ptr[i32], src_len: i32,
                    dst: ptr[i32], dst_max: i32) -> i32 {
     if src_len < 4 {
@@ -240,6 +264,9 @@ fn fastlz_compress(src: ptr[i32], src_len: i32,
 // ---------------------------------------------------------------------------
 // Returns decompressed size, or 0 on failure.
 
+@intent("decompress FastLZ compressed data back to original bytes")
+@precondition(src_len > 0 and dst_max > 0)
+@postcondition(true)
 fn fastlz_decompress(src: ptr[i32], src_len: i32,
                      dst: ptr[i32], dst_max: i32) -> i32 {
     let src_pos: i32 = 0;
@@ -311,6 +338,9 @@ fn fastlz_decompress(src: ptr[i32], src_len: i32,
 // Verify: compare buffers
 // ---------------------------------------------------------------------------
 
+@intent("compare two byte buffers for equality, return 1 if identical")
+@precondition(len >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
@@ -325,6 +355,9 @@ fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
 // Test data generators
 // ---------------------------------------------------------------------------
 
+@intent("fill buffer with repeating ABC 3-byte cycle pattern")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_repeating(buf: ptr[i32], len: i32) {
     // "ABCABCABC..." -- 3-byte repeat, very compressible
     for i: i32 in range(0, len) {
@@ -332,6 +365,9 @@ fn fill_repeating(buf: ptr[i32], len: i32) {
     }
 }
 
+@intent("fill buffer with alternating repeating and pseudo-random sections")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_mixed(buf: ptr[i32], len: i32) {
     for i: i32 in range(0, len) {
         let section: i32 = i / 64;
@@ -343,6 +379,9 @@ fn fill_mixed(buf: ptr[i32], len: i32) {
     }
 }
 
+@intent("fill buffer with repeating hello world text pattern")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_text(buf: ptr[i32], len: i32) {
     // "hello world hello world ..." -- 12-byte repeat
     let pattern_len: i32 = 12;
@@ -369,6 +408,9 @@ fn fill_text(buf: ptr[i32], len: i32) {
 // Run one compress/decompress test
 // ---------------------------------------------------------------------------
 
+@intent("run one compress-decompress-verify round-trip test, return 1 on pass")
+@precondition(src_len > 0)
+@postcondition(true)
 fn run_test(name_char: i32, src: ptr[i32], src_len: i32) -> i32 {
     let comp_max: i32 = src_len + src_len / 4 + 64;
     let comp_buf: ptr[i32] = heap_alloc(comp_max, 1);

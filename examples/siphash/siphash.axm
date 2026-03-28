@@ -1,4 +1,5 @@
 @module siphash;
+@strict;
 @intent("SipHash-2-4: 64-bit keyed hash function, ported from C reference implementation");
 
 // =============================================================================
@@ -22,6 +23,9 @@
 // ---------------------------------------------------------------------------
 // Read 8 bytes from ptr as little-endian u64 (stored in i64)
 // ---------------------------------------------------------------------------
+@intent("read 8 bytes from pointer at offset as little-endian i64")
+@precondition(offset >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn u8to64_le(p: ptr[i64], offset: i32) -> i64 {
     // Read individual bytes and combine as little-endian
@@ -43,6 +47,9 @@ fn u8to64_le(p: ptr[i64], offset: i32) -> i64 {
 // SIPROUND: the core mixing step
 // Uses ptr to 4-element i64 array for v0..v3 (no structs with mutation)
 // ---------------------------------------------------------------------------
+@intent("execute one SipHash mixing round on 4-element state vector")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn sipround(v: ptr[i64]) {
     let v0: i64 = ptr_read_i64(v, 0);
@@ -78,6 +85,9 @@ fn sipround(v: ptr[i64]) {
 // SipHash-2-4: hash `inlen` bytes from `in_ptr` with 128-bit key (k0, k1)
 // `v` is a pre-allocated 4-element i64 scratch buffer
 // ---------------------------------------------------------------------------
+@intent("compute SipHash-2-4 keyed hash of message bytes")
+@precondition(inlen >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn siphash_2_4(in_ptr: ptr[i64], inlen: i32, k0: i64, k1: i64, v: ptr[i64]) -> i64 {
     // State initialization

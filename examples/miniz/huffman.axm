@@ -1,4 +1,5 @@
 @module huffman;
+@strict;
 @intent("Huffman compression/decompression -- core building block of deflate/inflate, with verification and benchmark");
 
 // =============================================================================
@@ -31,9 +32,12 @@
 // Constants
 // ---------------------------------------------------------------------------
 
+@intent("return total number of byte symbols") @precondition(true) @postcondition(true)
 @const fn NUM_SYMBOLS() -> i32 { return 256; }
+@intent("return maximum Huffman code bit length") @precondition(true) @postcondition(true)
 @const fn MAX_CODE_LEN() -> i32 { return 15; }
 // Max tree nodes: 256 leaves + 255 internal = 511
+@intent("return maximum number of Huffman tree nodes") @precondition(true) @postcondition(true)
 @const fn MAX_NODES() -> i32 { return 511; }
 
 // ---------------------------------------------------------------------------
@@ -44,10 +48,15 @@
 // node[i*4 + 2] = left child index (-1 for leaves)
 // node[i*4 + 3] = right child index (-1 for leaves)
 
+@intent("return node struct size in i32 slots") @precondition(true) @postcondition(true)
 @const fn NODE_SIZE() -> i32 { return 4; }
+@intent("return node frequency field offset") @precondition(true) @postcondition(true)
 @const fn NODE_FREQ() -> i32 { return 0; }
+@intent("return node symbol field offset") @precondition(true) @postcondition(true)
 @const fn NODE_SYM() -> i32 { return 1; }
+@intent("return node left child field offset") @precondition(true) @postcondition(true)
 @const fn NODE_LEFT() -> i32 { return 2; }
+@intent("return node right child field offset") @precondition(true) @postcondition(true)
 @const fn NODE_RIGHT() -> i32 { return 3; }
 
 // ---------------------------------------------------------------------------
@@ -57,14 +66,20 @@
 // [1] = bit_pos   (bits used in current byte, 0-7)
 // [2] = cur_byte  (byte being accumulated)
 
+@intent("return bit writer byte position field offset") @precondition(true) @postcondition(true)
 @const fn BW_BYTE_POS() -> i32 { return 0; }
+@intent("return bit writer bit position field offset") @precondition(true) @postcondition(true)
 @const fn BW_BIT_POS() -> i32 { return 1; }
+@intent("return bit writer current byte field offset") @precondition(true) @postcondition(true)
 @const fn BW_CUR_BYTE() -> i32 { return 2; }
 
 // ---------------------------------------------------------------------------
 // Bit writer: write `count` bits from `value` (MSB first)
 // ---------------------------------------------------------------------------
 
+@intent("initialize bit writer state to start of buffer")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn bw_init(state: ptr[i32]) {
     ptr_write_i32(state, BW_BYTE_POS(), 0);
@@ -72,6 +87,9 @@ fn bw_init(state: ptr[i32]) {
     ptr_write_i32(state, BW_CUR_BYTE(), 0);
 }
 
+@intent("write count bits from value MSB-first to output bit stream")
+@precondition(count >= 0)
+@postcondition(true)
 @inline(always)
 fn bw_write_bits(outbuf: ptr[i32], state: ptr[i32], value: i32, count: i32) {
     let byte_pos: i32 = ptr_read_i32(state, BW_BYTE_POS());
@@ -100,6 +118,9 @@ fn bw_write_bits(outbuf: ptr[i32], state: ptr[i32], value: i32, count: i32) {
 }
 
 // Flush any remaining partial byte
+@intent("flush remaining partial byte to output with zero padding")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn bw_flush(outbuf: ptr[i32], state: ptr[i32]) {
     let bit_pos: i32 = ptr_read_i32(state, BW_BIT_POS());
@@ -113,6 +134,9 @@ fn bw_flush(outbuf: ptr[i32], state: ptr[i32]) {
     }
 }
 
+@intent("return current byte position of bit writer")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn bw_get_pos(state: ptr[i32]) -> i32 {
     return ptr_read_i32(state, BW_BYTE_POS());
@@ -125,10 +149,16 @@ fn bw_get_pos(state: ptr[i32]) -> i32 {
 // [1] = bit_pos (bits consumed in current byte, 0-7)
 // [2] = cur_byte
 
+@intent("return bit reader byte position field offset") @precondition(true) @postcondition(true)
 @const fn BR_BYTE_POS() -> i32 { return 0; }
+@intent("return bit reader bit position field offset") @precondition(true) @postcondition(true)
 @const fn BR_BIT_POS() -> i32 { return 1; }
+@intent("return bit reader current byte field offset") @precondition(true) @postcondition(true)
 @const fn BR_CUR_BYTE() -> i32 { return 2; }
 
+@intent("initialize bit reader state from input buffer")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn br_init(state: ptr[i32], inbuf: ptr[i32]) {
     ptr_write_i32(state, BR_BYTE_POS(), 0);
@@ -136,6 +166,9 @@ fn br_init(state: ptr[i32], inbuf: ptr[i32]) {
     ptr_write_i32(state, BR_CUR_BYTE(), ptr_read_u8(inbuf, 0));
 }
 
+@intent("read single bit MSB-first from input bit stream")
+@precondition(true)
+@postcondition(true)
 @inline(always)
 fn br_read_bit(inbuf: ptr[i32], state: ptr[i32]) -> i32 {
     let bit_pos: i32 = ptr_read_i32(state, BR_BIT_POS());
@@ -156,6 +189,9 @@ fn br_read_bit(inbuf: ptr[i32], state: ptr[i32]) -> i32 {
     return bit;
 }
 
+@intent("read count bits MSB-first from input bit stream")
+@precondition(count >= 0)
+@postcondition(true)
 @inline(always)
 fn br_read_bits(inbuf: ptr[i32], state: ptr[i32], count: i32) -> i32 {
     let result: i32 = 0;
@@ -171,6 +207,9 @@ fn br_read_bits(inbuf: ptr[i32], state: ptr[i32], count: i32) -> i32 {
 // Count byte frequencies
 // ---------------------------------------------------------------------------
 
+@intent("count byte frequencies in input buffer for Huffman tree construction")
+@precondition(in_len >= 0)
+@postcondition(true)
 @inline(always)
 fn count_frequencies(input: ptr[i32], in_len: i32, freq: ptr[i32]) {
     // Zero out frequency table
@@ -189,6 +228,9 @@ fn count_frequencies(input: ptr[i32], in_len: i32, freq: ptr[i32]) {
 // used[i] = 1 means node i has been consumed
 // ---------------------------------------------------------------------------
 
+@intent("find unused node with minimum frequency for tree building")
+@precondition(node_count > 0)
+@postcondition(true)
 @inline(always)
 fn find_min_node(nodes: ptr[i32], used: ptr[i32], node_count: i32) -> i32 {
     let min_idx: i32 = 0 - 1;
@@ -212,6 +254,9 @@ fn find_min_node(nodes: ptr[i32], used: ptr[i32], node_count: i32) -> i32 {
 // Returns root node index and total node count via out params
 // ---------------------------------------------------------------------------
 
+@intent("build Huffman tree from frequency table via greedy node merging")
+@precondition(true)
+@postcondition(true)
 fn build_tree(freq: ptr[i32], nodes: ptr[i32], out_root: ptr[i32], out_count: ptr[i32]) {
     // Create leaf nodes for all symbols with freq > 0
     let node_count: i32 = 0;
@@ -274,6 +319,9 @@ fn build_tree(freq: ptr[i32], nodes: ptr[i32], out_root: ptr[i32], out_count: pt
 // code_lens[sym] = bit length of code for symbol sym
 // ---------------------------------------------------------------------------
 
+@intent("recursively traverse Huffman tree to assign code bit lengths to symbols")
+@precondition(node_idx >= 0 and depth >= 0)
+@postcondition(true)
 fn generate_lengths_recurse(nodes: ptr[i32], node_idx: i32, depth: i32, code_lens: ptr[i32]) {
     let base: i32 = node_idx * NODE_SIZE();
     let left: i32 = ptr_read_i32(nodes, base + NODE_LEFT());

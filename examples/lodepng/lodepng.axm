@@ -1,3 +1,4 @@
+@strict;
 @module lodepng;
 @intent("PNG decode core: CRC32 + Adler32 + fixed-Huffman inflate, ported from lodepng");
 
@@ -24,11 +25,13 @@
 // ---------------------------------------------------------------------------
 // CRC32 polynomial (as signed i32, 0xEDB88320 = -306674912)
 // ---------------------------------------------------------------------------
+@intent("CRC32 polynomial constant (0xEDB88320 as signed i32)")
 @const fn CRC32_POLY() -> i32 { return 0 - 306674912; }
 
 // ---------------------------------------------------------------------------
 // Build CRC32 lookup table (256 entries)
 // ---------------------------------------------------------------------------
+@intent("Generate the standard CRC32 lookup table with 256 entries using polynomial division")
 fn build_crc32_table(table: ptr[i32]) {
     for i: i32 in range(0, 256) {
         let crc: i32 = i;
@@ -46,6 +49,8 @@ fn build_crc32_table(table: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // CRC32: compute CRC of byte buffer
 // ---------------------------------------------------------------------------
+@intent("Compute CRC32 checksum of len bytes using the prebuilt 256-entry lookup table")
+@precondition(len >= 0)
 @pure @inline(always)
 fn crc32(data: ptr[i32], len: i32, table: ptr[i32]) -> i32 {
     // CRC32 starts with 0xFFFFFFFF = -1 as signed i32
@@ -61,8 +66,11 @@ fn crc32(data: ptr[i32], len: i32, table: ptr[i32]) -> i32 {
 // ---------------------------------------------------------------------------
 // Adler32: compute Adler-32 checksum
 // ---------------------------------------------------------------------------
+@intent("Adler-32 modulus constant (largest prime below 2^16)")
 @const fn ADLER_MOD() -> i32 { return 65521; }
 
+@intent("Compute Adler-32 checksum of len bytes: (b << 16) | a, where a=sum(bytes)+1, b=sum(a's)")
+@precondition(len >= 0)
 @pure @inline(always)
 fn adler32(data: ptr[i32], len: i32) -> i32 {
     let a: i32 = 1;
@@ -75,6 +83,8 @@ fn adler32(data: ptr[i32], len: i32) -> i32 {
 }
 
 // Optimized Adler32 with deferred modulo (process in blocks of 5552)
+@intent("Fast Adler-32 with deferred modulo reduction in 5552-byte blocks to avoid overflow")
+@precondition(len >= 0)
 @pure @inline(always)
 fn adler32_fast(data: ptr[i32], len: i32) -> i32 {
     let a: i32 = 1;
@@ -106,6 +116,8 @@ fn adler32_fast(data: ptr[i32], len: i32) -> i32 {
 // For fixed codes, the mapping is deterministic per RFC 1951.
 
 // Read bits from a byte buffer (LSB first, as per deflate)
+@intent("Read num_bits from byte buffer starting at bit_pos, LSB-first order per DEFLATE spec")
+@precondition(bit_pos >= 0 and num_bits >= 0 and num_bits <= 16)
 @pure @inline(always)
 fn read_bits(data: ptr[i32], bit_pos: i32, num_bits: i32) -> i32 {
     let result: i32 = 0;
@@ -119,6 +131,8 @@ fn read_bits(data: ptr[i32], bit_pos: i32, num_bits: i32) -> i32 {
 }
 
 // Reverse bits (for Huffman codes which are MSB-first in deflate)
+@intent("Reverse the lowest num_bits of val, converting MSB-first Huffman codes to LSB-first deflate order")
+@precondition(num_bits >= 0 and num_bits <= 16)
 @pure @inline(always)
 fn reverse_bits(val: i32, num_bits: i32) -> i32 {
     let result: i32 = 0;
@@ -133,6 +147,8 @@ fn reverse_bits(val: i32, num_bits: i32) -> i32 {
 
 // Decode one fixed Huffman literal/length symbol
 // Returns: symbol in low 16 bits, bits consumed in high 16 bits
+@intent("Decode one fixed-Huffman literal/length symbol per RFC 1951, returning packed (symbol | bits_consumed<<16)")
+@precondition(bit_pos >= 0)
 @pure @inline(always)
 fn decode_fixed_litlen(data: ptr[i32], bit_pos: i32) -> i32 {
     // Try 7 bits first (codes 256-279: length codes, and end-of-block 256)
@@ -176,6 +192,7 @@ fn decode_fixed_litlen(data: ptr[i32], bit_pos: i32) -> i32 {
 }
 
 // Length base values for codes 257-285 (stored in heap)
+@intent("Populate the deflate length base values and extra-bit counts for codes 257-285 per RFC 1951")
 fn build_length_table(base: ptr[i32], extra: ptr[i32]) {
     // Code 257-264: lengths 3-10, 0 extra bits
     ptr_write_i32(base, 0, 3);   ptr_write_i32(extra, 0, 0);
@@ -216,6 +233,7 @@ fn build_length_table(base: ptr[i32], extra: ptr[i32]) {
 }
 
 // Distance base values for codes 0-29
+@intent("Populate the deflate distance base values and extra-bit counts for codes 0-29 per RFC 1951")
 fn build_distance_table(base: ptr[i32], extra: ptr[i32]) {
     ptr_write_i32(base, 0, 1);     ptr_write_i32(extra, 0, 0);
     ptr_write_i32(base, 1, 2);     ptr_write_i32(extra, 1, 0);
@@ -258,6 +276,9 @@ fn build_distance_table(base: ptr[i32], extra: ptr[i32]) {
 // dst_max: output buffer size
 // Returns: decompressed size, or 0 on error
 //
+@intent("Inflate a fixed-Huffman DEFLATE block starting at src_bit_start, decoding literals and LZ77 match copies into dst")
+@precondition(src_bit_start >= 0 and dst_max > 0)
+@postcondition(return >= 0 and return <= dst_max)
 fn inflate_fixed(src: ptr[i32], src_bit_start: i32, dst: ptr[i32], dst_max: i32,
                  len_base: ptr[i32], len_extra: ptr[i32],
                  dist_base: ptr[i32], dist_extra: ptr[i32]) -> i32 {
@@ -324,6 +345,8 @@ fn inflate_fixed(src: ptr[i32], src_bit_start: i32, dst: ptr[i32], dst_max: i32,
 // ---------------------------------------------------------------------------
 // We write bits LSB-first into a byte buffer.
 
+@intent("Write num_bits of val into dst at bit_pos in LSB-first order, returning new bit position")
+@precondition(bit_pos >= 0 and num_bits >= 0)
 fn write_bits(dst: ptr[i32], bit_pos: i32, val: i32, num_bits: i32) -> i32 {
     for i: i32 in range(0, num_bits) {
         let byte_idx: i32 = lshr(bit_pos + i, 3);
@@ -339,6 +362,8 @@ fn write_bits(dst: ptr[i32], bit_pos: i32, val: i32, num_bits: i32) -> i32 {
 }
 
 // Write a fixed Huffman literal (RFC 1951 section 3.2.6)
+@intent("Encode one literal/EOB symbol using fixed Huffman codes per RFC 1951 section 3.2.6")
+@precondition(bit_pos >= 0 and lit >= 0 and lit <= 256)
 @pure @inline(always)
 fn write_fixed_literal(dst: ptr[i32], bit_pos: i32, lit: i32) -> i32 {
     if lit <= 143 {
@@ -358,6 +383,8 @@ fn write_fixed_literal(dst: ptr[i32], bit_pos: i32, lit: i32) -> i32 {
 }
 
 // Simple deflate encoder: literals only (no LZ77 matching, for test round-trip)
+@intent("Encode src as a DEFLATE stream using fixed Huffman codes with literal-only encoding (no LZ77), for round-trip testing")
+@precondition(src_len >= 0)
 fn deflate_fixed_literals(src: ptr[i32], src_len: i32,
                           dst: ptr[i32], dst_max_bits: i32) -> i32 {
     let bit_pos: i32 = 0;

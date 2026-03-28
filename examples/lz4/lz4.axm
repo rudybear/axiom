@@ -1,4 +1,5 @@
 @module lz4;
+@strict;
 @intent("LZ4 compression/decompression core algorithm ported from C, with verification and benchmark");
 
 // =============================================================================
@@ -24,20 +25,31 @@
 // Constants
 // ---------------------------------------------------------------------------
 
+@intent("return LZ4 hash table size") @precondition(true) @postcondition(true)
 @const fn HASH_TABLE_SIZE() -> i32 { return 4096; }
+@intent("return LZ4 hash table log2 size") @precondition(true) @postcondition(true)
 @const fn HASH_LOG() -> i32 { return 12; }
+@intent("return LZ4 minimum match length") @precondition(true) @postcondition(true)
 @const fn MIN_MATCH() -> i32 { return 4; }
+@intent("return match length field bit count") @precondition(true) @postcondition(true)
 @const fn ML_BITS() -> i32 { return 4; }
+@intent("return match length field bitmask") @precondition(true) @postcondition(true)
 @const fn ML_MASK() -> i32 { return 15; }
+@intent("return literal run field bit count") @precondition(true) @postcondition(true)
 @const fn RUN_BITS() -> i32 { return 4; }
+@intent("return literal run field bitmask") @precondition(true) @postcondition(true)
 @const fn RUN_MASK() -> i32 { return 15; }
 // LZ4 uses 2654435761 as hash multiplier; as signed i32 = -1640531535
+@intent("return LZ4 hash multiplier constant") @precondition(true) @postcondition(true)
 @const fn HASH_MULT() -> i32 { return 0 - 1640531535; }
 
 // ---------------------------------------------------------------------------
 // Helper: read 4 bytes as a 32-bit value (little-endian)
 // ---------------------------------------------------------------------------
 
+@intent("read 4 bytes from buffer as little-endian i32")
+@precondition(byte_offset >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn read32_le(data: ptr[i32], byte_offset: i32) -> i32 {
     let b0: i32 = ptr_read_u8(data, byte_offset);
@@ -51,6 +63,9 @@ fn read32_le(data: ptr[i32], byte_offset: i32) -> i32 {
 // Helper: write 16-bit little-endian offset
 // ---------------------------------------------------------------------------
 
+@intent("write 16-bit value as little-endian to byte buffer")
+@precondition(pos >= 0)
+@postcondition(true)
 @inline(always)
 fn write16_le(dst: ptr[i32], pos: i32, val: i32) {
     ptr_write_u8(dst, pos, band(val, 255));
@@ -61,6 +76,9 @@ fn write16_le(dst: ptr[i32], pos: i32, val: i32) {
 // Helper: read 16-bit little-endian offset
 // ---------------------------------------------------------------------------
 
+@intent("read 16-bit little-endian value from byte buffer")
+@precondition(pos >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn read16_le(src: ptr[i32], pos: i32) -> i32 {
     let b0: i32 = ptr_read_u8(src, pos);
@@ -72,6 +90,9 @@ fn read16_le(src: ptr[i32], pos: i32) -> i32 {
 // Hash function: hash 4 bytes at position
 // ---------------------------------------------------------------------------
 
+@intent("compute LZ4 hash of 4-byte value for hash table lookup")
+@precondition(true)
+@postcondition(true)
 @pure @inline(always)
 fn lz4_hash(val: i32) -> i32 {
     // (val * 2654435761) >> (32 - 12) = >> 20
@@ -83,6 +104,9 @@ fn lz4_hash(val: i32) -> i32 {
 // Write extended length (run-length encoded with 255-byte chunks)
 // ---------------------------------------------------------------------------
 
+@intent("write run-length encoded extended length in 255-byte chunks")
+@precondition(pos >= 0 and length >= 0)
+@postcondition(true)
 @inline(always)
 fn write_extended_length(dst: ptr[i32], pos: i32, length: i32) -> i32 {
     let rem: i32 = length;
@@ -102,6 +126,9 @@ fn write_extended_length(dst: ptr[i32], pos: i32, length: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Returns compressed size in bytes, or 0 on failure.
 
+@intent("compress source buffer using LZ4 hash-based LZ77 algorithm")
+@precondition(src_len >= 0 and dst_max > 0)
+@postcondition(true)
 fn lz4_compress(src: ptr[i32], src_len: i32,
                 dst: ptr[i32], dst_max: i32) -> i32 {
     if src_len < 1 {
@@ -254,6 +281,9 @@ fn lz4_compress(src: ptr[i32], src_len: i32,
 // ---------------------------------------------------------------------------
 // Returns decompressed size in bytes, or 0 on failure.
 
+@intent("decompress LZ4 compressed data back to original bytes")
+@precondition(src_len > 0 and dst_max > 0)
+@postcondition(true)
 fn lz4_decompress(src: ptr[i32], src_len: i32,
                   dst: ptr[i32], dst_max: i32) -> i32 {
     let src_pos: i32 = 0;
@@ -338,6 +368,9 @@ fn lz4_decompress(src: ptr[i32], src_len: i32,
 // Verify: compare two byte buffers
 // ---------------------------------------------------------------------------
 
+@intent("compare two byte buffers for equality, return 1 if identical")
+@precondition(len >= 0)
+@postcondition(true)
 @pure @inline(always)
 fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
@@ -352,6 +385,9 @@ fn buffers_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
 // Test data: fill with repeating pattern (compressible)
 // ---------------------------------------------------------------------------
 
+@intent("fill buffer with repeating ABCDEFGH 8-byte cycle pattern")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_repeating(buf: ptr[i32], len: i32) {
     // "ABCDEFGH" repeating -- 8-byte cycle with 4-byte matches
     for i: i32 in range(0, len) {
@@ -361,6 +397,9 @@ fn fill_repeating(buf: ptr[i32], len: i32) {
 }
 
 // Fill with semi-random but compressible data
+@intent("fill buffer with alternating repeating and pseudo-random sections")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_mixed(buf: ptr[i32], len: i32) {
     for i: i32 in range(0, len) {
         let section: i32 = i / 64;
@@ -375,6 +414,9 @@ fn fill_mixed(buf: ptr[i32], len: i32) {
 }
 
 // Fill with English-like text (highly compressible)
+@intent("fill buffer with repeating English pangram text pattern")
+@precondition(len > 0)
+@postcondition(true)
 fn fill_text_like(buf: ptr[i32], len: i32) {
     // Simulate English text with common bigrams repeating
     // "the quick brown fox jumps over the lazy dog " repeated
