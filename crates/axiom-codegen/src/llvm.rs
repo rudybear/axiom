@@ -2320,7 +2320,7 @@ fn emit_assign(ctx: &mut CodegenContext, target: &HirExpr, value: &HirExpr) {
                 // Ensure index is i64 for GEP.
                 let idx_i64 = if idx_val.ty != "i64" {
                     let ext_reg = ctx.fresh_reg();
-                    ctx.emit(&format!("{ext_reg} = sext {} {} to i64", idx_val.ty, idx_val.reg));
+                    ctx.emit(&format!("{ext_reg} = zext {} {} to i64", idx_val.ty, idx_val.reg));
                     ext_reg
                 } else {
                     idx_val.reg.clone()
@@ -3244,7 +3244,7 @@ fn emit_array_index_read(
             let idx_i64 = if idx_val.ty != "i64" {
                 let ext_reg = ctx.fresh_reg();
                 ctx.emit(&format!(
-                    "{ext_reg} = sext {} {} to i64",
+                    "{ext_reg} = zext {} {} to i64",
                     idx_val.ty, idx_val.reg
                 ));
                 ext_reg
@@ -7572,7 +7572,7 @@ fn emit_builtin_ptr_read(
     // Widen index to i64 for GEP.
     let idx64 = ctx.fresh_reg();
     ctx.emit(&format!(
-        "{idx64} = sext i32 {} to i64",
+        "{idx64} = zext i32 {} to i64",
         index.reg
     ));
 
@@ -7647,7 +7647,7 @@ fn emit_builtin_ptr_write(
     // Widen index to i64 for GEP.
     let idx64 = ctx.fresh_reg();
     ctx.emit(&format!(
-        "{idx64} = sext i32 {} to i64",
+        "{idx64} = zext i32 {} to i64",
         index.reg
     ));
 
@@ -7703,7 +7703,7 @@ fn emit_builtin_ptr_read_f32(
 
     // Widen index to i64 for GEP.
     let idx64 = ctx.fresh_reg();
-    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+    ctx.emit(&format!("{idx64} = zext i32 {} to i64", index.reg));
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
@@ -7763,7 +7763,7 @@ fn emit_builtin_ptr_write_f32(
 
     // Widen index to i64 for GEP.
     let idx64 = ctx.fresh_reg();
-    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+    ctx.emit(&format!("{idx64} = zext i32 {} to i64", index.reg));
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
@@ -7814,7 +7814,7 @@ fn emit_builtin_ptr_read_i16(
 
     // Widen index to i64 for GEP.
     let idx64 = ctx.fresh_reg();
-    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+    ctx.emit(&format!("{idx64} = zext i32 {} to i64", index.reg));
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
@@ -7870,7 +7870,7 @@ fn emit_builtin_ptr_read_u8(
 
     // Widen index to i64 for GEP.
     let idx64 = ctx.fresh_reg();
-    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+    ctx.emit(&format!("{idx64} = zext i32 {} to i64", index.reg));
 
     let gep_reg = ctx.fresh_reg();
     // Use array-typed GEP with inbounds when the pointer is a known global constant array.
@@ -7946,7 +7946,7 @@ fn emit_builtin_ptr_write_u8(
 
     // Widen index to i64 for GEP.
     let idx64 = ctx.fresh_reg();
-    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+    ctx.emit(&format!("{idx64} = zext i32 {} to i64", index.reg));
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
@@ -8002,7 +8002,7 @@ fn emit_builtin_ptr_write_i16(
 
     // Widen index to i64 for GEP.
     let idx64 = ctx.fresh_reg();
-    ctx.emit(&format!("{idx64} = sext i32 {} to i64", index.reg));
+    ctx.emit(&format!("{idx64} = zext i32 {} to i64", index.reg));
 
     let gep_reg = ctx.fresh_reg();
     ctx.emit(&format!(
