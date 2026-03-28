@@ -332,13 +332,47 @@ fn compile_ir_to_binary(
         )
     })?;
 
-    let child = Command::new(&clang)
-        .arg("-O2")
+    // Check if the IR needs the AXIOM C runtime (contains @axiom_* calls).
+    let needs_rt = axiom_codegen::needs_runtime(llvm_ir);
+
+    let mut cmd = Command::new(&clang);
+    cmd.arg("-O2")
         .arg("-Wno-override-module")
-        .arg(&ll_path)
-        .arg("-o")
-        .arg(output)
-        .output();
+        .arg("-march=native")
+        .arg(&ll_path);
+
+    // Link the C runtime if needed.
+    if needs_rt {
+        let rt_dir = std::env::temp_dir().join(format!("axiom_bench_rt_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&rt_dir);
+        let rt_path = rt_dir.join("axiom_rt.c");
+        // Write the embedded runtime files
+        std::fs::write(&rt_path, include_str!("../../axiom-driver/runtime/axiom_rt.c")).ok();
+        for (name, content) in &[
+            ("axiom_rt_core.c", include_str!("../../axiom-driver/runtime/axiom_rt_core.c")),
+            ("axiom_rt_io.c", include_str!("../../axiom-driver/runtime/axiom_rt_io.c")),
+            ("axiom_rt_coroutines.c", include_str!("../../axiom-driver/runtime/axiom_rt_coroutines.c")),
+            ("axiom_rt_threading.c", include_str!("../../axiom-driver/runtime/axiom_rt_threading.c")),
+            ("axiom_rt_strings.c", include_str!("../../axiom-driver/runtime/axiom_rt_strings.c")),
+            ("axiom_rt_vec.c", include_str!("../../axiom-driver/runtime/axiom_rt_vec.c")),
+            ("axiom_rt_trace.c", include_str!("../../axiom-driver/runtime/axiom_rt_trace.c")),
+        ] {
+            std::fs::write(rt_dir.join(name), content).ok();
+        }
+        cmd.arg(&rt_path);
+        #[cfg(not(target_os = "windows"))]
+        cmd.arg("-lpthread");
+        #[cfg(target_os = "windows")]
+        { cmd.arg("-lgdi32").arg("-luser32"); }
+    }
+
+    cmd.arg("-o").arg(output);
+
+    // Stack size for large allocas
+    #[cfg(target_os = "windows")]
+    cmd.arg("-Wl,/STACK:67108864");
+
+    let child = cmd.output();
 
     // Clean up .ll file regardless.
     let _ = std::fs::remove_file(&ll_path);
