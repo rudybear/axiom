@@ -77,6 +77,7 @@ fn write_token(dst: ptr[i32], pos: i32, tok_type: i32, length: i32) {
 // Encodes remainder in 255-byte run-length chunks
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn write_extended_length(dst: ptr[i32], pos: i32, length: i32) -> i32 {
     let rem: i32 = length;
     let p: i32 = pos;
@@ -94,6 +95,7 @@ fn write_extended_length(dst: ptr[i32], pos: i32, length: i32) -> i32 {
 // Read extended length during decompression
 // ---------------------------------------------------------------------------
 
+@inline(always)
 fn read_extended_length(src: ptr[i32], pos: i32, base_len: i32,
                         out_len: ptr[i32], out_pos: ptr[i32], src_len: i32) {
     let length: i32 = base_len;
@@ -151,6 +153,7 @@ fn match_length(src: ptr[i32], pos1: i32, pos2: i32, max_len: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Returns compressed size in bytes, or 0 on failure.
 
+@inline(always)
 fn lzav_compress(src: ptr[i32], src_len: i32,
                  dst: ptr[i32], dst_max: i32) -> i32 {
     if src_len < 1 {
@@ -341,6 +344,7 @@ fn lzav_compress(src: ptr[i32], src_len: i32,
 // ---------------------------------------------------------------------------
 // Returns decompressed size in bytes, or 0 on failure.
 
+@inline(always)
 fn lzav_decompress(src: ptr[i32], src_len: i32,
                    dst: ptr[i32], dst_max: i32) -> i32 {
     let src_pos: i32 = 0;

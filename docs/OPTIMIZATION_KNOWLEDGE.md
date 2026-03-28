@@ -301,3 +301,50 @@ The vec3 type is SIMD-aligned and loads as a single `<4 x double>` instruction.
 2. **During analysis:** The LLM checks if any known rules/anti-patterns apply to the target code
 3. **After discovery:** New rules are appended when the LLM finds novel optimization patterns
 4. **Format:** Each rule has Discovery (when), Impact (how much), Evidence (data), Pattern (code), When to apply (guidance)
+
+## Rule 12: AXIOM codegen generates verbose IR — use @inline(always) aggressively
+
+**Pattern:** AXIOM's codegen puts every variable in an alloca and every ptr_read/write
+is an explicit GEP+load/store. This generates ~5x more IR instructions than equivalent C.
+LLVM's SROA/mem2reg at -O2 eliminates most allocas, but function boundaries block
+this optimization.
+
+**When to apply:** Always add `@inline(always)` to functions in the hot path that:
+- Are called in tight loops (compression inner loops, crypto rounds, hash processing)
+- Take ptr parameters that hold constant addresses (lookup tables)
+- Are small-to-medium size (<100 lines)
+
+**Why it helps:** Inlining eliminates parameter allocas and lets LLVM see through the
+entire computation chain. This enables constant propagation of pointer addresses,
+dead store elimination, and register promotion that can't happen across function
+boundaries.
+
+**Measured impact:** LZAV compression: 129ms→115ms (-11%) just from adding @inline(always)
+to compress/decompress. AES-128: closing 3.7x gap to 1.04x required inlining + const
+propagation.
+
+**Anti-pattern:** Don't inline very large functions (>200 lines) or recursive functions —
+this causes code bloat and icache pressure.
+
+## Rule 13: Use u8 storage for byte-level algorithms, not i32
+
+**Pattern:** Crypto/compression algorithms operate on bytes. Using i32 (4 bytes) per
+byte value wastes 75% of cache capacity. AES S-box: 256 bytes (u8) vs 1024 bytes (i32).
+
+**When to apply:** Any algorithm that processes byte streams — AES, compression, hashing.
+Use `array_const_u8(...)` for lookup tables, `ptr_read_u8`/`ptr_write_u8` for byte access,
+`heap_alloc(n, 1)` for byte buffers.
+
+**Measured impact:** AES-128: 312ms→280ms (-10%) just from i32→u8 storage.
+
+## Rule 14: Wrapping arithmetic (+%, *%) is mandatory for hash/crypto
+
+**Pattern:** Hash functions and encryption rely on integer overflow wrapping. AXIOM's
+default `+` uses `nsw` (no signed wrap) which is UB on overflow. Use `+%` (wrapping add)
+and `*%` (wrapping multiply) for ALL arithmetic in hash/crypto code.
+
+**When to apply:** Any code computing hashes (SipHash, xxHash, CRC), encryption (AES key
+schedule), or checksums.
+
+**Anti-pattern:** Never use `+` or `*` in hash functions — the nsw flag allows LLVM to
+assume overflow doesn't happen, which can silently produce wrong results.
