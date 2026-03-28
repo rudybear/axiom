@@ -21,7 +21,7 @@
 // Base64 encode table: 64 entries (indices 0..63 -> ASCII chars)
 // A=65..Z=90, a=97..z=122, 0=48..9=57, +=43, /=47
 // ---------------------------------------------------------------------------
-@pure
+@pure @inline(always)
 fn get_encode_table() -> ptr[i32] {
     return array_const_u8(
         65,  66,  67,  68,  69,  70,  71,  72,  73,  74,  75,  76,  77,  78,  79,  80,
@@ -34,7 +34,7 @@ fn get_encode_table() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 // Base64 decode table: 256 entries (ASCII char -> 6-bit value, 0xFF=invalid)
 // ---------------------------------------------------------------------------
-@pure
+@pure @inline(always)
 fn get_decode_table() -> ptr[i32] {
     return array_const_u8(
         255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
@@ -158,6 +158,7 @@ fn base64_decode(src: ptr[i32], src_len: i32, dst: ptr[i32]) -> i32 {
 // Verification helpers
 // ---------------------------------------------------------------------------
 
+@pure @inline(always)
 fn bytes_equal(a: ptr[i32], b: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
         if ptr_read_u8(a, i) != ptr_read_u8(b, i) {
@@ -179,6 +180,7 @@ fn print_bytes_as_ascii(buf: ptr[i32], len: i32) {
 // ---------------------------------------------------------------------------
 // Fill buffer with deterministic test data
 // ---------------------------------------------------------------------------
+@inline(always)
 fn fill_test_data(buf: ptr[i32], len: i32) {
     for i: i32 in range(0, len) {
         ptr_write_u8(buf, i, band(i *% 137 +% 73, 255));

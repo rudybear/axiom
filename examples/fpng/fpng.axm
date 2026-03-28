@@ -93,7 +93,7 @@ fn build_crc32_tables_sb4(tables: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // Standard CRC32 (byte-at-a-time, for reference)
 // ---------------------------------------------------------------------------
-@inline(always)
+@pure @inline(always)
 fn crc32_basic(data: ptr[i32], len: i32, table: ptr[i32]) -> i32 {
     let crc: i32 = 0 - 1;
     for i: i32 in range(0, len) {
@@ -107,7 +107,7 @@ fn crc32_basic(data: ptr[i32], len: i32, table: ptr[i32]) -> i32 {
 // ---------------------------------------------------------------------------
 // Slice-by-4 CRC32 (processes 4 bytes per loop iteration)
 // ---------------------------------------------------------------------------
-@inline(always)
+@pure @inline(always)
 fn crc32_sb4(data: ptr[i32], len: i32, tables: ptr[i32]) -> i32 {
     let crc: i32 = 0 - 1;
     let i: i32 = 0;

@@ -46,7 +46,7 @@ fn build_crc32_table(table: ptr[i32]) {
 // ---------------------------------------------------------------------------
 // CRC32: compute CRC of byte buffer
 // ---------------------------------------------------------------------------
-@inline(always)
+@pure @inline(always)
 fn crc32(data: ptr[i32], len: i32, table: ptr[i32]) -> i32 {
     // CRC32 starts with 0xFFFFFFFF = -1 as signed i32
     let crc: i32 = 0 - 1;  // 0xFFFFFFFF
@@ -63,7 +63,7 @@ fn crc32(data: ptr[i32], len: i32, table: ptr[i32]) -> i32 {
 // ---------------------------------------------------------------------------
 @const fn ADLER_MOD() -> i32 { return 65521; }
 
-@inline(always)
+@pure @inline(always)
 fn adler32(data: ptr[i32], len: i32) -> i32 {
     let a: i32 = 1;
     let b: i32 = 0;
@@ -75,7 +75,7 @@ fn adler32(data: ptr[i32], len: i32) -> i32 {
 }
 
 // Optimized Adler32 with deferred modulo (process in blocks of 5552)
-@inline(always)
+@pure @inline(always)
 fn adler32_fast(data: ptr[i32], len: i32) -> i32 {
     let a: i32 = 1;
     let b: i32 = 0;
@@ -106,7 +106,7 @@ fn adler32_fast(data: ptr[i32], len: i32) -> i32 {
 // For fixed codes, the mapping is deterministic per RFC 1951.
 
 // Read bits from a byte buffer (LSB first, as per deflate)
-@inline(always)
+@pure @inline(always)
 fn read_bits(data: ptr[i32], bit_pos: i32, num_bits: i32) -> i32 {
     let result: i32 = 0;
     for i: i32 in range(0, num_bits) {
@@ -133,7 +133,7 @@ fn reverse_bits(val: i32, num_bits: i32) -> i32 {
 
 // Decode one fixed Huffman literal/length symbol
 // Returns: symbol in low 16 bits, bits consumed in high 16 bits
-@inline(always)
+@pure @inline(always)
 fn decode_fixed_litlen(data: ptr[i32], bit_pos: i32) -> i32 {
     // Try 7 bits first (codes 256-279: length codes, and end-of-block 256)
     let bits7: i32 = read_bits(data, bit_pos, 7);
@@ -339,7 +339,7 @@ fn write_bits(dst: ptr[i32], bit_pos: i32, val: i32, num_bits: i32) -> i32 {
 }
 
 // Write a fixed Huffman literal (RFC 1951 section 3.2.6)
-@inline(always)
+@pure @inline(always)
 fn write_fixed_literal(dst: ptr[i32], bit_pos: i32, lit: i32) -> i32 {
     if lit <= 143 {
         // 8-bit code: 0x30 + lit, reversed

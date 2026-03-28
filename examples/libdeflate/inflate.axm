@@ -112,7 +112,7 @@ fn br_consume(state: ptr[i32], n: i32) {
 // Table format: table[reversed_code & FAST_MASK] = (symbol << 4) | code_length
 // ---------------------------------------------------------------------------
 
-@inline(always)
+@pure @inline(always)
 fn reverse_bits(val: i32, nbits: i32) -> i32 {
     let result: i32 = 0;
     let v: i32 = val;
@@ -239,7 +239,7 @@ fn get_dist_extra() -> ptr[i32] {
 // ---------------------------------------------------------------------------
 // Decode one symbol from Huffman table
 // ---------------------------------------------------------------------------
-@inline(always)
+@pure @inline(always)
 fn decode_symbol(state: ptr[i32], input: ptr[i32], table: ptr[i32]) -> i32 {
     br_refill(state, input);
     let bits: i32 = br_peek(state, FAST_BITS());

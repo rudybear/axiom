@@ -56,7 +56,7 @@ fn build_imdct_cos_table(table: ptr[i32]) {
 // output: ptr to 36 f64 values (time domain)
 // cos_tab: precomputed 648-entry cosine table
 //
-@inline(always)
+@pure @inline(always)
 fn imdct36(input: ptr[i32], output: ptr[i32], cos_tab: ptr[i32]) {
     for n: i32 in range(0, 36) {
         let sum: f64 = 0.0;
@@ -84,7 +84,7 @@ fn build_imdct_window(win: ptr[i32]) {
     }
 }
 
-@inline(always)
+@pure @inline(always)
 fn imdct36_windowed(input: ptr[i32], output: ptr[i32],
                     cos_tab: ptr[i32], window: ptr[i32],
                     overlap: ptr[i32]) {

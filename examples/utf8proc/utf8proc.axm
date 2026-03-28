@@ -325,7 +325,7 @@ fn case_fold(cp: i32) -> i32 {
 // UTF-8 encode: write one codepoint to buffer
 // Returns number of bytes written
 // ---------------------------------------------------------------------------
-@inline(always)
+@pure @inline(always)
 fn utf8_encode(cp: i32, out: ptr[i32], pos: i32) -> i32 {
     if cp < 0x80 {
         ptr_write_u8(out, pos, cp);

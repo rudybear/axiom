@@ -41,7 +41,7 @@
 // applied to the message word indices.
 // We store 7 rounds x 16 indices = 112 entries.
 // ---------------------------------------------------------------------------
-@pure
+@pure @inline(always)
 fn get_msg_schedule() -> ptr[i32] {
     return array_const_u8(
         // Round 0: identity
@@ -116,7 +116,7 @@ fn g(state: ptr[i32], a: i32, b: i32, c: i32, d: i32, mx: i32, my: i32) {
 // ---------------------------------------------------------------------------
 // One round of column + diagonal mixing
 // ---------------------------------------------------------------------------
-@inline(always)
+@pure @inline(always)
 fn round_fn(state: ptr[i32], msg: ptr[i32], schedule: ptr[i32], round_idx: i32) {
     let base: i32 = round_idx * 16;
     // Read all 16 message schedule indices for this round
@@ -159,6 +159,7 @@ fn round_fn(state: ptr[i32], msg: ptr[i32], schedule: ptr[i32], round_idx: i32) 
 //   flags: domain separation flags
 //   out: 16-word output state (first 8 words XOR'd with last 8)
 // ---------------------------------------------------------------------------
+@inline(always)
 fn blake3_compress(cv: ptr[i32], block: ptr[i32], counter_lo: i32, counter_hi: i32,
                    block_len: i32, flags: i32, out: ptr[i32]) {
     let schedule: ptr[i32] = get_msg_schedule();
@@ -337,6 +338,7 @@ fn print_hash(hash: ptr[i32], len: i32) {
 // ---------------------------------------------------------------------------
 // Verification helper: compare hash bytes
 // ---------------------------------------------------------------------------
+@pure @inline(always)
 fn hash_matches(hash: ptr[i32], expected: ptr[i32], len: i32) -> i32 {
     for i: i32 in range(0, len) {
         if ptr_read_u8(hash, i) != ptr_read_u8(expected, i) {
@@ -349,6 +351,7 @@ fn hash_matches(hash: ptr[i32], expected: ptr[i32], len: i32) -> i32 {
 // ---------------------------------------------------------------------------
 // Fill test data
 // ---------------------------------------------------------------------------
+@inline(always)
 fn fill_test_data(buf: ptr[i32], len: i32) {
     for i: i32 in range(0, len) {
         ptr_write_u8(buf, i, band(i, 255));

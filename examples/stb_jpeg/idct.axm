@@ -66,7 +66,7 @@ fn clamp_u8(x: i32) -> i32 {
 // Operates on 8 values in a column (stride 8) of the coefficient buffer.
 // Results are written back with 10-bit descale.
 // ---------------------------------------------------------------------------
-@inline(always)
+@pure @inline(always)
 fn idct_col(data: ptr[i32], col: i32) {
     // Load 8 column values
     let s0: i32 = ptr_read_i32(data, col + 0);
@@ -166,7 +166,7 @@ fn idct_col(data: ptr[i32], col: i32) {
 // Operates on 8 values in a row, descales by 17 bits and clamps to [0,255]
 // Output written to u8 output buffer.
 // ---------------------------------------------------------------------------
-@inline(always)
+@pure @inline(always)
 fn idct_row(data: ptr[i32], row: i32, out: ptr[i32], out_row: i32) {
     let base: i32 = row * 8;
     let s0: i32 = ptr_read_i32(data, base + 0);

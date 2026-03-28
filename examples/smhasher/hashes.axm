@@ -70,7 +70,7 @@ fn murmur3_fmix32(h_in: i32) -> i32 {
     return h;
 }
 
-@pure
+@pure @inline(always)
 fn murmur3_x86_32(data: ptr[i32], len: i32, seed: i32) -> i32 {
     let h: i32 = seed;
     let nblocks: i32 = len / 4;
@@ -121,7 +121,7 @@ fn murmur3_x86_32(data: ptr[i32], len: i32, seed: i32) -> i32 {
 @const fn FNV_OFFSET() -> i32 { return 0 - 2128831035; }  // 0x811c9dc5
 @const fn FNV_PRIME() -> i32 { return 16777619; }          // 0x01000193
 
-@pure
+@pure @inline(always)
 fn fnv1a_32(data: ptr[i32], len: i32) -> i32 {
     let h: i32 = FNV_OFFSET();
     for i: i32 in range(0, len) {
@@ -169,7 +169,7 @@ fn wyr3(data: ptr[i32], offset: i32, len: i32) -> i64 {
     return bor(bor(shl(a, 16), shl(b, 8)), c);
 }
 
-@pure
+@pure @inline(always)
 fn wyhash(data: ptr[i32], len: i32, seed: i64) -> i64 {
     let s: i64 = seed;
     let p: i32 = 0;
@@ -248,7 +248,7 @@ fn city_mur(a_in: i32, h_in: i32) -> i32 {
     return h;
 }
 
-@pure
+@pure @inline(always)
 fn cityhash32(data: ptr[i32], len: i32) -> i32 {
     if len <= 4 {
         // Short input: hash bytes directly
